@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PBL4 Mail Client</title>
+    <!-- FontAwesome Icon CDN -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body class="app-body">
+    <!-- Header Trên Cùng -->
+    <header class="app-header">
+        <div class="logo-area">
+            <i class="fa-solid fa-paper-plane logo-icon"></i>
+            <span class="logo-text">PBL4 MailServer</span>
+        </div>
+        <div class="user-area">
+            <i class="fa-solid fa-circle-user"></i>
+            <span id="current-user-email">user@pbl4.com</span>
+            <button id="logout-btn" class="btn btn-outline" onclick="logout()">
+                <i class="fa-solid fa-right-from-bracket"></i> Đăng xuất
+            </button>
+        </div>
+    </header>
+
+    <!-- Khung Bố Cục Chính 3 Cột -->
+    <div class="app-container">
+        <!-- Cột 1: Navigation Sidebar -->
+        <aside class="sidebar">
+            <button class="btn btn-compose" onclick="openComposeModal()">
+                <i class="fa-solid fa-pen-to-square"></i> Soạn thư mới
+            </button>
+
+            <nav class="nav-menu">
+                <a href="#" id="nav-inbox" class="nav-item active" onclick="loadInbox(event)">
+                    <i class="fa-solid fa-inbox"></i> Hộp thư đến
+                </a>
+                <a href="#" id="nav-sent" class="nav-item" onclick="loadSentMail(event)">
+                    <i class="fa-solid fa-paper-plane"></i> Thư đã gửi
+                </a>
+            </nav>
+        </aside>
+
+        <!-- Cột 2: Danh Sách Email -->
+        <section class="email-list-panel">
+            <div class="panel-header">
+                <h3 id="box-title">Hộp thư đến</h3>
+                <button class="btn-refresh" onclick="refreshMails()" title="Làm mới">
+                    <i class="fa-solid fa-rotate-right"></i>
+                </button>
+            </div>
+            <div id="email-list" class="email-list">
+                <!-- Data mẫu / Động từ JS -->
+                <div class="email-item unread" onclick="selectEmail(1, this)">
+                    <div class="email-sender">admin@pbl4.com</div>
+                    <div class="email-subject">Chào mừng bạn đến với PBL4 Mail</div>
+                    <div class="email-date">10:30 AM</div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Cột 3: Chi Tiết Thư Chọn Xem -->
+        <main class="email-detail-panel">
+            <div id="no-email-selected" class="empty-state">
+                <i class="fa-regular fa-envelope-open empty-icon"></i>
+                <p>Chọn một email ở danh sách bên trái để đọc nội dung</p>
+            </div>
+
+            <div id="email-detail" class="email-detail hidden">
+                <div class="detail-header">
+                    <h2 id="detail-subject">Tiêu đề email ở đây</h2>
+                    <div class="detail-meta">
+                        <p><i class="fa-solid fa-user-tag"></i> <strong>Từ:</strong> <span id="detail-sender">admin@pbl4.com</span></p>
+                        <p><i class="fa-solid fa-paper-plane"></i> <strong>Tới:</strong> <span id="detail-receiver">user@pbl4.com</span></p>
+                        <p><i class="fa-regular fa-clock"></i> <strong>Thời gian:</strong> <span id="detail-time">2026-09-15 10:30:00</span></p>
+                    </div>
+                </div>
+                <hr class="divider">
+                <div id="detail-body" class="detail-body">
+                    Nội dung chi tiết của thư sau khi giải mã AES-256 sẽ hiển thị tại đây.
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- MODAL SOẠN THƯ (Popup) -->
+    <div id="compose-modal" class="compose-modal hidden">
+        <div class="compose-header">
+            <span><i class="fa-solid fa-envelope-circle-check"></i> Thư mới</span>
+            <button class="btn-close" onclick="closeComposeModal()">&times;</button>
+        </div>
+        <form id="compose-form" class="compose-form" onsubmit="handleSendMail(event)">
+            <div class="compose-input-group">
+                <input type="email" id="compose-to" placeholder="Người nhận (nguoinhan@pbl4.com)" required>
+            </div>
+            <div class="compose-input-group">
+                <input type="text" id="compose-subject" placeholder="Chủ đề" required>
+            </div>
+            <div class="compose-input-group">
+                <textarea id="compose-body" placeholder="Nội dung thư..." rows="10" required></textarea>
+            </div>
+            <div class="compose-footer">
+                <button type="button" class="btn btn-secondary" onclick="closeComposeModal()">Hủy</button>
+                <button type="submit" class="btn btn-primary">
+                    <i class="fa-solid fa-paper-plane"></i> Gửi thư
+                </button>
+            </div>
+        </form>
+    </div>
+
+    <script src="js/app.js"></script>
+</body>
+</html>

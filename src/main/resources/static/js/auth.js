@@ -1,4 +1,3 @@
-// Chuyển đổi qua lại giữa Tab Đăng nhập và Đăng ký
 function switchTab(tab) {
     const loginForm = document.getElementById('login-form');
     const registerForm = document.getElementById('register-form');
@@ -18,16 +17,56 @@ function switchTab(tab) {
     }
 }
 
-// Xử lý sự kiện Submit Form Đăng nhập (Tạm thời giả lập chuyển trang)
-function handleLogin(event) {
+// Gọi API Đăng nhập thực tế
+async function handleLogin(event) {
     event.preventDefault();
-    // Sau này sẽ gọi API kiểm tra mật khẩu ở đây
-    window.location.href = 'main.html';
+    const username = document.getElementById('login-username').value;
+    const password = document.getElementById('login-password').value;
+
+    try {
+        const response = await fetch('/api/auth/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: `username=${encodeURIComponent(username)}&password=${encodeURIComponent(password)}`
+        });
+
+        const data = await response.json();
+        if (data.success) {
+            localStorage.setItem('currentUser', data.username);
+            window.location.href = 'main.html';
+        } else {
+            alert(data.message);
+        }
+    } catch (err) {
+        alert('Lỗi kết nối tới Server!');
+    }
 }
 
-// Xử lý sự kiện Submit Form Đăng ký
-function handleRegister(event) {
+// Gọi API Đăng ký thực tế
+async function handleRegister(event) {
     event.preventDefault();
-    alert('Đăng ký thành công! Hãy đăng nhập.');
-    switchTab('login');
+    const username = document.getElementById('reg-username').value;
+    const password = document.getElementById('reg-password').value;
+    const confirm = document.getElementById('reg-confirm').value;
+
+    if (password !== confirm) {
+        alert('Mật khẩu xác nhận không khớp!');
+        return;
+    }
+
+    try {
+        const response = await fetch('/api/auth/register', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: `username=${encodeURIComponent(username)}&password=${encodeURIComponent(password)}`
+        });
+
+        const data = await response.json();
+        alert(data.message);
+        if (data.success) {
+            switchTab('login');
+        }
+    } catch (err) {
+        alert('Lỗi kết nối tới Server!');
+    }
 }

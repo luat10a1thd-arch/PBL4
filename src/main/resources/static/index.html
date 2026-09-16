@@ -7,6 +7,50 @@
     <!-- FontAwesome Icon CDN -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <link rel="stylesheet" href="css/style.css">
+    <style>
+        /* CSS cho Toast Notification ở trang Auth */
+        #toast-container {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            z-index: 9999;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        .toast {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            min-width: 280px;
+            padding: 12px 18px;
+            background: #ffffff;
+            border-radius: 10px;
+            box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.1), 0 8px 10px -6px rgba(0, 0, 0, 0.1);
+            border-left: 4px solid #10b981;
+            transform: translateX(120%);
+            transition: transform 0.3s cubic-bezier(0.68, -0.55, 0.265, 1.55);
+            font-family: system-ui, -apple-system, sans-serif;
+        }
+        .toast.show {
+            transform: translateX(0);
+        }
+        .toast.error {
+            border-left-color: #ef4444;
+        }
+        .toast-icon {
+            font-size: 18px;
+            color: #10b981;
+        }
+        .toast.error .toast-icon {
+            color: #ef4444;
+        }
+        .toast-message {
+            font-size: 14px;
+            font-weight: 500;
+            color: #1e293b;
+        }
+    </style>
 </head>
 <body class="auth-body">
     <div class="auth-card">
@@ -78,6 +122,9 @@
 
         <div id="auth-message" class="alert-message hidden"></div>
     </div>
+
+    <!-- KHUNG CHỨA TOAST THÔNG BÁO -->
+    <div id="toast-container"></div>
 
     <script src="js/auth.js"></script>
 </body>

@@ -263,12 +263,14 @@
 .nav-item:hover { background: #e2e8f0; color: var(--text-main); }
 .nav-item.active { background: var(--primary-light); color: var(--primary-color); }
 
-/* Email List Panel */
+/* Email List Panel - ĐÃ BỔ SUNG THANH CUỘN DỌC DỰ PHÒNG KHI ĐẦY THƯ */
 .email-list-panel {
     background: var(--surface-bg);
     border-right: 1px solid var(--border-color);
     display: flex;
     flex-direction: column;
+    height: 100%;
+    overflow: hidden;
 }
 
 .panel-header {
@@ -294,7 +296,21 @@
 
 .email-list {
     flex: 1;
-    overflow-y: auto;
+    overflow-y: auto; /* Tự động hiển thị thanh cuộn dọc khi vượt quá chiều cao khung */
+    max-height: calc(100vh - 128px);
+}
+
+.email-list::-webkit-scrollbar {
+    width: 6px;
+}
+
+.email-list::-webkit-scrollbar-thumb {
+    background: #cbd5e1;
+    border-radius: 4px;
+}
+
+.email-list::-webkit-scrollbar-thumb:hover {
+    background: #94a3b8;
 }
 
 .email-item {

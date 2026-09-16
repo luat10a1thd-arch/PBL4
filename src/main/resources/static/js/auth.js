@@ -1,3 +1,33 @@
+// Hàm hiển thị Toast Notification chuyên nghiệp
+function showToast(message, type = 'success') {
+    const container = document.getElementById('toast-container');
+    if (!container) return;
+
+    const toast = document.createElement('div');
+    toast.className = `toast ${type}`;
+    
+    const iconClass = type === 'success' ? 'fa-circle-check' : 'fa-circle-exclamation';
+    
+    toast.innerHTML = `
+        <i class="fa-solid ${iconClass} toast-icon"></i>
+        <span class="toast-message">${escapeHtml(message)}</span>
+    `;
+
+    container.appendChild(toast);
+
+    setTimeout(() => toast.classList.add('show'), 10);
+
+    setTimeout(() => {
+        toast.classList.remove('show');
+        setTimeout(() => toast.remove(), 300);
+    }, 3000);
+}
+
+function escapeHtml(text) {
+    if (!text) return '';
+    return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
 function switchTab(tab) {
     const loginForm = document.getElementById('login-form');
     const registerForm = document.getElementById('register-form');
@@ -33,13 +63,12 @@ async function handleLogin(event) {
         const data = await response.json();
         if (data.success) {
             localStorage.setItem('currentUser', data.username);
-            // Chuyển hướng tới Clean URL /main
             window.location.href = '/main';
         } else {
-            alert(data.message);
+            showToast(data.message || 'Sai tài khoản hoặc mật khẩu!', 'error');
         }
     } catch (err) {
-        alert('Lỗi kết nối tới Server!');
+        showToast('Lỗi kết nối tới Server!', 'error');
     }
 }
 
@@ -51,7 +80,7 @@ async function handleRegister(event) {
     const confirm = document.getElementById('reg-confirm').value;
 
     if (password !== confirm) {
-        alert('Mật khẩu xác nhận không khớp!');
+        showToast('Mật khẩu xác nhận không khớp!', 'error');
         return;
     }
 
@@ -63,11 +92,15 @@ async function handleRegister(event) {
         });
 
         const data = await response.json();
-        alert(data.message);
+        
         if (data.success) {
+            showToast(data.message || 'Đăng ký tài khoản thành công!', 'success');
+            document.getElementById('register-form').reset();
             switchTab('login');
+        } else {
+            showToast(data.message || 'Đăng ký thất bại!', 'error');
         }
     } catch (err) {
-        alert('Lỗi kết nối tới Server!');
+        showToast('Lỗi kết nối tới Server!', 'error');
     }
 }

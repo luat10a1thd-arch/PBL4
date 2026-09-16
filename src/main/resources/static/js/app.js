@@ -1,34 +1,119 @@
-// Tự động chạy khi giao diện main.html được tải xong
+let selectedFiles = [];
+
 document.addEventListener('DOMContentLoaded', () => {
-    // 1. Lấy thông tin tài khoản đang đăng nhập từ LocalStorage
     const currentUser = localStorage.getItem('currentUser');
 
-    // Nếu chưa đăng nhập mà cố tình truy cập /main -> Đá về trang đăng nhập /
     if (!currentUser) {
         window.location.href = '/';
         return;
     }
 
-    // 2. Hiển thị email người dùng lên góc phải Header
     const userEmailSpan = document.getElementById('current-user-email');
     if (userEmailSpan) {
         userEmailSpan.textContent = currentUser;
     }
 
-    // 3. Tải danh sách email của chính tài khoản này
     loadInbox();
 });
 
-// Đóng / Mở Modal Soạn Thư
+// Hàm hiển thị Toast Notification tùy chỉnh đẹp mắt
+function showToast(message, type = 'success') {
+    const container = document.getElementById('toast-container');
+    if (!container) return;
+
+    const toast = document.createElement('div');
+    toast.className = `toast ${type}`;
+    
+    const iconClass = type === 'success' ? 'fa-circle-check' : 'fa-circle-exclamation';
+    
+    toast.innerHTML = `
+        <i class="fa-solid ${iconClass} toast-icon"></i>
+        <span class="toast-message">${escapeHtml(message)}</span>
+    `;
+
+    container.appendChild(toast);
+
+    setTimeout(() => toast.classList.add('show'), 10);
+
+    setTimeout(() => {
+        toast.classList.remove('show');
+        setTimeout(() => toast.remove(), 300);
+    }, 3000);
+}
+
 function openComposeModal() {
     document.getElementById('compose-modal').classList.remove('hidden');
 }
 
 function closeComposeModal() {
     document.getElementById('compose-modal').classList.add('hidden');
+    resetComposeForm();
 }
 
-// Xử lý đọc File đính kèm thành chuỗi Base64
+function resetComposeForm() {
+    document.getElementById('compose-form').reset();
+    selectedFiles = [];
+    renderFilePreview();
+}
+
+function handleFileSelect(event) {
+    const files = Array.from(event.target.files);
+    files.forEach(file => {
+        const isDuplicate = selectedFiles.some(f => f.name === file.name && f.size === file.size);
+        if (!isDuplicate) {
+            selectedFiles.push(file);
+        }
+    });
+    event.target.value = '';
+    renderFilePreview();
+}
+
+function removeFile(index) {
+    selectedFiles.splice(index, 1);
+    renderFilePreview();
+}
+
+function renderFilePreview() {
+    const previewContainer = document.getElementById('file-preview-list');
+    if (!previewContainer) return;
+
+    previewContainer.innerHTML = '';
+    if (selectedFiles.length === 0) return;
+
+    selectedFiles.forEach((file, index) => {
+        const fileChip = document.createElement('div');
+        fileChip.style.cssText = `
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            background: #e2e8f0;
+            border: 1px solid #cbd5e1;
+            padding: 4px 10px;
+            border-radius: 16px;
+            font-size: 12px;
+            color: #1e293b;
+            font-weight: 500;
+        `;
+
+        fileChip.innerHTML = `
+            <i class="fa-solid fa-file" style="color: #2563eb;"></i>
+            <span>${escapeHtml(file.name)}</span>
+            <span style="color: #64748b; font-size: 11px;">(${formatFileSize(file.size)})</span>
+            <i class="fa-solid fa-xmark" style="cursor: pointer; color: #ef4444; margin-left: 4px; font-size: 14px;" onclick="removeFile(${index})" title="Xóa file này"></i>
+        `;
+
+        previewContainer.appendChild(fileChip);
+    });
+}
+
+function formatFileSize(bytes) {
+    if (bytes === 0) return '0 B';
+    const k = 1024;
+    const sizes = ['B', 'KB', 'MB', 'GB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+}
+
 function convertFileToBase64(file) {
     return new Promise((resolve, reject) => {
         const reader = new FileReader();
@@ -38,26 +123,25 @@ function convertFileToBase64(file) {
     });
 }
 
-// Xử lý gửi thư từ Modal (Có hỗ trợ File đính kèm)
 async function handleSendMail(event) {
     event.preventDefault();
     const currentUser = localStorage.getItem('currentUser');
     const to = document.getElementById('compose-to').value;
     const subject = document.getElementById('compose-subject').value;
     const bodyText = document.getElementById('compose-body').value;
-    const fileInput = document.getElementById('compose-file');
 
     let attachmentData = '';
 
-    // Nếu người dùng chọn file -> Chuyển thành Base64
-    if (fileInput && fileInput.files.length > 0) {
-        const file = fileInput.files[0];
-        try {
-            const base64 = await convertFileToBase64(file);
-            attachmentData = `\n[ATTACHMENT:${file.name}]${base64}[/ATTACHMENT]`;
-        } catch (err) {
-            alert('Lỗi đọc file đính kèm!');
-            return;
+    if (selectedFiles.length > 0) {
+        for (let i = 0; i < selectedFiles.length; i++) {
+            const file = selectedFiles[i];
+            try {
+                const base64 = await convertFileToBase64(file);
+                attachmentData += `\n[ATTACHMENT:${file.name}]${base64}[/ATTACHMENT]`;
+            } catch (err) {
+                showToast(`Lỗi đọc file: ${file.name}`, 'error');
+                return;
+            }
         }
     }
 
@@ -71,19 +155,19 @@ async function handleSendMail(event) {
         });
 
         const data = await response.json();
-        alert(data.message);
+        
         if (data.success) {
             closeComposeModal();
-            // Reset form soạn thư
-            document.getElementById('compose-form').reset();
+            showToast(data.message || 'Gửi thư thành công!', 'success');
             loadInbox();
+        } else {
+            showToast(data.message || 'Gửi thư thất bại!', 'error');
         }
     } catch (err) {
-        alert('Gửi thư thất bại, lỗi kết nối Server!');
+        showToast('Gửi thư thất bại, lỗi kết nối Server!', 'error');
     }
 }
 
-// Tải danh sách Hộp Thư Đến
 async function loadInbox(event) {
     if (event) event.preventDefault();
     updateActiveNav('nav-inbox', 'Hộp thư đến');
@@ -98,7 +182,6 @@ async function loadInbox(event) {
     }
 }
 
-// Tải danh sách Thư Đã Gửi
 async function loadSentMail(event) {
     if (event) event.preventDefault();
     updateActiveNav('nav-sent', 'Thư đã gửi');
@@ -113,7 +196,7 @@ async function loadSentMail(event) {
     }
 }
 
-// Hiển thị danh sách email lên cột giữa (Column 2)
+// Hiển thị danh sách email (ĐÃ ĐẢO MẢNG: THƯ MỚI NHẤT NHẢY LÊN ĐẦU DANH SÁCH)
 function renderEmailList(mails) {
     const emailListDiv = document.getElementById('email-list');
     emailListDiv.innerHTML = '';
@@ -123,21 +206,23 @@ function renderEmailList(mails) {
         return;
     }
 
-    mails.forEach(mail => {
+    // Đảo mảng để đẩy email mới gửi lên vị trí đầu tiên
+    const sortedMails = [...mails].reverse();
+
+    sortedMails.forEach(mail => {
         const item = document.createElement('div');
         item.className = 'email-item';
         item.onclick = () => selectEmail(mail, item);
 
         item.innerHTML = `
-            <div class="email-sender">${mail.sender}</div>
-            <div class="email-subject">${mail.subject}</div>
+            <div class="email-sender">${escapeHtml(mail.sender)}</div>
+            <div class="email-subject">${escapeHtml(mail.subject)}</div>
             <div class="email-date">${mail.timestamp || ''}</div>
         `;
         emailListDiv.appendChild(item);
     });
 }
 
-// Chọn email để xem chi tiết ở cột 3 (Hiển thị cả nút tải File đính kèm nếu có)
 function selectEmail(mail, element) {
     document.querySelectorAll('.email-item').forEach(item => item.classList.remove('active'));
     element.classList.add('active');
@@ -153,37 +238,43 @@ function selectEmail(mail, element) {
     const detailBodyElem = document.getElementById('detail-body');
     let bodyText = mail.body || '';
 
-    // Kiểm tra xem email có chứa dữ liệu file đính kèm hay không
     if (bodyText.includes('[ATTACHMENT:')) {
         const parts = bodyText.split('[ATTACHMENT:');
         const textContent = parts[0];
-        const attachParts = parts[1].split(']');
-        const fileName = attachParts[0];
-        const base64Data = attachParts[1].replace('[/ATTACHMENT]', '').trim();
+        let attachmentsHTML = '';
+
+        for (let i = 1; i < parts.length; i++) {
+            const attachParts = parts[i].split(']');
+            const fileName = attachParts[0];
+            const base64Data = attachParts[1].replace('[/ATTACHMENT]', '').trim();
+
+            attachmentsHTML += `
+                <div style="margin-top: 10px; padding: 10px 14px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; display: inline-block; margin-right: 10px;">
+                    <div style="font-weight: 600; color: #334155; font-size: 13px; margin-bottom: 4px;">
+                        <i class="fa-solid fa-paperclip"></i> ${escapeHtml(fileName)}
+                    </div>
+                    <a href="${base64Data}" download="${escapeHtml(fileName)}" class="btn btn-outline" style="font-size: 11px; padding: 3px 8px; text-decoration: none; color: #2563eb; display: inline-flex; align-items: center; gap: 4px;">
+                        <i class="fa-solid fa-download"></i> Tải về
+                    </a>
+                </div>`;
+        }
 
         detailBodyElem.innerHTML = `
             <div style="white-space: pre-wrap;">${escapeHtml(textContent)}</div>
-            <div style="margin-top: 25px; padding: 12px 16px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; display: inline-block;">
-                <div style="font-weight: 600; color: #334155; margin-bottom: 6px;">
-                    <i class="fa-solid fa-paperclip"></i> File đính kèm: ${escapeHtml(fileName)}
-                </div>
-                <a href="${base64Data}" download="${escapeHtml(fileName)}" class="btn btn-outline" style="font-size: 12px; padding: 4px 10px; text-decoration: none; color: #2563eb; display: inline-flex; align-items: center; gap: 5px;">
-                    <i class="fa-solid fa-download"></i> Tải về file
-                </a>
-            </div>
-        `;
+            <div style="margin-top: 25px; border-top: 1px dashed #cbd5e1; padding-top: 15px;">
+                <strong style="color: #475569; font-size: 13px;">📎 Danh sách file đính kèm:</strong><br/>
+                <div style="margin-top: 8px;">${attachmentsHTML}</div>
+            </div>`;
     } else {
         detailBodyElem.textContent = bodyText;
     }
 }
 
-// Tránh lỗi XSS cho nội dung HTML
 function escapeHtml(text) {
     if (!text) return '';
     return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-// Đổi trạng thái tab trên Sidebar
 function updateActiveNav(activeId, title) {
     document.querySelectorAll('.nav-item').forEach(nav => nav.classList.remove('active'));
     const activeNav = document.getElementById(activeId);
@@ -197,7 +288,6 @@ function refreshMails() {
     loadInbox();
 }
 
-// Đăng xuất: Xóa session tài khoản khỏi LocalStorage và chuyển về trang đăng nhập
 function logout() {
     localStorage.removeItem('currentUser');
     window.location.href = '/';

@@ -25,9 +25,9 @@ public class ApiServer {
             // 1. Phục vụ các file giao diện tĩnh (Static Files: HTML, CSS, JS)
             server.createContext("/", new StaticFileHandler());
 
-            // 2. Đăng ký các cổng API xử lý Đăng nhập, Đăng ký, Gửi/Nhận mail (Sẽ hoàn thiện ở các handler)
-             server.createContext("/api/auth", new AuthHandler());
-             server.createContext("/api/mails", new MailHandler());
+            // 2. Đăng ký các cổng API xử lý Đăng nhập, Đăng ký, Gửi/Nhận mail
+            server.createContext("/api/auth", new AuthHandler());
+            server.createContext("/api/mails", new MailHandler());
 
             server.setExecutor(null); // Sử dụng default executor
             server.start();
@@ -46,8 +46,12 @@ public class ApiServer {
         public void handle(HttpExchange exchange) throws IOException {
             String path = exchange.getRequestURI().getPath();
             
-            // Nếu truy cập trang chủ "/", tự động chuyển hướng về index.html
+            // Xử lý Clean URL: Tự động ánh xạ route chuẩn
             if (path.equals("/")) {
+                path = "/index.html";
+            } else if (path.equals("/main")) {
+                path = "/main.html";
+            } else if (path.equals("/index")) {
                 path = "/index.html";
             }
 

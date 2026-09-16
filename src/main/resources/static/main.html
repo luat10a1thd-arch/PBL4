@@ -98,7 +98,14 @@
                 <input type="text" id="compose-subject" placeholder="Chủ đề" required>
             </div>
             <div class="compose-input-group">
-                <textarea id="compose-body" placeholder="Nội dung thư..." rows="10" required></textarea>
+                <textarea id="compose-body" placeholder="Nội dung thư..." rows="8" required></textarea>
+            </div>
+            <!-- Ô đính kèm File -->
+            <div class="compose-input-group" style="margin-top: 10px;">
+                <label for="compose-file" style="font-size: 13px; color: #64748b; font-weight: 600;">
+                    <i class="fa-solid fa-paperclip"></i> File đính kèm:
+                </label>
+                <input type="file" id="compose-file" style="margin-top: 5px; font-size: 13px;">
             </div>
             <div class="compose-footer">
                 <button type="button" class="btn btn-secondary" onclick="closeComposeModal()">Hủy</button>

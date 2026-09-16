@@ -33,7 +33,8 @@ async function handleLogin(event) {
         const data = await response.json();
         if (data.success) {
             localStorage.setItem('currentUser', data.username);
-            window.location.href = 'main.html';
+            // Chuyển hướng tới Clean URL /main
+            window.location.href = '/main';
         } else {
             alert(data.message);
         }

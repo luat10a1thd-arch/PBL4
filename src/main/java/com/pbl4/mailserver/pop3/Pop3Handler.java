@@ -2,10 +2,9 @@ package com.pbl4.mailserver.pop3;
 
 import com.pbl4.mailserver.core.MailStorageEngine;
 import com.pbl4.mailserver.core.SecurityUtils;
+import com.pbl4.mailserver.core.UserStore;
 
 import java.io.BufferedReader;
-import java.io.File;
-import java.io.FileReader;
 import java.io.InputStreamReader;
 import java.io.PrintWriter;
 import java.net.Socket;
@@ -13,13 +12,9 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 
-/**
- * Xử lý phiên làm việc POP3 Server qua cổng Socket 1110.
- */
 public class Pop3Handler implements Runnable {
 
     private final Socket clientSocket;
-    private static final String USERS_FILE = "data/users.json";
 
     public Pop3Handler(Socket socket) {
         this.clientSocket = socket;
@@ -52,11 +47,16 @@ public class Pop3Handler implements Runnable {
                         out.println("-ERR USER command required first");
                         continue;
                     }
-                    
-                    // Xác thực BCrypt mật khẩu từ users.json
-                    String storedHash = findUserHash(currentUser);
+
+                    // Nếu là mailbox "_sent", lấy username gốc để đối soát passwordHash
+                    String authCheckUser = currentUser.endsWith("_sent")
+                            ? currentUser.substring(0, currentUser.length() - 5)
+                            : currentUser;
+
+                    String storedHash = UserStore.findHash(authCheckUser);
                     if (storedHash != null && SecurityUtils.checkPassword(argument, storedHash)) {
                         isAuthenticated = true;
+                        // Đọc đúng hòm thư được yêu cầu (inbox hoặc _sent)
                         emails = MailStorageEngine.readAllEmails(currentUser);
                         out.println("+OK Logged in successfully");
                     } else {
@@ -114,25 +114,5 @@ public class Pop3Handler implements Runnable {
                 clientSocket.close();
             } catch (Exception ignored) {}
         }
-    }
-
-    private String findUserHash(String username) {
-        File file = new File(USERS_FILE);
-        if (!file.exists()) return null;
-
-        try (BufferedReader reader = new BufferedReader(new FileReader(file))) {
-            String l;
-            while ((l = reader.readLine()) != null) {
-                if (l.contains("\"username\": \"" + username + "\"")) {
-                    String nextLine = reader.readLine();
-                    if (nextLine != null && nextLine.contains("passwordHash")) {
-                        return nextLine.split(":")[1].replace("\"", "").replace("}", "").trim();
-                    }
-                }
-            }
-        } catch (Exception e) {
-            e.printStackTrace();
-        }
-        return null;
     }
 }

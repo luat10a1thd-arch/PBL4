@@ -2,8 +2,10 @@ let selectedFiles = [];
 
 document.addEventListener('DOMContentLoaded', () => {
     const currentUser = localStorage.getItem('currentUser');
+    const token = localStorage.getItem('authToken');
 
-    if (!currentUser) {
+    // Kiểm tra nếu chưa đăng nhập hoặc thiếu token thì đẩy về trang login
+    if (!currentUser || !token) {
         window.location.href = '/';
         return;
     }
@@ -123,9 +125,10 @@ function convertFileToBase64(file) {
     });
 }
 
+// 1. GỬI THƯ MỚI (ĐÃ CẬP NHẬT HEADER AUTHORIZATION, BỎ DÒNG GỬI "from")
 async function handleSendMail(event) {
     event.preventDefault();
-    const currentUser = localStorage.getItem('currentUser');
+    const token = localStorage.getItem('authToken');
     const to = document.getElementById('compose-to').value;
     const subject = document.getElementById('compose-subject').value;
     const bodyText = document.getElementById('compose-body').value;
@@ -150,8 +153,12 @@ async function handleSendMail(event) {
     try {
         const response = await fetch('/api/mails/send', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-            body: `from=${encodeURIComponent(currentUser)}&to=${encodeURIComponent(to)}&subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(fullContent)}`
+            headers: { 
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'Authorization': 'Bearer ' + token
+            },
+            // Chỉ gửi to, subject, body; KHÔNG gửi from
+            body: `to=${encodeURIComponent(to)}&subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(fullContent)}`
         });
 
         const data = await response.json();
@@ -168,13 +175,25 @@ async function handleSendMail(event) {
     }
 }
 
+// 2. TẢI HỘP THƯ ĐẾN (ĐÃ CẬP NHẬT HEADER AUTHORIZATION, BỎ QUERY STRING ?user=)
 async function loadInbox(event) {
     if (event) event.preventDefault();
     updateActiveNav('nav-inbox', 'Hộp thư đến');
 
-    const currentUser = localStorage.getItem('currentUser');
+    const token = localStorage.getItem('authToken');
     try {
-        const response = await fetch(`/api/mails/inbox?user=${encodeURIComponent(currentUser)}`);
+        const response = await fetch('/api/mails/inbox', {
+            method: 'GET',
+            headers: {
+                'Authorization': 'Bearer ' + token
+            }
+        });
+
+        if (response.status === 401) {
+            logout();
+            return;
+        }
+
         const mails = await response.json();
         renderEmailList(mails);
     } catch (err) {
@@ -182,13 +201,25 @@ async function loadInbox(event) {
     }
 }
 
+// 3. TẢI THƯ ĐÃ GỬI (ĐÃ CẬP NHẬT HEADER AUTHORIZATION, BỎ QUERY STRING ?user=)
 async function loadSentMail(event) {
     if (event) event.preventDefault();
     updateActiveNav('nav-sent', 'Thư đã gửi');
 
-    const currentUser = localStorage.getItem('currentUser');
+    const token = localStorage.getItem('authToken');
     try {
-        const response = await fetch(`/api/mails/sent?user=${encodeURIComponent(currentUser)}`);
+        const response = await fetch('/api/mails/sent', {
+            method: 'GET',
+            headers: {
+                'Authorization': 'Bearer ' + token
+            }
+        });
+
+        if (response.status === 401) {
+            logout();
+            return;
+        }
+
         const mails = await response.json();
         renderEmailList(mails);
     } catch (err) {
@@ -196,7 +227,7 @@ async function loadSentMail(event) {
     }
 }
 
-// Hiển thị danh sách email (ĐÃ ĐẢO MẢNG: THƯ MỚI NHẤT NHẢY LÊN ĐẦU DANH SÁCH)
+// Hiển thị danh sách email
 function renderEmailList(mails) {
     const emailListDiv = document.getElementById('email-list');
     emailListDiv.innerHTML = '';
@@ -206,7 +237,6 @@ function renderEmailList(mails) {
         return;
     }
 
-    // Đảo mảng để đẩy email mới gửi lên vị trí đầu tiên
     const sortedMails = [...mails].reverse();
 
     sortedMails.forEach(mail => {
@@ -290,5 +320,6 @@ function refreshMails() {
 
 function logout() {
     localStorage.removeItem('currentUser');
+    localStorage.removeItem('authToken');
     window.location.href = '/';
 }

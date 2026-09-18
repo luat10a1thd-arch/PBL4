@@ -47,7 +47,7 @@ function switchTab(tab) {
     }
 }
 
-// Gọi API Đăng nhập thực tế
+// Gọi API Đăng nhập thực tế (ĐÃ CẬP NHẬT LƯU AUTH TOKEN)
 async function handleLogin(event) {
     event.preventDefault();
     const username = document.getElementById('login-username').value;
@@ -62,7 +62,9 @@ async function handleLogin(event) {
 
         const data = await response.json();
         if (data.success) {
+            // Lưu username và session token vào LocalStorage
             localStorage.setItem('currentUser', data.username);
+            localStorage.setItem('authToken', data.token); // Đã thêm token bảo mật
             window.location.href = '/main';
         } else {
             showToast(data.message || 'Sai tài khoản hoặc mật khẩu!', 'error');

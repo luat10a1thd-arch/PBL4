@@ -5,29 +5,23 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
-/**
- * Động cơ lưu trữ email dạng Flat-File mã hóa AES-256[cite: 1].
- * Sử dụng ReentrantReadWriteLock để quản lý đồng bộ đa luồng[cite: 1].
- */
 public class MailStorageEngine {
 
     private static final String BASE_DATA_DIR = "data/mailboxes/";
-    private static final String SECRET_KEY = "PBL4_STORAGE_SECRET_KEY";
+    private static final String SECRET_KEY = System.getenv().getOrDefault(
+            "PBL4_SECRET_KEY", "dev-only-fallback-key-DO-NOT-USE-IN-PRODUCTION");
 
-    // Quản lý Lock theo từng user để tối ưu hiệu năng[cite: 1]
     private static final ConcurrentHashMap<String, ReentrantReadWriteLock> userLocks = new ConcurrentHashMap<>();
 
     private static ReentrantReadWriteLock getLockForUser(String username) {
         return userLocks.computeIfAbsent(username, k -> new ReentrantReadWriteLock());
     }
 
-    /**
-     * Khởi tạo thư mục chứa hòm thư nếu chưa tồn tại[cite: 1]
-     */
     public static void initMailbox(String username) {
         File dir = new File(BASE_DATA_DIR + username);
         if (!dir.exists()) {
@@ -35,16 +29,20 @@ public class MailStorageEngine {
         }
     }
 
-    /**
-     * GHI MAIL (Mã hóa và lưu xuống file .enc)[cite: 1]
-     */
     public static boolean saveEmail(String recipient, String rawEmailContent) {
         initMailbox(recipient);
         ReentrantReadWriteLock lock = getLockForUser(recipient);
-        lock.writeLock().lock(); // Khóa ghi[cite: 1]
+        lock.writeLock().lock();
         
         try {
-            String encryptedContent = SecurityUtils.encrypt(rawEmailContent, SECRET_KEY);
+            // Lấy salt thực tế của user từ UserStore, nếu chưa có thì dùng salt mặc định
+            String cleanUser = recipient.replace("_sent", "");
+            String base64Salt = UserStore.findSalt(cleanUser);
+            byte[] saltBytes = (base64Salt != null) 
+                    ? Base64.getDecoder().decode(base64Salt) 
+                    : "PBL4_DEFAULT_SALT".getBytes(StandardCharsets.UTF_8);
+
+            String encryptedContent = SecurityUtils.encrypt(rawEmailContent, SECRET_KEY, saltBytes);
             String fileName = "msg_" + System.currentTimeMillis() + ".enc";
             String filePath = BASE_DATA_DIR + recipient + "/" + fileName;
 
@@ -54,20 +52,23 @@ public class MailStorageEngine {
             e.printStackTrace();
             return false;
         } finally {
-            lock.writeLock().unlock(); // Giải phóng khóa ghi[cite: 1]
+            lock.writeLock().unlock();
         }
     }
 
-    /**
-     * ĐỌC TẤT CẢ MAIL (Giải mã toàn bộ thư của user)[cite: 1]
-     */
     public static List<String> readAllEmails(String username) {
         initMailbox(username);
         List<String> emails = new ArrayList<>();
         ReentrantReadWriteLock lock = getLockForUser(username);
-        lock.readLock().lock(); // Khóa đọc[cite: 1]
+        lock.readLock().lock();
 
         try {
+            String cleanUser = username.replace("_sent", "");
+            String base64Salt = UserStore.findSalt(cleanUser);
+            byte[] saltBytes = (base64Salt != null) 
+                    ? Base64.getDecoder().decode(base64Salt) 
+                    : "PBL4_DEFAULT_SALT".getBytes(StandardCharsets.UTF_8);
+
             File folder = new File(BASE_DATA_DIR + username);
             File[] files = folder.listFiles((dir, name) -> name.endsWith(".enc"));
 
@@ -75,14 +76,14 @@ public class MailStorageEngine {
                 for (File file : files) {
                     byte[] bytes = Files.readAllBytes(file.toPath());
                     String encryptedData = new String(bytes, StandardCharsets.UTF_8);
-                    String decryptedContent = SecurityUtils.decrypt(encryptedData, SECRET_KEY);
+                    String decryptedContent = SecurityUtils.decrypt(encryptedData, SECRET_KEY, saltBytes);
                     emails.add(decryptedContent);
                 }
             }
         } catch (Exception e) {
             e.printStackTrace();
         } finally {
-            lock.readLock().unlock(); // Giải phóng khóa đọc[cite: 1]
+            lock.readLock().unlock();
         }
 
         return emails;

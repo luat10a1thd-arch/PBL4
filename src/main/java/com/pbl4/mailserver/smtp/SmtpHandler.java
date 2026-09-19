@@ -90,18 +90,24 @@ public class SmtpHandler implements Runnable {
                         out.println("530 5.7.0 Authentication required");
                         continue;
                     }
-                    rcptTo = parseAddress(line);
+                    String candidate = parseAddress(line);
 
-                    // MỚI: Kiểm tra xem người nhận có tồn tại trên hệ thống hay không
-                    if (!UserStore.exists(rcptTo)) {
+                    // Tách biến candidate kiểm tra tồn tại trước khi gán rcptTo
+                    if (!UserStore.exists(candidate)) {
                         out.println("550 5.1.1 No such user here");
                     } else {
+                        rcptTo = candidate; // Chỉ gán khi người nhận hợp lệ
                         out.println("250 OK");
                     }
                 } 
                 else if (upperLine.startsWith("DATA")) {
                     if (!isAuthenticated) {
                         out.println("530 5.7.0 Authentication required");
+                        continue;
+                    }
+                    // Chặn nếu chưa có người nhận (RCPT TO) hợp lệ
+                    if (rcptTo == null || rcptTo.isEmpty()) {
+                        out.println("503 5.5.1 Need RCPT (recipient)");
                         continue;
                     }
                     isDataMode = true;

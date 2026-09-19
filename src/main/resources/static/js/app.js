@@ -4,7 +4,6 @@ document.addEventListener('DOMContentLoaded', () => {
     const currentUser = localStorage.getItem('currentUser');
     const token = localStorage.getItem('authToken');
 
-    // Kiểm tra nếu chưa đăng nhập hoặc thiếu token thì đẩy về trang login
     if (!currentUser || !token) {
         window.location.href = '/';
         return;
@@ -18,7 +17,6 @@ document.addEventListener('DOMContentLoaded', () => {
     loadInbox();
 });
 
-// Hàm hiển thị Toast Notification tùy chỉnh đẹp mắt
 function showToast(message, type = 'success') {
     const container = document.getElementById('toast-container');
     if (!container) return;
@@ -125,7 +123,6 @@ function convertFileToBase64(file) {
     });
 }
 
-// 1. GỬI THƯ MỚI (ĐÃ CẬP NHẬT HEADER AUTHORIZATION, BỎ DÒNG GỬI "from")
 async function handleSendMail(event) {
     event.preventDefault();
     const token = localStorage.getItem('authToken');
@@ -157,7 +154,6 @@ async function handleSendMail(event) {
                 'Content-Type': 'application/x-www-form-urlencoded',
                 'Authorization': 'Bearer ' + token
             },
-            // Chỉ gửi to, subject, body; KHÔNG gửi from
             body: `to=${encodeURIComponent(to)}&subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(fullContent)}`
         });
 
@@ -175,7 +171,6 @@ async function handleSendMail(event) {
     }
 }
 
-// 2. TẢI HỘP THƯ ĐẾN (ĐÃ CẬP NHẬT HEADER AUTHORIZATION, BỎ QUERY STRING ?user=)
 async function loadInbox(event) {
     if (event) event.preventDefault();
     updateActiveNav('nav-inbox', 'Hộp thư đến');
@@ -201,7 +196,6 @@ async function loadInbox(event) {
     }
 }
 
-// 3. TẢI THƯ ĐÃ GỬI (ĐÃ CẬP NHẬT HEADER AUTHORIZATION, BỎ QUERY STRING ?user=)
 async function loadSentMail(event) {
     if (event) event.preventDefault();
     updateActiveNav('nav-sent', 'Thư đã gửi');
@@ -227,7 +221,6 @@ async function loadSentMail(event) {
     }
 }
 
-// Hiển thị danh sách email
 function renderEmailList(mails) {
     const emailListDiv = document.getElementById('email-list');
     emailListDiv.innerHTML = '';
@@ -318,12 +311,7 @@ function refreshMails() {
     loadInbox();
 }
 
-function logout() {
-    localStorage.removeItem('currentUser');
-    localStorage.removeItem('authToken');
-    window.location.href = '/';
-}
-
+// DUY NHẤT 1 HÀM LOGOUT CHUẨN GỌI API ĐĂNG XUẤT
 async function logout() {
     const token = localStorage.getItem('authToken');
     try {

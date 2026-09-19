@@ -38,8 +38,6 @@ public class SmtpHandler implements Runnable {
                 if (isDataMode) {
                     if (".".equals(line)) {
                         isDataMode = false;
-                        
-                        // ĐỔI MỚI: Dùng đúng nội dung client gửi (bao gồm cả Subject nếu có)
                         String rawEmailContent = "From: " + mailFrom + "\nTo: " + rcptTo + "\n" + dataBuilder.toString();
 
                         boolean savedToRecipient = MailStorageEngine.saveEmail(rcptTo, rawEmailContent);
@@ -71,7 +69,6 @@ public class SmtpHandler implements Runnable {
                     if (encodedPass == null) break;
                     String decodedPass = new String(Base64.getDecoder().decode(encodedPass.trim()), StandardCharsets.UTF_8);
 
-                    // Dùng UserStore.findHash()
                     String storedHash = UserStore.findHash(decodedUser);
                     if (storedHash != null && SecurityUtils.checkPassword(decodedPass, storedHash)) {
                         isAuthenticated = true;
@@ -94,7 +91,13 @@ public class SmtpHandler implements Runnable {
                         continue;
                     }
                     rcptTo = parseAddress(line);
-                    out.println("250 OK");
+
+                    // MỚI: Kiểm tra xem người nhận có tồn tại trên hệ thống hay không
+                    if (!UserStore.exists(rcptTo)) {
+                        out.println("550 5.1.1 No such user here");
+                    } else {
+                        out.println("250 OK");
+                    }
                 } 
                 else if (upperLine.startsWith("DATA")) {
                     if (!isAuthenticated) {

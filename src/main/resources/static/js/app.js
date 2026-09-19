@@ -323,3 +323,23 @@ function logout() {
     localStorage.removeItem('authToken');
     window.location.href = '/';
 }
+
+async function logout() {
+    const token = localStorage.getItem('authToken');
+    try {
+        if (token) {
+            await fetch('/api/auth/logout', {
+                method: 'POST',
+                headers: {
+                    'Authorization': 'Bearer ' + token
+                }
+            });
+        }
+    } catch (err) {
+        console.error('Lỗi khi gọi API đăng xuất:', err);
+    } finally {
+        localStorage.removeItem('currentUser');
+        localStorage.removeItem('authToken');
+        window.location.href = '/';
+    }
+}

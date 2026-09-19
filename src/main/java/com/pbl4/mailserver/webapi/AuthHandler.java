@@ -1,129 +1,112 @@
-// ============================================================
-// File: AuthHandler.java
-// Package: com.pbl4.mailserver.webapi
-// ------------------------------------------------------------
-// Chức năng: Xử lý 2 route:
-//   POST /api/register -> tạo tài khoản mới
-//   POST /api/login    -> kiểm tra đăng nhập
-// Không dùng thư viện JSON ngoài - tự viết parser/writer đơn
-// giản vì dữ liệu vào/ra chỉ có vài field cố định.
-// ============================================================
-
 package com.pbl4.mailserver.webapi;
 
 import com.pbl4.mailserver.core.MailStorageEngine;
+import com.pbl4.mailserver.core.SecurityUtils;
+import com.pbl4.mailserver.core.UserStore;
 import com.sun.net.httpserver.HttpExchange;
+import com.sun.net.httpserver.HttpHandler;
 
+import java.io.BufferedReader;
 import java.io.IOException;
-import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
-import java.util.HashMap;
-import java.util.Map;
 
-public class AuthHandler {
+public class AuthHandler implements HttpHandler {
 
-    private final MailStorageEngine storageEngine;
+    @Override
+    public void handle(HttpExchange exchange) throws IOException {
+        exchange.getResponseHeaders().add("Access-Control-Allow-Origin", "*");
+        exchange.getResponseHeaders().add("Access-Control-Allow-Methods", "POST, OPTIONS");
+        exchange.getResponseHeaders().add("Access-Control-Allow-Headers", "Content-Type");
 
-    public AuthHandler(MailStorageEngine storageEngine) {
-        this.storageEngine = storageEngine;
-    }
-
-    // ------------------------------------------------------------
-    // POST /api/register  { "username": "...", "password": "..." }
-    // ------------------------------------------------------------
-    public void handleRegister(HttpExchange exchange) throws IOException {
-        if (!exchange.getRequestMethod().equalsIgnoreCase("POST")) {
-            sendJson(exchange, 405, "{\"error\":\"Method not allowed\"}");
-            return;
-        }
-        Map<String, String> body = parseJsonBody(exchange);
-        String username = body.get("username");
-        String password = body.get("password");
-
-        if (username == null || password == null || username.isBlank() || password.isBlank()) {
-            sendJson(exchange, 400, "{\"error\":\"Thiếu username hoặc password\"}");
+        if ("OPTIONS".equalsIgnoreCase(exchange.getRequestMethod())) {
+            exchange.sendResponseHeaders(204, -1);
             return;
         }
 
-        boolean success = storageEngine.createUser(username, password);
-        if (success) {
-            sendJson(exchange, 200, "{\"success\":true}");
+        if ("POST".equalsIgnoreCase(exchange.getRequestMethod())) {
+            String path = exchange.getRequestURI().getPath();
+            
+            InputStreamReader isr = new InputStreamReader(exchange.getRequestBody(), StandardCharsets.UTF_8);
+            BufferedReader br = new BufferedReader(isr);
+            StringBuilder formData = new StringBuilder();
+            String line;
+            while ((line = br.readLine()) != null) {
+                formData.append(line);
+            }
+
+            String body = formData.toString();
+            String username = getParamValue(body, "username");
+            String password = getParamValue(body, "password");
+
+            if (username == null || password == null || username.isEmpty() || password.isEmpty()) {
+                sendResponse(exchange, 400, "{\"success\": false, \"message\": \"Thiếu thông tin tài khoản hoặc mật khẩu!\"}");
+                return;
+            }
+
+            if (path.endsWith("/register")) {
+                handleRegister(exchange, username, password);
+            } else if (path.endsWith("/login")) {
+                handleLogin(exchange, username, password);
+            } else {
+                sendResponse(exchange, 404, "{\"success\": false, \"message\": \"Endpoint không tồn tại!\"}");
+            }
         } else {
-            sendJson(exchange, 409, "{\"error\":\"Username đã tồn tại\"}");
+            sendResponse(exchange, 405, "{\"success\": false, \"message\": \"Phương thức không được hỗ trợ!\"}");
         }
     }
 
-    // ------------------------------------------------------------
-    // POST /api/login  { "username": "...", "password": "..." }
-    // ------------------------------------------------------------
-    public void handleLogin(HttpExchange exchange) throws IOException {
-        if (!exchange.getRequestMethod().equalsIgnoreCase("POST")) {
-            sendJson(exchange, 405, "{\"error\":\"Method not allowed\"}");
+    private synchronized void handleRegister(HttpExchange exchange, String username, String password) throws IOException {
+        if (UserStore.exists(username)) {
+            sendResponse(exchange, 400, "{\"success\": false, \"message\": \"Tài khoản đã tồn tại!\"}");
             return;
         }
-        Map<String, String> body = parseJsonBody(exchange);
-        String username = body.get("username");
-        String password = body.get("password");
 
-        boolean valid = username != null && password != null
-                && storageEngine.authenticate(username, password);
+        String passwordHash = SecurityUtils.hashPassword(password);
+        UserStore.addUser(username, passwordHash);
 
-        if (valid) {
-            sendJson(exchange, 200, "{\"success\":true,\"username\":\"" + escape(username) + "\"}");
+        MailStorageEngine.initMailbox(username);
+
+        sendResponse(exchange, 200, "{\"success\": true, \"message\": \"Đăng ký tài khoản thành công!\"}");
+    }
+
+    private void handleLogin(HttpExchange exchange, String username, String password) throws IOException {
+        String storedHash = UserStore.findHash(username);
+
+        if (storedHash == null) {
+            sendResponse(exchange, 401, "{\"success\": false, \"message\": \"Tài khoản không tồn tại!\"}");
+            return;
+        }
+
+        boolean isValid = SecurityUtils.checkPassword(password, storedHash);
+        if (isValid) {
+            // CẬP NHẬT: Truyền cả password vào SessionManager
+            String token = SessionManager.createSession(username, password);
+            sendResponse(exchange, 200,
+                "{\"success\": true, \"message\": \"Đăng nhập thành công!\", " +
+                "\"username\": \"" + username + "\", \"token\": \"" + token + "\"}");
         } else {
-            sendJson(exchange, 401, "{\"error\":\"Sai username hoặc password\"}");
+            sendResponse(exchange, 401, "{\"success\": false, \"message\": \"Mật khẩu không chính xác!\"}");
         }
     }
 
-    // ------------------------------------------------------------
-    // Hàm phụ trợ dùng chung - CÁC HANDLER KHÁC (MailHandler) CŨNG
-    // NÊN DÙNG LẠI 2 hàm parseJsonBody() và sendJson() này để đồng
-    // nhất cách xử lý (có thể copy nguyên hoặc tách ra file JsonUtil
-    // riêng nếu muốn tái sử dụng gọn hơn).
-    // ------------------------------------------------------------
-
-    static Map<String, String> parseJsonBody(HttpExchange exchange) throws IOException {
-        InputStream is = exchange.getRequestBody();
-        String raw = new String(is.readAllBytes(), StandardCharsets.UTF_8);
-        return parseFlatJson(raw);
-    }
-
-    // Parser JSON RẤT đơn giản - chỉ hỗ trợ object 1 cấp dạng
-    // {"key1":"value1","key2":"value2"} - đủ dùng cho form login/register/send,
-    // KHÔNG hỗ trợ object lồng nhau hay mảng.
-    static Map<String, String> parseFlatJson(String raw) {
-        Map<String, String> result = new HashMap<>();
-        raw = raw.trim();
-        if (raw.startsWith("{")) raw = raw.substring(1);
-        if (raw.endsWith("}")) raw = raw.substring(0, raw.length() - 1);
-
-        for (String pair : raw.split(",")) {
-            int colonIndex = pair.indexOf(':');
-            if (colonIndex < 0) continue;
-            String key = unquote(pair.substring(0, colonIndex).trim());
-            String value = unquote(pair.substring(colonIndex + 1).trim());
-            result.put(key, value);
+    private String getParamValue(String body, String paramName) {
+        for (String pair : body.split("&")) {
+            String[] kv = pair.split("=");
+            if (kv.length == 2 && kv[0].equalsIgnoreCase(paramName)) {
+                return java.net.URLDecoder.decode(kv[1], StandardCharsets.UTF_8);
+            }
         }
-        return result;
+        return null;
     }
 
-    private static String unquote(String s) {
-        s = s.trim();
-        if (s.startsWith("\"") && s.endsWith("\"") && s.length() >= 2) {
-            s = s.substring(1, s.length() - 1);
-        }
-        return s;
-    }
-
-    static String escape(String s) {
-        return s.replace("\\", "\\\\").replace("\"", "\\\"");
-    }
-
-    static void sendJson(HttpExchange exchange, int statusCode, String json) throws IOException {
-        byte[] bytes = json.getBytes(StandardCharsets.UTF_8);
-        exchange.getResponseHeaders().add("Content-Type", "application/json; charset=UTF-8");
+    private void sendResponse(HttpExchange exchange, int statusCode, String jsonResponse) throws IOException {
+        byte[] bytes = jsonResponse.getBytes(StandardCharsets.UTF_8);
+        exchange.getResponseHeaders().set("Content-Type", "application/json; charset=UTF-8");
         exchange.sendResponseHeaders(statusCode, bytes.length);
-        exchange.getResponseBody().write(bytes);
-        exchange.getResponseBody().close();
+        OutputStream os = exchange.getResponseBody();
+        os.write(bytes);
+        os.close();
     }
 }

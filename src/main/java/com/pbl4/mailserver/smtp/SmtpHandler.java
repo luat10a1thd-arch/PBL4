@@ -1,124 +1,134 @@
-// ============================================================
-// File: SmtpHandler.java
-// Package: com.pbl4.mailserver.smtp
-// ------------------------------------------------------------
-// Chức năng: Trình phân tích cú pháp RFC 5321 & State Machine.
-// Xử lý HELO -> MAIL FROM -> RCPT TO -> DATA -> QUIT.
-// Khi nhận xong khối DATA, gọi MailStorageEngine.writeMail()
-// để mã hóa AES-256 và ghi xuống đĩa.
-// ============================================================
-
 package com.pbl4.mailserver.smtp;
 
 import com.pbl4.mailserver.core.MailStorageEngine;
+import com.pbl4.mailserver.core.SecurityUtils;
+import com.pbl4.mailserver.core.UserStore;
 
 import java.io.BufferedReader;
-import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.PrintWriter;
 import java.net.Socket;
+import java.nio.charset.StandardCharsets;
+import java.util.Base64;
 
 public class SmtpHandler implements Runnable {
 
-    private enum State { INIT, HELO_DONE, MAIL_FROM_DONE, RCPT_TO_DONE }
+    private final Socket clientSocket;
 
-    private final Socket socket;
-    private final MailStorageEngine storageEngine;
-
-    private State state = State.INIT;
-    private String sender;
-    private String receiver;
-
-    public SmtpHandler(Socket socket, MailStorageEngine storageEngine) {
-        this.socket = socket;
-        this.storageEngine = storageEngine;
+    public SmtpHandler(Socket socket) {
+        this.clientSocket = socket;
     }
 
     @Override
     public void run() {
         try (
-            BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
-            PrintWriter out = new PrintWriter(socket.getOutputStream(), true)
+            BufferedReader in = new BufferedReader(new InputStreamReader(clientSocket.getInputStream(), StandardCharsets.UTF_8));
+            PrintWriter out = new PrintWriter(clientSocket.getOutputStream(), true)
         ) {
-            out.println("220 MailServer SMTP Ready");
+            out.println("220 PBL4 Secure Mail Server Ready");
 
             String line;
+            String mailFrom = "";
+            String rcptTo = "";
+            StringBuilder dataBuilder = new StringBuilder();
+            boolean isDataMode = false;
+            boolean isAuthenticated = false;
+
             while ((line = in.readLine()) != null) {
-                System.out.println("[SMTP] Nhận: " + line);
-                String upper = line.toUpperCase();
+                if (isDataMode) {
+                    if (".".equals(line)) {
+                        isDataMode = false;
+                        
+                        // ĐỔI MỚI: Dùng đúng nội dung client gửi (bao gồm cả Subject nếu có)
+                        String rawEmailContent = "From: " + mailFrom + "\nTo: " + rcptTo + "\n" + dataBuilder.toString();
 
-                if (upper.equals("HELO") || upper.startsWith("HELO ") ||
-                    upper.equals("EHLO") || upper.startsWith("EHLO ")) {
-                    state = State.HELO_DONE;
-                    out.println("250 Hello, pleased to meet you");
+                        boolean savedToRecipient = MailStorageEngine.saveEmail(rcptTo, rawEmailContent);
+                        boolean savedToSender = MailStorageEngine.saveEmail(mailFrom + "_sent", rawEmailContent);
 
-                } else if (upper.startsWith("MAIL FROM:")) {
-                    if (state != State.HELO_DONE) {
-                        out.println("503 Bad sequence of commands");
+                        if (savedToRecipient && savedToSender) {
+                            out.println("250 OK: Message accepted for delivery");
+                        } else {
+                            out.println("451 Requested action aborted: local error");
+                        }
+                    } else {
+                        dataBuilder.append(line).append("\n");
+                    }
+                    continue;
+                }
+
+                String upperLine = line.toUpperCase();
+                if (upperLine.startsWith("HELO") || upperLine.startsWith("EHLO")) {
+                    out.println("250 Hello " + clientSocket.getInetAddress().getHostAddress());
+                } 
+                else if (upperLine.startsWith("AUTH LOGIN")) {
+                    out.println("334 VXNlcm5hbWU6");
+                    String encodedUser = in.readLine();
+                    if (encodedUser == null) break;
+                    String decodedUser = new String(Base64.getDecoder().decode(encodedUser.trim()), StandardCharsets.UTF_8);
+                    
+                    out.println("334 UGFzc3dvcmQ6");
+                    String encodedPass = in.readLine();
+                    if (encodedPass == null) break;
+                    String decodedPass = new String(Base64.getDecoder().decode(encodedPass.trim()), StandardCharsets.UTF_8);
+
+                    // Dùng UserStore.findHash()
+                    String storedHash = UserStore.findHash(decodedUser);
+                    if (storedHash != null && SecurityUtils.checkPassword(decodedPass, storedHash)) {
+                        isAuthenticated = true;
+                        out.println("235 2.7.0 Authentication successful");
+                    } else {
+                        out.println("535 5.7.8 Authentication credentials invalid");
+                    }
+                } 
+                else if (upperLine.startsWith("MAIL FROM:")) {
+                    if (!isAuthenticated) {
+                        out.println("530 5.7.0 Authentication required");
                         continue;
                     }
-                    sender = extractEmail(line);
-                    state = State.MAIL_FROM_DONE;
+                    mailFrom = parseAddress(line);
                     out.println("250 OK");
-
-                } else if (upper.startsWith("RCPT TO:")) {
-                    if (state != State.MAIL_FROM_DONE) {
-                        out.println("503 Bad sequence of commands");
+                } 
+                else if (upperLine.startsWith("RCPT TO:")) {
+                    if (!isAuthenticated) {
+                        out.println("530 5.7.0 Authentication required");
                         continue;
                     }
-                    receiver = extractEmail(line);
-                    state = State.RCPT_TO_DONE;
+                    rcptTo = parseAddress(line);
                     out.println("250 OK");
-
-                } else if (upper.equals("DATA")) {
-                    if (state != State.RCPT_TO_DONE) {
-                        out.println("503 Bad sequence of commands");
+                } 
+                else if (upperLine.startsWith("DATA")) {
+                    if (!isAuthenticated) {
+                        out.println("530 5.7.0 Authentication required");
                         continue;
                     }
-                    out.println("354 Start mail input; end with <CRLF>.<CRLF>");
-                    String body = readMailBody(in);
-
-                    // Đây là điểm khác biệt lớn nhất so với bản SQLite cũ:
-                    // gọi MailStorageEngine để MÃ HÓA AES-256 rồi ghi file .enc,
-                    // thay vì INSERT vào database.
-                    storageEngine.writeMail(sender, receiver, body);
-
-                    out.println("250 2.0.0 Message accepted");
-                    state = State.HELO_DONE; // cho phép gửi tiếp mail khác
-
-                } else if (upper.equals("QUIT")) {
+                    isDataMode = true;
+                    dataBuilder.setLength(0);
+                    out.println("354 Start mail input; end with <CR><LF>.<CR><LF>");
+                } 
+                else if (upperLine.startsWith("QUIT")) {
                     out.println("221 Bye");
                     break;
-
-                } else {
-                    out.println("500 Command not recognized");
+                } 
+                else {
+                    out.println("500 Command unrecognized");
                 }
             }
-        } catch (IOException e) {
-            System.err.println("[SmtpHandler] Lỗi kết nối: " + e.getMessage());
+        } catch (Exception e) {
+            e.printStackTrace();
         } finally {
-            try { socket.close(); } catch (IOException ignored) {}
+            try {
+                clientSocket.close();
+            } catch (Exception ignored) {}
         }
     }
 
-    private String readMailBody(BufferedReader in) throws IOException {
-        StringBuilder body = new StringBuilder();
-        String line;
-        while ((line = in.readLine()) != null) {
-            if (line.equals(".")) break;
-            if (line.startsWith("..")) line = line.substring(1); // dot-unstuffing
-            body.append(line).append("\n");
-        }
-        return body.toString();
-    }
-
-    private String extractEmail(String line) {
+    private String parseAddress(String line) {
         int start = line.indexOf('<');
         int end = line.indexOf('>');
-        if (start >= 0 && end > start) {
-            return line.substring(start + 1, end);
+        if (start != -1 && end != -1 && start < end) {
+            return line.substring(start + 1, end).trim();
         }
-        int colon = line.indexOf(':');
-        return (colon >= 0) ? line.substring(colon + 1).trim() : line.trim();
+        String[] parts = line.split(":");
+        return parts.length > 1 ? parts[1].trim() : "";
     }
 }

@@ -1,14 +1,4 @@
-// ============================================================
-// File: Pop3ServerManager.java
-// Package: com.pbl4.mailserver.pop3
-// ------------------------------------------------------------
-// Chức năng: Mở ServerSocket lắng nghe port POP3, dùng thread
-// pool tối đa 100 luồng.
-// ============================================================
-
 package com.pbl4.mailserver.pop3;
-
-import com.pbl4.mailserver.core.MailStorageEngine;
 
 import java.io.IOException;
 import java.net.ServerSocket;
@@ -16,29 +6,28 @@ import java.net.Socket;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
-public class Pop3ServerManager implements Runnable {
+/**
+ * Quản lý lắng nghe cổng 1110 cho dịch vụ POP3.
+ * Tối ưu hóa hiệu năng bằng Thread Pool Executor.
+ */
+public class Pop3ServerManager {
 
-    private final int port;
-    private final MailStorageEngine storageEngine;
-    private final ExecutorService threadPool;
+    private static final int POP3_PORT = 1110;
+    // Giới hạn tối đa 20 luồng xử lý đồng thời
+    private static final ExecutorService threadPool = Executors.newFixedThreadPool(20);
 
-    public Pop3ServerManager(int port, MailStorageEngine storageEngine) {
-        this.port = port;
-        this.storageEngine = storageEngine;
-        this.threadPool = Executors.newFixedThreadPool(100);
-    }
-
-    @Override
-    public void run() {
-        try (ServerSocket serverSocket = new ServerSocket(port)) {
-            System.out.println("[Pop3ServerManager] Đang lắng nghe tại port " + port);
-            while (true) {
-                Socket clientSocket = serverSocket.accept();
-                System.out.println("[Pop3ServerManager] Client mới: " + clientSocket.getInetAddress());
-                threadPool.execute(new Pop3Handler(clientSocket, storageEngine));
+    public static void startServer() {
+        new Thread(() -> {
+            try (ServerSocket serverSocket = new ServerSocket(POP3_PORT)) {
+                System.out.println("=== POP3 Server (Thread Pool) đang chạy tại cổng: " + POP3_PORT + " ===");
+                while (true) {
+                    Socket clientSocket = serverSocket.accept();
+                    // Đẩy task vào Thread Pool quản lý
+                    threadPool.execute(new Pop3Handler(clientSocket));
+                }
+            } catch (IOException e) {
+                System.err.println("Lỗi khởi chạy POP3 Server: " + e.getMessage());
             }
-        } catch (IOException e) {
-            System.err.println("[Pop3ServerManager] Lỗi khi mở port " + port + ": " + e.getMessage());
-        }
+        }).start();
     }
 }

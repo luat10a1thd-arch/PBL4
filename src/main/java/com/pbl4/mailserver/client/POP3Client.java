@@ -1,64 +1,67 @@
-// ============================================================
-// File: POP3Client.java
-// Package: com.pbl4.mailserver.client
-// ------------------------------------------------------------
-// Chức năng: Client console demo đúng giao thức POP3 thuần,
-// kết nối Socket thô tới Pop3ServerManager.
-// ============================================================
-
 package com.pbl4.mailserver.client;
 
-import java.io.BufferedReader;
-import java.io.IOException;
-import java.io.InputStreamReader;
-import java.io.PrintWriter;
+import java.io.*;
 import java.net.Socket;
-import java.util.Scanner;
+import java.util.ArrayList;
+import java.util.List;
 
 public class POP3Client {
 
-    public static void main(String[] args) throws IOException {
-        Scanner scanner = new Scanner(System.in);
+    /** Trả về danh sách nội dung thư thô (đã giải mã) của 1 mailbox, null nếu xác thực thất bại */
+    public static List<String> fetchAll(String username, String password) {
+        List<String> results = new ArrayList<>();
+        try (Socket socket = new Socket("localhost", 1110);
+             BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
+             PrintWriter out = new PrintWriter(socket.getOutputStream(), true)) {
 
-        System.out.print("Nhập host server: ");
-        String host = scanner.nextLine().trim();
-        System.out.print("Nhập port POP3 (VD: 1110): ");
-        int port = Integer.parseInt(scanner.nextLine().trim());
+            in.readLine(); // +OK banner
 
-        try (
-            Socket socket = new Socket(host, port);
-            BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
-            PrintWriter out = new PrintWriter(socket.getOutputStream(), true)
-        ) {
-            System.out.println("Server: " + in.readLine()); // +OK Ready
+            out.println("USER " + username);
+            in.readLine();
 
-            System.out.print("Username: ");
-            send(out, in, "USER " + scanner.nextLine().trim());
-
-            System.out.print("Password: ");
-            send(out, in, "PASS " + scanner.nextLine().trim());
-
-            System.out.println("Gõ lệnh POP3 (STAT, LIST, RETR 1, DELE 1, RSET, QUIT):");
-            String command;
-            while (!(command = scanner.nextLine()).equalsIgnoreCase("QUIT")) {
-                out.println(command);
-                // LIST và RETR trả về nhiều dòng, kết thúc bằng dòng chỉ có "."
-                if (command.toUpperCase().startsWith("LIST") || command.toUpperCase().startsWith("RETR")) {
-                    String line;
-                    while ((line = in.readLine()) != null) {
-                        System.out.println("Server: " + line);
-                        if (line.equals(".")) break;
-                    }
-                } else {
-                    System.out.println("Server: " + in.readLine());
-                }
+            out.println("PASS " + password);
+            String authResp = in.readLine();
+            if (authResp == null || !authResp.startsWith("+OK")) {
+                return null; // sai mật khẩu hoặc user không tồn tại
             }
-            send(out, in, "QUIT");
+
+            out.println("LIST");
+            String listHeader = in.readLine(); // +OK N messages
+            int count = parseCount(listHeader);
+
+            List<Integer> sizes = new ArrayList<>();
+            for (int i = 0; i < count; i++) {
+                in.readLine(); // "1 123" (thứ tự + kích thước) - không cần dùng ở đây
+            }
+            in.readLine(); // dòng kết thúc "."
+
+            for (int i = 1; i <= count; i++) {
+                out.println("RETR " + i);
+                String status = in.readLine(); // +OK Octets follows
+                if (status == null || !status.startsWith("+OK")) continue;
+
+                StringBuilder msg = new StringBuilder();
+                String line;
+                while ((line = in.readLine()) != null && !line.equals(".")) {
+                    msg.append(line).append("\n");
+                }
+                results.add(msg.toString());
+            }
+
+            out.println("QUIT");
+        } catch (Exception e) {
+            e.printStackTrace();
+            return null;
         }
+        return results;
     }
 
-    private static void send(PrintWriter out, BufferedReader in, String command) throws IOException {
-        out.println(command);
-        System.out.println("Server trả: " + in.readLine());
+    private static int parseCount(String line) {
+        try {
+            String[] parts = line.replace("+OK", "").trim().split(" ");
+            return Integer.parseInt(parts[0]);
+        } catch (Exception e) {
+            return 0;
+        }
     }
 }

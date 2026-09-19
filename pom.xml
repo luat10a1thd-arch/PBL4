@@ -1,6 +1,7 @@
 <project xmlns="http://maven.apache.org/POM/4.0.0"
          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+<<<<<<< HEAD
     <modelVersion>4.0.0</modelVersion>
     <groupId>com.pbl4</groupId>
     <artifactId>mailserver</artifactId>
@@ -18,4 +19,26 @@
             <version>0.4</version>
         </dependency>
     </dependencies>
+=======
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>com.pbl4</groupId>
+  <artifactId>mailserver</artifactId>
+  <version>1.0.0</version>
+  
+  <properties>
+    <maven.compiler.source>1.8</maven.compiler.source>
+    <maven.compiler.target>1.8</maven.compiler.target>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+  </properties>
+
+  <!-- Khối chứa tất cả thư viện của dự án -->
+  <dependencies>
+    <!-- Thư viện mã hóa băm mật khẩu BCrypt -->
+    <dependency>
+        <groupId>org.mindrot</groupId>
+        <artifactId>jbcrypt</artifactId>
+        <version>0.4</version>
+    </dependency>
+  </dependencies>
+>>>>>>> origin/Luat
 </project>

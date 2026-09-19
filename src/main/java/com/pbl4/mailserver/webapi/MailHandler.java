@@ -1,160 +1,157 @@
-// ============================================================
-// File: MailHandler.java
-// Package: com.pbl4.mailserver.webapi
-// ------------------------------------------------------------
-// Chức năng: Xử lý 3 route:
-//   GET    /api/inbox?username=xxx        -> danh sách mail
-//   POST   /api/send                       -> gửi mail mới
-//   DELETE /api/mail?username=xxx&id=1     -> xóa 1 mail
-// ============================================================
-
 package com.pbl4.mailserver.webapi;
 
-import com.pbl4.mailserver.core.MailStorageEngine;
+import com.pbl4.mailserver.client.POP3Client;
+import com.pbl4.mailserver.client.SMTPClient;
 import com.sun.net.httpserver.HttpExchange;
+import com.sun.net.httpserver.HttpHandler;
 
-import java.io.IOException;
-import java.net.URLDecoder;
+import java.io.*;
 import java.nio.charset.StandardCharsets;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 
-public class MailHandler {
+public class MailHandler implements HttpHandler {
 
-    private final MailStorageEngine storageEngine;
+    @Override
+    public void handle(HttpExchange exchange) throws IOException {
+        exchange.getResponseHeaders().add("Access-Control-Allow-Origin", "*");
+        exchange.getResponseHeaders().add("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+        exchange.getResponseHeaders().add("Access-Control-Allow-Headers", "Content-Type, Authorization");
 
-    public MailHandler(MailStorageEngine storageEngine) {
-        this.storageEngine = storageEngine;
+        if ("OPTIONS".equalsIgnoreCase(exchange.getRequestMethod())) {
+            exchange.sendResponseHeaders(204, -1);
+            return;
+        }
+
+        String authHeader = exchange.getRequestHeaders().getFirst("Authorization");
+        String token = (authHeader != null && authHeader.startsWith("Bearer "))
+                ? authHeader.substring(7) : null;
+        String authedUser = SessionManager.validate(token);
+
+        if (authedUser == null) {
+            sendResponse(exchange, 401, "{\"success\": false, \"message\": \"Chưa đăng nhập hoặc phiên hết hạn!\"}");
+            return;
+        }
+
+        String path = exchange.getRequestURI().getPath();
+
+        if ("POST".equalsIgnoreCase(exchange.getRequestMethod()) && path.endsWith("/send")) {
+            handleSendMail(exchange, authedUser, token);
+        } else if ("GET".equalsIgnoreCase(exchange.getRequestMethod()) && path.endsWith("/inbox")) {
+            handleGetInbox(exchange, authedUser, token);
+        } else if ("GET".equalsIgnoreCase(exchange.getRequestMethod()) && path.endsWith("/sent")) {
+            handleGetSent(exchange, authedUser, token);
+        } else {
+            sendResponse(exchange, 404, "{\"success\": false, \"message\": \"Endpoint không tồn tại!\"}");
+        }
     }
 
-    // ------------------------------------------------------------
-    // GET /api/inbox?username=xxx
-    // ------------------------------------------------------------
-    public void handleInbox(HttpExchange exchange) throws IOException {
-        Map<String, String> query = parseQuery(exchange.getRequestURI().getQuery());
-        String username = query.get("username");
-        if (username == null || username.isBlank()) {
-            AuthHandler.sendJson(exchange, 400, "{\"error\":\"Thiếu username\"}");
+    private void handleSendMail(HttpExchange exchange, String from, String token) throws IOException {
+        String body = readBody(exchange);
+        String to = getParamValue(body, "to");
+        String subject = getParamValue(body, "subject");
+        String content = getParamValue(body, "body");
+
+        if (to == null || subject == null || content == null) {
+            sendResponse(exchange, 400, "{\"success\": false, \"message\": \"Thiếu thông tin gửi thư!\"}");
             return;
         }
 
-        List<String> files = storageEngine.listMailFiles(username);
-        StringBuilder json = new StringBuilder("[");
-        for (int i = 0; i < files.size(); i++) {
-            String fileName = files.get(i);
-            String content = storageEngine.readMail(username, fileName);
-            String sender = extractSender(content);
-            String preview = extractPreview(content);
-            long size = storageEngine.getMailSize(username, fileName);
+        String password = SessionManager.getPassword(token);
+        boolean sent = SMTPClient.send(from, password, to, subject, content);
 
-            if (i > 0) json.append(",");
-            json.append("{")
-                .append("\"id\":").append(i + 1).append(",")
-                .append("\"sender\":\"").append(AuthHandler.escape(sender)).append("\",")
-                .append("\"preview\":\"").append(AuthHandler.escape(preview)).append("\",")
-                .append("\"size\":").append(size)
-                .append("}");
+        if (sent) {
+            sendResponse(exchange, 200, "{\"success\": true, \"message\": \"Gửi thư thành công!\"}");
+        } else {
+            sendResponse(exchange, 500, "{\"success\": false, \"message\": \"Gửi thư thất bại!\"}");
         }
-        json.append("]");
-
-        AuthHandler.sendJson(exchange, 200, json.toString());
     }
 
-    // ------------------------------------------------------------
-    // POST /api/send  { "from": "...", "to": "...", "subject": "...", "body": "..." }
-    // ------------------------------------------------------------
-    public void handleSend(HttpExchange exchange) throws IOException {
-        if (!exchange.getRequestMethod().equalsIgnoreCase("POST")) {
-            AuthHandler.sendJson(exchange, 405, "{\"error\":\"Method not allowed\"}");
+    private void handleGetInbox(HttpExchange exchange, String username, String token) throws IOException {
+        String password = SessionManager.getPassword(token);
+        List<String> rawMails = POP3Client.fetchAll(username, password);
+
+        if (rawMails == null) {
+            sendResponse(exchange, 500, "[]");
             return;
         }
-        Map<String, String> body = AuthHandler.parseJsonBody(exchange);
-        String from = body.get("from");
-        String to = body.get("to");
-        String subject = body.getOrDefault("subject", "(no subject)");
-        String content = body.getOrDefault("body", "");
-
-        if (from == null || to == null) {
-            AuthHandler.sendJson(exchange, 400, "{\"error\":\"Thiếu from hoặc to\"}");
-            return;
-        }
-
-        // Gộp subject vào đầu nội dung, giống cách SmtpHandler đang làm với sender,
-        // vì MailStorageEngine.writeMail() không có tham số subject riêng.
-        String fullBody = "Subject: " + subject + "\n" + content;
-        storageEngine.writeMail(from, to, fullBody);
-
-        AuthHandler.sendJson(exchange, 200, "{\"success\":true}");
+        sendResponse(exchange, 200, convertMailsToJson(rawMails));
     }
 
-    // ------------------------------------------------------------
-    // DELETE /api/mail?username=xxx&id=1
-    // Vì WebAPI không có khái niệm "session POP3" (không có QUIT),
-    // ở đây xóa LUÔN ngay lập tức, không cần đợi purge riêng.
-    // ------------------------------------------------------------
-    public void handleDelete(HttpExchange exchange) throws IOException {
-        if (!exchange.getRequestMethod().equalsIgnoreCase("DELETE")) {
-            AuthHandler.sendJson(exchange, 405, "{\"error\":\"Method not allowed\"}");
+    private void handleGetSent(HttpExchange exchange, String username, String token) throws IOException {
+        String password = SessionManager.getPassword(token);
+        // Hộp thư "đã gửi" vẫn lưu ở mailbox riêng "{username}_sent" như thiết kế cũ,
+        // POP3Server cần được cấu hình cho phép user tự đọc mailbox "_sent" của chính mình.
+        List<String> rawMails = POP3Client.fetchAll(username + "_sent", password);
+
+        if (rawMails == null) {
+            sendResponse(exchange, 500, "[]");
             return;
         }
-        Map<String, String> query = parseQuery(exchange.getRequestURI().getQuery());
-        String username = query.get("username");
-        String idStr = query.get("id");
-
-        if (username == null || idStr == null) {
-            AuthHandler.sendJson(exchange, 400, "{\"error\":\"Thiếu username hoặc id\"}");
-            return;
-        }
-
-        int index = Integer.parseInt(idStr) - 1; // id phía client là 1-based
-        List<String> files = storageEngine.listMailFiles(username);
-        if (index < 0 || index >= files.size()) {
-            AuthHandler.sendJson(exchange, 404, "{\"error\":\"Không tìm thấy mail\"}");
-            return;
-        }
-
-        storageEngine.markForDeletion(username, files.get(index));
-        storageEngine.purgeMarkedDeletions(username); // xóa thật ngay
-
-        AuthHandler.sendJson(exchange, 200, "{\"success\":true}");
+        sendResponse(exchange, 200, convertMailsToJson(rawMails));
     }
 
-    // ------------------------------------------------------------
-    // Hàm phụ trợ: trích dòng "From: ..." và preview từ nội dung đã giải mã
-    // ------------------------------------------------------------
-    private String extractSender(String content) {
-        if (content == null) return "(unknown)";
-        for (String line : content.split("\n")) {
-            if (line.startsWith("From: ")) return line.substring(6).trim();
+    private String convertMailsToJson(List<String> rawMails) {
+        StringBuilder sb = new StringBuilder("[");
+        for (int i = 0; i < rawMails.size(); i++) {
+            String mail = rawMails.get(i);
+            String[] lines = mail.split("\n");
+
+            String from = "", to = "", subject = "", date = "";
+            StringBuilder bodyBuilder = new StringBuilder();
+            boolean isBody = false;
+
+            for (String line : lines) {
+                if (isBody) bodyBuilder.append(line).append("\\n");
+                else if (line.startsWith("From: ")) from = line.substring(6).trim();
+                else if (line.startsWith("To: ")) to = line.substring(4).trim();
+                else if (line.startsWith("Subject: ")) subject = line.substring(9).trim();
+                else if (line.startsWith("Date: ")) date = line.substring(6).trim();
+                else if (line.isEmpty()) isBody = true;
+            }
+
+            sb.append("{")
+              .append("\"sender\":\"").append(escapeJson(from)).append("\",")
+              .append("\"recipient\":\"").append(escapeJson(to)).append("\",")
+              .append("\"subject\":\"").append(escapeJson(subject)).append("\",")
+              .append("\"timestamp\":\"").append(escapeJson(date)).append("\",")
+              .append("\"body\":\"").append(escapeJson(bodyBuilder.toString())).append("\"")
+              .append("}");
+
+            if (i < rawMails.size() - 1) sb.append(",");
         }
-        return "(unknown)";
+        sb.append("]");
+        return sb.toString();
     }
 
-    private String extractPreview(String content) {
-        if (content == null) return "";
-        String[] lines = content.split("\n");
-        // Bỏ qua dòng "From:" đầu tiên, lấy dòng tiếp theo làm preview
-        for (String line : lines) {
-            if (!line.startsWith("From: ") && !line.isBlank()) {
-                return line.length() > 80 ? line.substring(0, 80) + "..." : line;
+    private String escapeJson(String input) {
+        if (input == null) return "";
+        return input.replace("\\", "\\\\").replace("\"", "\\\"").replace("\r", "");
+    }
+
+    private String readBody(HttpExchange exchange) throws IOException {
+        BufferedReader br = new BufferedReader(new InputStreamReader(exchange.getRequestBody(), StandardCharsets.UTF_8));
+        StringBuilder sb = new StringBuilder();
+        String line;
+        while ((line = br.readLine()) != null) sb.append(line);
+        return sb.toString();
+    }
+
+    private String getParamValue(String body, String paramName) {
+        for (String pair : body.split("&")) {
+            String[] kv = pair.split("=");
+            if (kv.length == 2 && kv[0].equalsIgnoreCase(paramName)) {
+                return java.net.URLDecoder.decode(kv[1], StandardCharsets.UTF_8);
             }
         }
-        return "";
+        return null;
     }
 
-    private Map<String, String> parseQuery(String query) {
-        Map<String, String> result = new HashMap<>();
-        if (query == null) return result;
-        for (String pair : query.split("&")) {
-            int eq = pair.indexOf('=');
-            if (eq < 0) continue;
-            try {
-                String key = URLDecoder.decode(pair.substring(0, eq), StandardCharsets.UTF_8);
-                String value = URLDecoder.decode(pair.substring(eq + 1), StandardCharsets.UTF_8);
-                result.put(key, value);
-            } catch (Exception ignored) {}
-        }
-        return result;
+    private void sendResponse(HttpExchange exchange, int statusCode, String jsonResponse) throws IOException {
+        byte[] bytes = jsonResponse.getBytes(StandardCharsets.UTF_8);
+        exchange.getResponseHeaders().set("Content-Type", "application/json; charset=UTF-8");
+        exchange.sendResponseHeaders(statusCode, bytes.length);
+        OutputStream os = exchange.getResponseBody();
+        os.write(bytes);
+        os.close();
     }
 }

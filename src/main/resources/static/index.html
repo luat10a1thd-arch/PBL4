@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DUT Mail - Đăng nhập</title>
+    <!-- FontAwesome Icon CDN -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link rel="stylesheet" href="css/style.css">
+    <style>
+        /* CSS cho Toast Notification ở trang Auth */
+        #toast-container {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            z-index: 9999;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        .toast {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            min-width: 280px;
+            padding: 12px 18px;
+            background: #ffffff;
+            border-radius: 10px;
+            box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.1), 0 8px 10px -6px rgba(0, 0, 0, 0.1);
+            border-left: 4px solid #10b981;
+            transform: translateX(120%);
+            transition: transform 0.3s cubic-bezier(0.68, -0.55, 0.265, 1.55);
+            font-family: system-ui, -apple-system, sans-serif;
+        }
+        .toast.show {
+            transform: translateX(0);
+        }
+        .toast.error {
+            border-left-color: #ef4444;
+        }
+        .toast-icon {
+            font-size: 18px;
+            color: #10b981;
+        }
+        .toast.error .toast-icon {
+            color: #ef4444;
+        }
+        .toast-message {
+            font-size: 14px;
+            font-weight: 500;
+            color: #1e293b;
+        }
+    </style>
+</head>
+<body class="auth-body">
+    <div class="auth-card">
+        <div class="auth-header">
+            <div class="auth-logo">
+                <i class="fa-solid fa-shield-halved"></i>
+            </div>
+            <h2>DUT Secure Mail</h2>
+            <p>Hệ thống Mail Server Mã hóa AES-256</p>
+        </div>
+
+        <div class="auth-tabs">
+            <button id="tab-login-btn" class="tab-btn active" onclick="switchTab('login')">
+                <i class="fa-solid fa-right-to-bracket"></i> Đăng nhập
+            </button>
+            <button id="tab-register-btn" class="tab-btn" onclick="switchTab('register')">
+                <i class="fa-solid fa-user-plus"></i> Đăng ký
+            </button>
+        </div>
+
+        <!-- Form Đăng Nhập -->
+        <form id="login-form" class="auth-form" onsubmit="handleLogin(event)">
+            <div class="input-group">
+                <label for="login-username">Tên đăng nhập (Email)</label>
+                <div class="input-icon-wrapper">
+                    <i class="fa-solid fa-envelope input-icon"></i>
+                    <input type="email" id="login-username" placeholder="user@pbl4.com" autocomplete="username" required>
+                </div>
+            </div>
+            <div class="input-group">
+                <label for="login-password">Mật khẩu</label>
+                <div class="input-icon-wrapper">
+                    <i class="fa-solid fa-lock input-icon"></i>
+                    <input type="password" id="login-password" placeholder="••••••••" autocomplete="current-password" required>
+                </div>
+            </div>
+            <button type="submit" class="btn btn-primary btn-block">
+                Vào Hộp Thư <i class="fa-solid fa-arrow-right"></i>
+            </button>
+        </form>
+
+        <!-- Form Đăng Ký -->
+        <form id="register-form" class="auth-form hidden" onsubmit="handleRegister(event)">
+            <div class="input-group">
+                <label for="reg-username">Tên đăng nhập mới</label>
+                <div class="input-icon-wrapper">
+                    <i class="fa-solid fa-user input-icon"></i>
+                    <input type="email" id="reg-username" placeholder="user@pbl4.com" autocomplete="username" required>
+                </div>
+            </div>
+            <div class="input-group">
+                <label for="reg-password">Mật khẩu</label>
+                <div class="input-icon-wrapper">
+                    <i class="fa-solid fa-key input-icon"></i>
+                    <input type="password" id="reg-password" placeholder="••••••••" autocomplete="new-password" required>
+                </div>
+            </div>
+            <div class="input-group">
+                <label for="reg-confirm">Xác nhận mật khẩu</label>
+                <div class="input-icon-wrapper">
+                    <i class="fa-solid fa-check-double input-icon"></i>
+                    <input type="password" id="reg-confirm" placeholder="••••••••" autocomplete="new-password" required>
+                </div>
+            </div>
+            <button type="submit" class="btn btn-success btn-block">
+                Tạo Tài Khoản <i class="fa-solid fa-user-check"></i>
+            </button>
+        </form>
+
+        <div id="auth-message" class="alert-message hidden"></div>
+    </div>
+
+    <!-- KHUNG CHỨA TOAST THÔNG BÁO -->
+    <div id="toast-container"></div>
+
+    <script src="js/auth.js"></script>
+</body>
+</html>

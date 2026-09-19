@@ -1,4 +1,13 @@
+<<<<<<< HEAD
 /bin/
 /target/
 
 data/
+=======
+data/
+*.enc
+target/
+.settings/
+.classpath
+.project
+>>>>>>> origin/Luat

@@ -10,7 +10,7 @@ import java.util.Base64;
 public class SMTPClient {
 
     private static final String SMTP_HOST = "localhost";
-    private static final int SMTP_PORT = 2525; // Cổng SMTP Server của bạn
+    private static final int SMTP_PORT = 2525;
 
     public static boolean send(String username, String password, String to, String subject, String body) {
         try (
@@ -18,34 +18,35 @@ public class SMTPClient {
             PrintWriter out = new PrintWriter(socket.getOutputStream(), true);
             BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8))
         ) {
-            in.readLine(); // Đọc greeting 220
+            in.readLine(); // Greeting 220
 
             out.println("EHLO localhost");
             in.readLine();
 
-            // 1. Gửi lệnh yêu cầu đăng nhập AUTH LOGIN
             out.println("AUTH LOGIN");
-            in.readLine(); // Server phản hồi 334 (Yêu cầu Username)
+            in.readLine();
 
-            // 2. Gửi Username dạng mã hóa Base64
             out.println(Base64.getEncoder().encodeToString(username.getBytes(StandardCharsets.UTF_8)));
-            in.readLine(); // Server phản hồi 334 (Yêu cầu Password)
+            in.readLine();
 
-            // 3. Gửi Password dạng mã hóa Base64
             out.println(Base64.getEncoder().encodeToString(password.getBytes(StandardCharsets.UTF_8)));
-            String authResp = in.readLine(); // Server phản hồi 235 Authentication successful
+            String authResp = in.readLine();
 
-            // Nếu xác thực thất bại thì dừng phiên làm việc
             if (authResp == null || !authResp.startsWith("235")) {
                 return false;
             }
 
-            // 4. Tiến hành gửi mail theo luồng chuẩn SMTP RFC 5321
             out.println("MAIL FROM:<" + username + ">");
             in.readLine();
 
             out.println("RCPT TO:<" + to + ">");
-            in.readLine();
+            String rcptResp = in.readLine();
+
+            // MỚI: Nếu phản hồi RCPT TO không bắt đầu bằng 250 (ví dụ lỗi 550 người nhận không tồn tại), ngắt gửi ngay
+            if (rcptResp == null || !rcptResp.startsWith("250")) {
+                out.println("QUIT");
+                return false;
+            }
 
             out.println("DATA");
             in.readLine();

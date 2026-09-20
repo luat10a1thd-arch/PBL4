@@ -33,16 +33,22 @@ public class AuthHandler implements HttpHandler {
     public void handle(HttpExchange exchange) throws IOException {
         exchange.getResponseHeaders().add("Access-Control-Allow-Origin", "*");
         exchange.getResponseHeaders().add("Access-Control-Allow-Methods", "POST, OPTIONS");
-        exchange.getResponseHeaders().add("Access-Control-Allow-Headers", "Content-Type");
+        exchange.getResponseHeaders().add("Access-Control-Allow-Headers", "Content-Type, Authorization");
 
         if ("OPTIONS".equalsIgnoreCase(exchange.getRequestMethod())) {
             exchange.sendResponseHeaders(204, -1);
             return;
         }
 
-        if ("POST".equalsIgnoreCase(exchange.getRequestMethod())) {
-            String path = exchange.getRequestURI().getPath();
+        String path = exchange.getRequestURI().getPath();
 
+        // 1. Xử lý ĐĂNG XUẤT (POST /api/auth/logout)
+        if ("POST".equalsIgnoreCase(exchange.getRequestMethod()) && path.endsWith("/logout")) {
+            handleLogout(exchange);
+            return;
+        }
+
+        if ("POST".equalsIgnoreCase(exchange.getRequestMethod())) {
             InputStreamReader isr = new InputStreamReader(exchange.getRequestBody(), StandardCharsets.UTF_8);
             BufferedReader br = new BufferedReader(isr);
             StringBuilder formData = new StringBuilder();
@@ -82,6 +88,15 @@ public class AuthHandler implements HttpHandler {
         }
     }
 
+    private void handleLogout(HttpExchange exchange) throws IOException {
+        String authHeader = exchange.getRequestHeaders().getFirst("Authorization");
+        if (authHeader != null && authHeader.startsWith("Bearer ")) {
+            String token = authHeader.substring(7);
+            SessionManager.invalidate(token);
+        }
+        sendResponse(exchange, 200, "{\"success\": true, \"message\": \"Đã đăng xuất thành công!\"}");
+    }
+
     private synchronized void handleRegister(HttpExchange exchange, String username, String password) throws IOException {
         if (UserStore.exists(username)) {
             sendResponse(exchange, 400, "{\"success\": false, \"message\": \"Tài khoản đã tồn tại!\"}");
@@ -90,7 +105,6 @@ public class AuthHandler implements HttpHandler {
 
         String passwordHash = SecurityUtils.hashPassword(password);
         UserStore.addUser(username, passwordHash);
-
         MailStorageEngine.initMailbox(username);
 
         sendResponse(exchange, 200, "{\"success\": true, \"message\": \"Đăng ký tài khoản thành công!\"}");

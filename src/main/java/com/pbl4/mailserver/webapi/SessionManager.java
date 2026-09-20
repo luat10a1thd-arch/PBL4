@@ -4,15 +4,23 @@ import java.security.SecureRandom;
 import java.util.Base64;
 import java.util.concurrent.ConcurrentHashMap;
 
+/**
+ * Quản lý phiên đăng nhập (session token) sau khi user đăng nhập thành công.
+ * Lưu tạm username + password trong bộ nhớ (KHÔNG ghi xuống đĩa) để dùng lại
+ * khi gọi SMTP/POP3 nội bộ (vì SmtpHandler/Pop3Handler cần username/password
+ * để AUTH LOGIN, mà HTTP request từ frontend chỉ gửi token, không gửi lại
+ * password mỗi lần).
+ */
 public class SessionManager {
 
-    private static final long EXPIRY_MS = 2 * 60 * 60 * 1000; // 2 giờ
+    private static final long EXPIRY_MS = 2 * 60 * 60 * 1000; // Hết hạn sau 2 giờ không hoạt động
     private static final SecureRandom RANDOM = new SecureRandom();
 
     private static class Session {
-        final String username;
-        final String password; // giữ tạm trong RAM để gọi lại SMTP/POP3 nội bộ — KHÔNG ghi xuống đĩa
+        String username;
+        String password;
         long lastAccess;
+
         Session(String username, String password) {
             this.username = username;
             this.password = password;

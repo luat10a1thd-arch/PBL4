@@ -38,8 +38,6 @@ public class SmtpHandler implements Runnable {
                 if (isDataMode) {
                     if (".".equals(line)) {
                         isDataMode = false;
-                        
-                        // ĐỔI MỚI: Dùng đúng nội dung client gửi (bao gồm cả Subject nếu có)
                         String rawEmailContent = "From: " + mailFrom + "\nTo: " + rcptTo + "\n" + dataBuilder.toString();
 
                         boolean savedToRecipient = MailStorageEngine.saveEmail(rcptTo, rawEmailContent);
@@ -71,7 +69,6 @@ public class SmtpHandler implements Runnable {
                     if (encodedPass == null) break;
                     String decodedPass = new String(Base64.getDecoder().decode(encodedPass.trim()), StandardCharsets.UTF_8);
 
-                    // Dùng UserStore.findHash()
                     String storedHash = UserStore.findHash(decodedUser);
                     if (storedHash != null && SecurityUtils.checkPassword(decodedPass, storedHash)) {
                         isAuthenticated = true;
@@ -93,12 +90,24 @@ public class SmtpHandler implements Runnable {
                         out.println("530 5.7.0 Authentication required");
                         continue;
                     }
-                    rcptTo = parseAddress(line);
-                    out.println("250 OK");
+                    String candidate = parseAddress(line);
+
+                    // Tách biến candidate kiểm tra tồn tại trước khi gán rcptTo
+                    if (!UserStore.exists(candidate)) {
+                        out.println("550 5.1.1 No such user here");
+                    } else {
+                        rcptTo = candidate; // Chỉ gán khi người nhận hợp lệ
+                        out.println("250 OK");
+                    }
                 } 
                 else if (upperLine.startsWith("DATA")) {
                     if (!isAuthenticated) {
                         out.println("530 5.7.0 Authentication required");
+                        continue;
+                    }
+                    // Chặn nếu chưa có người nhận (RCPT TO) hợp lệ
+                    if (rcptTo == null || rcptTo.isEmpty()) {
+                        out.println("503 5.5.1 Need RCPT (recipient)");
                         continue;
                     }
                     isDataMode = true;

@@ -74,12 +74,16 @@
         <!-- Form Đăng Nhập -->
         <form id="login-form" class="auth-form" onsubmit="handleLogin(event)">
             <div class="input-group">
-                <label for="login-username">Tên đăng nhập (Email)</label>
-                <div class="input-icon-wrapper">
-                    <i class="fa-solid fa-envelope input-icon"></i>
-                    <input type="email" id="login-username" placeholder="user@pbl4.com" autocomplete="username" required>
-                </div>
-            </div>
+    <label for="login-username">Tên đăng nhập</label>
+    <div class="input-icon-wrapper" style="position: relative;">
+        <i class="fa-solid fa-envelope input-icon"></i>
+        <input type="text" id="login-username" placeholder="tenban" autocomplete="username" required
+               pattern="[a-zA-Z0-9._-]{3,32}"
+               title="Chỉ gồm chữ, số, dấu chấm, gạch dưới/ngang (3-32 ký tự)"
+               style="padding-right: 90px;">
+        <span style="position: absolute; right: 14px; top: 50%; transform: translateY(-50%); color: #64748b; font-weight: 500; font-size: 14px; pointer-events: none;">@pbl4.com</span>
+    </div>
+</div>
             <div class="input-group">
                 <label for="login-password">Mật khẩu</label>
                 <div class="input-icon-wrapper">
@@ -95,12 +99,16 @@
         <!-- Form Đăng Ký -->
         <form id="register-form" class="auth-form hidden" onsubmit="handleRegister(event)">
             <div class="input-group">
-                <label for="reg-username">Tên đăng nhập mới</label>
-                <div class="input-icon-wrapper">
-                    <i class="fa-solid fa-user input-icon"></i>
-                    <input type="email" id="reg-username" placeholder="user@pbl4.com" autocomplete="username" required>
-                </div>
-            </div>
+    <label for="reg-username">Tên đăng nhập mới</label>
+    <div class="input-icon-wrapper" style="position: relative;">
+        <i class="fa-solid fa-user input-icon"></i>
+        <input type="text" id="reg-username" placeholder="tenban" autocomplete="username" required
+               pattern="[a-zA-Z0-9._-]{3,32}"
+               title="Chỉ gồm chữ, số, dấu chấm, gạch dưới/ngang (3-32 ký tự)"
+               style="padding-right: 90px;">
+        <span style="position: absolute; right: 14px; top: 50%; transform: translateY(-50%); color: #64748b; font-weight: 500; font-size: 14px; pointer-events: none;">@pbl4.com</span>
+    </div>
+</div>
             <div class="input-group">
                 <label for="reg-password">Mật khẩu</label>
                 <div class="input-icon-wrapper">

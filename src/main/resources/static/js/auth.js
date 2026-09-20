@@ -1,3 +1,23 @@
+// ============================================================
+// Domain cố định của hệ thống - đổi ở đây nếu sau này muốn dùng domain khác
+// ============================================================
+const MAIL_DOMAIN = "@pbl4.com";
+
+// ------------------------------------------------------------
+// Kiểm tra phần tên trước @ chỉ chứa chữ, số, dấu chấm, gạch dưới,
+// gạch ngang - không cho phép ký tự lạ (đặc biệt là dấu / \ ..)
+// vì username sẽ được dùng làm TÊN THƯ MỤC lưu mail trên server,
+// ký tự lạ có thể gây lỗi hoặc rủi ro bảo mật (path traversal).
+// ------------------------------------------------------------
+function isValidUsernameLocalPart(value) {
+    return /^[a-zA-Z0-9._-]{3,32}$/.test(value);
+}
+
+// Chuyển phần tên người dùng gõ thành email đầy đủ dạng "ten@pbl4.com"
+function toFullEmail(localPart) {
+    return localPart.trim().toLowerCase() + MAIL_DOMAIN;
+}
+
 // Hàm hiển thị Toast Notification chuyên nghiệp
 function showToast(message, type = 'success') {
     const container = document.getElementById('toast-container');
@@ -5,9 +25,9 @@ function showToast(message, type = 'success') {
 
     const toast = document.createElement('div');
     toast.className = `toast ${type}`;
-    
+
     const iconClass = type === 'success' ? 'fa-circle-check' : 'fa-circle-exclamation';
-    
+
     toast.innerHTML = `
         <i class="fa-solid ${iconClass} toast-icon"></i>
         <span class="toast-message">${escapeHtml(message)}</span>
@@ -50,8 +70,14 @@ function switchTab(tab) {
 // Gọi API Đăng nhập thực tế (ĐÃ CẬP NHẬT LƯU AUTH TOKEN)
 async function handleLogin(event) {
     event.preventDefault();
-    const username = document.getElementById('login-username').value;
+    const rawUsername = document.getElementById('login-username').value;
     const password = document.getElementById('login-password').value;
+
+    if (!isValidUsernameLocalPart(rawUsername)) {
+        showToast('Tên đăng nhập chỉ gồm chữ, số, dấu chấm, gạch dưới/ngang (3-32 ký tự)!', 'error');
+        return;
+    }
+    const username = toFullEmail(rawUsername);
 
     try {
         const response = await fetch('/api/auth/login', {
@@ -62,9 +88,8 @@ async function handleLogin(event) {
 
         const data = await response.json();
         if (data.success) {
-            // Lưu username và session token vào LocalStorage
             localStorage.setItem('currentUser', data.username);
-            localStorage.setItem('authToken', data.token); // Đã thêm token bảo mật
+            localStorage.setItem('authToken', data.token);
             window.location.href = '/main';
         } else {
             showToast(data.message || 'Sai tài khoản hoặc mật khẩu!', 'error');
@@ -77,14 +102,19 @@ async function handleLogin(event) {
 // Gọi API Đăng ký thực tế
 async function handleRegister(event) {
     event.preventDefault();
-    const username = document.getElementById('reg-username').value;
+    const rawUsername = document.getElementById('reg-username').value;
     const password = document.getElementById('reg-password').value;
     const confirm = document.getElementById('reg-confirm').value;
 
+    if (!isValidUsernameLocalPart(rawUsername)) {
+        showToast('Tên đăng nhập chỉ gồm chữ, số, dấu chấm, gạch dưới/ngang (3-32 ký tự)!', 'error');
+        return;
+    }
     if (password !== confirm) {
         showToast('Mật khẩu xác nhận không khớp!', 'error');
         return;
     }
+    const username = toFullEmail(rawUsername);
 
     try {
         const response = await fetch('/api/auth/register', {
@@ -94,7 +124,7 @@ async function handleRegister(event) {
         });
 
         const data = await response.json();
-        
+
         if (data.success) {
             showToast(data.message || 'Đăng ký tài khoản thành công!', 'success');
             document.getElementById('register-form').reset();

@@ -16,6 +16,15 @@ public class UserStore {
 
         String line = "{\"username\":\"" + username + "\",\"passwordHash\":\"" + passwordHash
                 + "\",\"salt\":\"" + salt + "\"}";
+
+        // Đảm bảo thư mục cha (data/) tồn tại trước khi ghi file,
+        // tránh FileNotFoundException khi chạy lần đầu tiên (chưa có thư mục data/).
+        File file = new File(USERS_FILE);
+        File parentDir = file.getParentFile();
+        if (parentDir != null && !parentDir.exists()) {
+            parentDir.mkdirs();
+        }
+
         try (FileWriter fw = new FileWriter(USERS_FILE, true)) {
             fw.write(line + "\n");
         }

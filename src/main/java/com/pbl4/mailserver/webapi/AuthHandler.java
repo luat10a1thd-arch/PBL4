@@ -11,8 +11,23 @@ import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.regex.Pattern;
 
 public class AuthHandler implements HttpHandler {
+
+    // ------------------------------------------------------------
+    // Domain cố định của hệ thống - PHẢI khớp với MAIL_DOMAIN bên
+    // phía frontend (js). Regex chỉ chấp nhận: chữ thường/hoa, số,
+    // dấu chấm, gạch dưới, gạch ngang ở phần tên, theo sau đúng
+    // "@pbl4.com". Kiểm tra ở đây để không phụ thuộc vào validate
+    // phía client (client có thể bị bỏ qua nếu gọi thẳng API).
+    // ------------------------------------------------------------
+    private static final Pattern VALID_EMAIL_PATTERN =
+            Pattern.compile("^[a-zA-Z0-9._-]{3,32}@pbl4\\.com$");
+
+    private static boolean isValidEmail(String email) {
+        return email != null && VALID_EMAIL_PATTERN.matcher(email).matches();
+    }
 
     @Override
     public void handle(HttpExchange exchange) throws IOException {
@@ -27,7 +42,7 @@ public class AuthHandler implements HttpHandler {
 
         if ("POST".equalsIgnoreCase(exchange.getRequestMethod())) {
             String path = exchange.getRequestURI().getPath();
-            
+
             InputStreamReader isr = new InputStreamReader(exchange.getRequestBody(), StandardCharsets.UTF_8);
             BufferedReader br = new BufferedReader(isr);
             StringBuilder formData = new StringBuilder();
@@ -42,6 +57,16 @@ public class AuthHandler implements HttpHandler {
 
             if (username == null || password == null || username.isEmpty() || password.isEmpty()) {
                 sendResponse(exchange, 400, "{\"success\": false, \"message\": \"Thiếu thông tin tài khoản hoặc mật khẩu!\"}");
+                return;
+            }
+
+            // ------------------------------------------------------------
+            // Validate định dạng email NGAY TẠI SERVER - không tin dữ liệu
+            // từ client, kể cả khi frontend đã kiểm tra rồi.
+            // ------------------------------------------------------------
+            if (!isValidEmail(username)) {
+                sendResponse(exchange, 400,
+                    "{\"success\": false, \"message\": \"Tên đăng nhập không hợp lệ! Chỉ chấp nhận dạng ten@pbl4.com (3-32 ký tự chữ/số/._- )\"}");
                 return;
             }
 
@@ -81,7 +106,6 @@ public class AuthHandler implements HttpHandler {
 
         boolean isValid = SecurityUtils.checkPassword(password, storedHash);
         if (isValid) {
-            // CẬP NHẬT: Truyền cả password vào SessionManager
             String token = SessionManager.createSession(username, password);
             sendResponse(exchange, 200,
                 "{\"success\": true, \"message\": \"Đăng nhập thành công!\", " +

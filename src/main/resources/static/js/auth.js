@@ -47,11 +47,17 @@ function switchTab(tab) {
     }
 }
 
-// Gọi API Đăng nhập thực tế (ĐÃ CẬP NHẬT LƯU AUTH TOKEN)
+// Gọi API Đăng nhập thực tế (ĐÃ BỔ SUNG VALIDATE EMAIL @pbl4.com)
 async function handleLogin(event) {
     event.preventDefault();
-    const username = document.getElementById('login-username').value;
+    const username = document.getElementById('login-username').value.trim();
     const password = document.getElementById('login-password').value;
+
+    // 1. Kiểm tra định dạng tài khoản phải có đuôi @pbl4.com
+    if (!username.endsWith('@pbl4.com')) {
+        showToast('Tài khoản phải có định dạng @pbl4.com!', 'error');
+        return;
+    }
 
     try {
         const response = await fetch('/api/auth/login', {
@@ -74,13 +80,36 @@ async function handleLogin(event) {
     }
 }
 
-// Gọi API Đăng ký thực tế
+// Gọi API Đăng ký thực tế (ĐÃ BỔ SUNG VALIDATE ĐUÔI EMAIL & MẬT KHẨU MẠNH)
 async function handleRegister(event) {
     event.preventDefault();
-    const username = document.getElementById('reg-username').value;
+    const username = document.getElementById('reg-username').value.trim();
     const password = document.getElementById('reg-password').value;
     const confirm = document.getElementById('reg-confirm').value;
 
+    // 1. Kiểm tra đuôi email phải là @pbl4.com
+    if (!username.endsWith('@pbl4.com')) {
+        showToast('Tên đăng nhập phải có đuôi @pbl4.com!', 'error');
+        return;
+    }
+
+    // 2. Kiểm tra độ dài mật khẩu (>= 8 và <= 32)
+    if (password.length < 8 || password.length > 32) {
+        showToast('Mật khẩu phải từ 8 đến 32 ký tự!', 'error');
+        return;
+    }
+
+    // 3. Kiểm tra mật khẩu phải có cả chữ cái, chữ số và ký tự đặc biệt
+    const hasLetter = /[a-zA-Z]/.test(password);
+    const hasDigit = /[0-9]/.test(password);
+    const hasSpecial = /[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?]/.test(password);
+
+    if (!hasLetter || !hasDigit || !hasSpecial) {
+        showToast('Mật khẩu phải chứa ít nhất 1 chữ cái, 1 chữ số và 1 ký tự đặc biệt (!@#$%^&*)!', 'error');
+        return;
+    }
+
+    // 4. Kiểm tra xác nhận mật khẩu
     if (password !== confirm) {
         showToast('Mật khẩu xác nhận không khớp!', 'error');
         return;

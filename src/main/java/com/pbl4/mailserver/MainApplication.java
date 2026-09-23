@@ -6,7 +6,7 @@ import com.pbl4.mailserver.webapi.ApiServer;
 
 public class MainApplication {
     public static void main(String[] args) {
-        System.out.println("=== Đang khởi động PBL4 Secure Mail Server ===");
+        System.out.println("=== Đang khởi động DUT Secure Mail Server ===");
         
         // 1. Web API Server (8080)
         ApiServer.startServer();

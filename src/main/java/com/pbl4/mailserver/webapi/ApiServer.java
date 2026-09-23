@@ -4,11 +4,10 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
 
-import java.io.File;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
-import java.nio.file.Files;
 
 /**
  * Web Server HTTP lắng nghe cổng 8080.
@@ -26,8 +25,8 @@ public class ApiServer {
             server.createContext("/", new StaticFileHandler());
 
             // 2. Đăng ký các cổng API xử lý Đăng nhập, Đăng ký, Gửi/Nhận mail
-            server.createContext("/api/auth", new AuthHandler());
-            server.createContext("/api/mails", new MailHandler());
+            server.createContext("/api/auth", new CorsHandlerWrapper(new AuthHandler()));
+            server.createContext("/api/mails", new CorsHandlerWrapper(new MailHandler()));
 
             server.setExecutor(null); // Sử dụng default executor
             server.start();
@@ -39,7 +38,35 @@ public class ApiServer {
     }
 
     /**
-     * Handler đọc và trả về các file giao diện tĩnh từ thư mục src/main/resources/static/
+     * Wrapper tự động chèn các Header CORS vào tất cả các phản hồi API
+     * Giải quyết triệt để lỗi "Lỗi kết nối tới Server!" do trình duyệt chặn Cross-Origin.
+     */
+    static class CorsHandlerWrapper implements HttpHandler {
+        private final HttpHandler handler;
+
+        public CorsHandlerWrapper(HttpHandler handler) {
+            this.handler = handler;
+        }
+
+        @Override
+        public void handle(HttpExchange exchange) throws IOException {
+            // Cho phép tất cả các nguồn gửi yêu cầu đến API
+            exchange.getResponseHeaders().set("Access-Control-Allow-Origin", "*");
+            exchange.getResponseHeaders().set("Access-Control-Allow-Methods", "GET, POST, OPTIONS, PUT, DELETE");
+            exchange.getResponseHeaders().set("Access-Control-Allow-Headers", "Content-Type, Authorization");
+
+            // Xử lý yêu cầu Pre-flight (OPTIONS) của trình duyệt
+            if ("OPTIONS".equalsIgnoreCase(exchange.getRequestMethod())) {
+                exchange.sendResponseHeaders(204, -1);
+                return;
+            }
+
+            handler.handle(exchange);
+        }
+    }
+
+    /**
+     * Handler đọc và trả về các file giao diện tĩnh từ classpath (bên trong file JAR/resources)
      */
     static class StaticFileHandler implements HttpHandler {
         @Override
@@ -47,18 +74,18 @@ public class ApiServer {
             String path = exchange.getRequestURI().getPath();
             
             // Xử lý Clean URL: Tự động ánh xạ route chuẩn
-            if (path.equals("/")) {
+            if (path.equals("/") || path.equals("/index") || path.equals("/index.html")) {
                 path = "/index.html";
-            } else if (path.equals("/main")) {
+            } else if (path.equals("/main") || path.equals("/main.html")) {
                 path = "/main.html";
-            } else if (path.equals("/index")) {
-                path = "/index.html";
             }
 
-            File file = new File("src/main/resources/static" + path);
+            // Đọc file từ classpath bên trong file JAR
+            String resourcePath = "/static" + path;
+            InputStream is = getClass().getResourceAsStream(resourcePath);
 
-            if (file.exists() && !file.isDirectory()) {
-                byte[] bytes = Files.readAllBytes(file.toPath());
+            if (is != null) {
+                byte[] bytes = is.readAllBytes();
                 String contentType = getContentType(path);
                 
                 exchange.getResponseHeaders().set("Content-Type", contentType);
@@ -67,6 +94,7 @@ public class ApiServer {
                 OutputStream os = exchange.getResponseBody();
                 os.write(bytes);
                 os.close();
+                is.close();
             } else {
                 // Trả về lỗi 404 nếu không tìm thấy file HTML/CSS/JS
                 String response = "404 Not Found";

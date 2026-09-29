@@ -24,9 +24,10 @@ public class ApiServer {
             // 1. Phục vụ các file giao diện tĩnh (Static Files: HTML, CSS, JS)
             server.createContext("/", new StaticFileHandler());
 
-            // 2. Đăng ký các cổng API xử lý Đăng nhập, Đăng ký, Gửi/Nhận mail
+            // 2. Đăng ký các cổng API xử lý Đăng nhập, Đăng ký, Gửi/Nhận mail & Quản trị (Admin)
             server.createContext("/api/auth", new CorsHandlerWrapper(new AuthHandler()));
             server.createContext("/api/mails", new CorsHandlerWrapper(new MailHandler()));
+            server.createContext("/api/admin", new CorsHandlerWrapper(new AdminHandler())); // Bổ sung đăng ký AdminHandler
 
             server.setExecutor(null); // Sử dụng default executor
             server.start();
@@ -78,9 +79,11 @@ public class ApiServer {
                 path = "/index.html";
             } else if (path.equals("/main") || path.equals("/main.html")) {
                 path = "/main.html";
+            } else if (path.equals("/admin") || path.equals("/admin.html")) {
+                path = "/admin.html";
             }
 
-            // Đọc file từ classpath bên trong file JAR
+            // Đọc file từ classpath bên trong file JAR (src/main/resources/static)
             String resourcePath = "/static" + path;
             InputStream is = getClass().getResourceAsStream(resourcePath);
 
@@ -111,6 +114,7 @@ public class ApiServer {
             if (path.endsWith(".js")) return "application/javascript; charset=UTF-8";
             if (path.endsWith(".png")) return "image/png";
             if (path.endsWith(".jpg")) return "image/jpeg";
+            if (path.endsWith(".svg")) return "image/svg+xml";
             return "text/plain";
         }
     }

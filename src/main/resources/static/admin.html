@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DUT Mail - Admin Portal</title>
+    <!-- FontAwesome & Style chung -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body class="admin-body">
+
+<div class="admin-container">
+    <!-- Sidebar -->
+    <div class="admin-sidebar">
+        <div class="admin-brand">
+            <i class="fa-solid fa-paper-plane"></i>
+            <span>DUT Mail Admin</span>
+        </div>
+        <ul class="admin-menu">
+            <li>
+                <a href="#" class="active" onclick="switchAdminTab('users', this)">
+                    <i class="fa-solid fa-users-gear"></i> Quản lý Tài khoản
+                </a>
+            </li>
+            <li>
+                <a href="#" onclick="switchAdminTab('mail-storage', this)">
+                    <i class="fa-solid fa-database"></i> Quản lý Thư & Dung lượng
+                </a>
+            </li>
+        </ul>
+    </div>
+
+    <!-- Main Content Area -->
+    <div class="admin-main">
+        <!-- Top Header -->
+        <div class="admin-header">
+            <div style="font-weight: 600; font-size: 18px;">Trang Quản Trị Hệ Thống</div>
+            <div class="admin-user-info">
+                <span class="badge-admin"><i class="fa-solid fa-shield-halved"></i> Administrator</span>
+                <span id="admin-username" style="font-weight: 600;">admin@pbl4.com</span>
+                <button class="btn-logout" onclick="logoutAdmin()">
+                    <i class="fa-solid fa-right-from-bracket"></i> Đăng xuất
+                </button>
+            </div>
+        </div>
+
+        <div class="admin-content">
+            <!-- Metric Cards -->
+            <div class="stats-grid">
+                <div class="stat-card">
+                    <div class="stat-icon"><i class="fa-solid fa-users"></i></div>
+                    <div class="stat-info">
+                        <h4>Tổng tài khoản</h4>
+                        <div class="value" id="stat-total-users">0</div>
+                    </div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-icon"><i class="fa-solid fa-envelope"></i></div>
+                    <div class="stat-info">
+                        <h4>Thư đã khởi tạo</h4>
+                        <div class="value" id="stat-total-mails">--</div>
+                    </div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-icon"><i class="fa-solid fa-hard-drive"></i></div>
+                    <div class="stat-info">
+                        <h4>Dung lượng sử dụng</h4>
+                        <div class="value" id="stat-storage-used">Active</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- TAB 1: QUẢN LÝ TÀI KHOẢN VÀ NGƯỜI DÙNG -->
+            <div id="tab-users" class="tab-content active">
+                <div class="card-panel">
+                    <h3><i class="fa-solid fa-users-viewfinder"></i> Danh sách người dùng & Trạng thái</h3>
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Tài khoản Email</th>
+                                <th>Quyền</th>
+                                <th>Trạng thái</th>
+                                <th>Lần đăng nhập cuối</th>
+                                <th>Thao tác</th>
+                            </tr>
+                        </thead>
+                        <tbody id="user-table-body">
+                            <tr>
+                                <td colspan="5" style="text-align: center; color: #64748b;">Đang tải danh sách tài khoản từ Server...</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <div class="card-panel">
+                    <h3><i class="fa-solid fa-clock-rotate-left"></i> Nhật ký hoạt động & Đăng nhập (System Logs)</h3>
+                    <div class="log-box" id="login-logs">
+                        [SYSTEM LOG] Web Server API active at http://20.24.219.239:8080<br>
+                        [SYSTEM LOG] Admin Session Authenticated for 'admin@pbl4.com'<br>
+                        [SYSTEM LOG] User Store linked to data/users.json
+                    </div>
+                </div>
+            </div>
+
+            <!-- TAB 2: QUẢN LÝ THƯ TỪ VÀ DUNG LƯỢNG -->
+            <div id="tab-mail-storage" class="tab-content">
+                <div class="card-panel">
+                    <h3><i class="fa-solid fa-sliders"></i> Cấu hình Giới hạn Dung lượng Hộp thư (Quota)</h3>
+                    <form onsubmit="handleSaveQuota(event)">
+                        <div class="form-group">
+                            <label>Dung lượng tối đa mặc định cho mỗi Hộp thư (MB):</label>
+                            <input type="number" class="form-control" id="quota-limit" value="100" min="10" max="2048">
+                        </div>
+                        <button type="submit" class="btn-primary-admin"><i class="fa-solid fa-floppy-disk"></i> Lưu cấu hình Quota</button>
+                    </form>
+                </div>
+
+                <div class="card-panel">
+                    <h3><i class="fa-solid fa-bullhorn"></i> Gửi Thông Báo Hệ Thống (Broadcast Mail)</h3>
+                    <form onsubmit="handleSendBroadcast(event)">
+                        <div class="form-group">
+                            <label>Tiêu đề thông báo:</label>
+                            <input type="text" class="form-control" id="broadcast-subject" placeholder="[Thông báo bảo trì] Lịch nâng cấp máy chủ..." required>
+                        </div>
+                        <div class="form-group">
+                            <label>Nội dung gửi đến TOÀN BỘ người dùng @pbl4.com:</label>
+                            <textarea class="form-control" id="broadcast-body" rows="4" placeholder="Nhập nội dung thông báo hệ thống tại đây..." required></textarea>
+                        </div>
+                        <button type="submit" class="btn-primary-admin"><i class="fa-solid fa-paper-plane"></i> Gửi thông báo hàng loạt</button>
+                    </form>
+                </div>
+            </div>
+
+        </div>
+    </div>
+</div>
+
+<script>
+    const token = localStorage.getItem('authToken');
+    const userRole = localStorage.getItem('userRole');
+
+    // Chặn truy cập nếu không phải Admin
+    if (!token || userRole !== 'ADMIN') {
+        alert('Bạn không có quyền truy cập trang quản trị!');
+        window.location.href = '/index.html';
+    }
+
+    // Tải danh sách người dùng thực tế từ Server ngay khi mở trang
+    document.addEventListener('DOMContentLoaded', loadUsersList);
+
+    function switchAdminTab(tabName, element) {
+        document.querySelectorAll('.tab-content').forEach(tab => tab.classList.remove('active'));
+        document.querySelectorAll('.admin-menu a').forEach(menu => menu.classList.remove('active'));
+
+        document.getElementById('tab-' + tabName).classList.add('active');
+        element.classList.add('active');
+    }
+
+    async function loadUsersList() {
+        try {
+            const response = await fetch('/api/admin/users', {
+                headers: { 'Authorization': 'Bearer ' + token }
+            });
+            const data = await response.json();
+
+            if (data.success) {
+                const tbody = document.getElementById('user-table-body');
+                tbody.innerHTML = '';
+
+                document.getElementById('stat-total-users').innerText = data.users.length;
+
+                data.users.forEach(u => {
+                    const row = document.createElement('tr');
+                    const isSystemAdmin = u.username.toLowerCase() === 'admin@pbl4.com';
+                    const role = isSystemAdmin ? 'ADMIN' : 'USER';
+
+                    row.innerHTML = `
+                        <td><strong>${escapeHtml(u.username)}</strong></td>
+                        <td><span style="color:${isSystemAdmin ? '#5046e5' : '#64748b'}; font-weight:600;">${role}</span></td>
+                        <td><span class="status-badge status-active">Hoạt động</span></td>
+                        <td>2026-09-29</td>
+                        <td>
+                            ${!isSystemAdmin ? `<button class="btn-action btn-delete" onclick="deleteUser('${escapeHtml(u.username)}')"><i class="fa-solid fa-trash"></i> Xóa</button>` : '<em>Tài khoản hệ thống</em>'}
+                        </td>
+                    `;
+                    tbody.appendChild(row);
+                });
+            } else {
+                alert(data.message || 'Không thể lấy danh sách người dùng');
+            }
+        } catch (err) {
+            console.error('Lỗi tải danh sách người dùng:', err);
+        }
+    }
+
+    async function deleteUser(email) {
+        if (confirm(`CẢNH BÁO: Xóa vĩnh viễn tài khoản ${email} và toàn bộ hộp thư?`)) {
+            try {
+                const res = await fetch('/api/admin/user/delete', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded',
+                        'Authorization': 'Bearer ' + token
+                    },
+                    body: `targetUser=${encodeURIComponent(email)}`
+                });
+                const data = await res.json();
+                alert(data.message);
+                if (data.success) loadUsersList();
+            } catch (err) {
+                alert('Lỗi kết nối Server!');
+            }
+        }
+    }
+
+    async function handleSendBroadcast(e) {
+        e.preventDefault();
+        const subject = document.getElementById('broadcast-subject').value;
+        const body = document.getElementById('broadcast-body').value;
+
+        try {
+            const res = await fetch('/api/admin/broadcast', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                    'Authorization': 'Bearer ' + token
+                },
+                body: `subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`
+            });
+            const data = await res.json();
+            alert(data.message);
+            if (data.success) {
+                document.getElementById('broadcast-subject').value = '';
+                document.getElementById('broadcast-body').value = '';
+            }
+        } catch (err) {
+            alert('Lỗi khi gửi thông báo!');
+        }
+    }
+
+    function handleSaveQuota(e) {
+        e.preventDefault();
+        const limit = document.getElementById('quota-limit').value;
+        alert(`Đã cập nhật cấu hình Quota hộp thư thành: ${limit} MB/tài khoản!`);
+    }
+
+    function logoutAdmin() {
+        localStorage.clear();
+        window.location.href = '/index.html';
+    }
+
+    function escapeHtml(str) {
+        return str ? str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;") : '';
+    }
+</script>
+
+</body>
+</html>

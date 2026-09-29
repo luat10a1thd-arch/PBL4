@@ -14,6 +14,27 @@ import java.nio.charset.StandardCharsets;
 
 public class AuthHandler implements HttpHandler {
 
+    private static final String ADMIN_EMAIL = "admin@pbl4.com";
+    private static final String ADMIN_DEFAULT_PASS = "@Luat0105";
+
+    public AuthHandler() {
+        // Tự động khởi tạo tài khoản Admin mặc định nếu chưa tồn tại trong hệ thống
+        ensureAdminAccountExists();
+    }
+
+    private synchronized void ensureAdminAccountExists() {
+        try {
+            if (!UserStore.exists(ADMIN_EMAIL)) {
+                String passwordHash = SecurityUtils.hashPassword(ADMIN_DEFAULT_PASS);
+                UserStore.addUser(ADMIN_EMAIL, passwordHash);
+                MailStorageEngine.initMailbox(ADMIN_EMAIL);
+                System.out.println("[AUTH] Đã tự động khởi tạo tài khoản Admin: " + ADMIN_EMAIL);
+            }
+        } catch (Exception e) {
+            System.err.println("[AUTH] Lỗi khi tạo tài khoản Admin mặc định: " + e.getMessage());
+        }
+    }
+
     @Override
     public void handle(HttpExchange exchange) throws IOException {
         exchange.getResponseHeaders().add("Access-Control-Allow-Origin", "*");
@@ -46,10 +67,12 @@ public class AuthHandler implements HttpHandler {
             String username = getParamValue(body, "username");
             String password = getParamValue(body, "password");
 
-            if (username == null || password == null || username.isEmpty() || password.isEmpty()) {
+            if (username == null || password == null || username.trim().isEmpty() || password.isEmpty()) {
                 sendResponse(exchange, 400, "{\"success\": false, \"message\": \"Thiếu thông tin tài khoản hoặc mật khẩu!\"}");
                 return;
             }
+
+            username = username.trim();
 
             if (path.endsWith("/register")) {
                 handleRegister(exchange, username, password);
@@ -96,9 +119,15 @@ public class AuthHandler implements HttpHandler {
         boolean isValid = SecurityUtils.checkPassword(password, storedHash);
         if (isValid) {
             String token = SessionManager.createSession(username, password);
+            
+            // Xกำหนด Phân quyền dựa trên tài khoản Email
+            String role = ADMIN_EMAIL.equalsIgnoreCase(username) ? "ADMIN" : "USER";
+
             sendResponse(exchange, 200,
                 "{\"success\": true, \"message\": \"Đăng nhập thành công!\", " +
-                "\"username\": \"" + username + "\", \"token\": \"" + token + "\"}");
+                "\"username\": \"" + username + "\", " +
+                "\"token\": \"" + token + "\", " +
+                "\"role\": \"" + role + "\"}");
         } else {
             sendResponse(exchange, 401, "{\"success\": false, \"message\": \"Mật khẩu không chính xác!\"}");
         }

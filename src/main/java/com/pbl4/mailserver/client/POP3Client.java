@@ -2,6 +2,7 @@ package com.pbl4.mailserver.client;
 
 import java.io.*;
 import java.net.Socket;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -11,8 +12,8 @@ public class POP3Client {
     public static List<String> fetchAll(String username, String password) {
         List<String> results = new ArrayList<>();
         try (Socket socket = new Socket("localhost", 1110);
-             BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
-             PrintWriter out = new PrintWriter(socket.getOutputStream(), true)) {
+             BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8));
+             PrintWriter out = new PrintWriter(new java.io.OutputStreamWriter(socket.getOutputStream(), StandardCharsets.UTF_8), true)) {
 
             in.readLine(); // +OK banner
 
@@ -43,6 +44,8 @@ public class POP3Client {
                 StringBuilder msg = new StringBuilder();
                 String line;
                 while ((line = in.readLine()) != null && !line.equals(".")) {
+                    // Bỏ một dấu chấm đã được POP3 dot-stuffing thêm vào khi gửi.
+                    if (line.startsWith("..")) line = line.substring(1);
                     msg.append(line).append("\n");
                 }
                 results.add(msg.toString());

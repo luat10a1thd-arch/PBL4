@@ -7,6 +7,7 @@ import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
@@ -43,7 +44,7 @@ public class MailStorageEngine {
                     : "PBL4_DEFAULT_SALT".getBytes(StandardCharsets.UTF_8);
 
             String encryptedContent = SecurityUtils.encrypt(rawEmailContent, SECRET_KEY, saltBytes);
-            String fileName = "msg_" + System.currentTimeMillis() + ".enc";
+            String fileName = "msg_" + System.currentTimeMillis() + "_" + UUID.randomUUID() + ".enc";
             String filePath = BASE_DATA_DIR + recipient + "/" + fileName;
 
             Files.write(Paths.get(filePath), encryptedContent.getBytes(StandardCharsets.UTF_8));

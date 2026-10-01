@@ -7,16 +7,63 @@
     <!-- FontAwesome & Style chung -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <link rel="stylesheet" href="css/style.css">
+    <style>
+        .confirm-modal-overlay {
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(15, 23, 42, 0.6);
+            backdrop-filter: blur(4px);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 10000;
+            animation: fadeIn 0.2s ease-out;
+        }
+        .confirm-modal-box {
+            background: #ffffff;
+            width: 100%;
+            max-width: 420px;
+            border-radius: 16px;
+            padding: 24px;
+            box-shadow: var(--shadow-lg);
+            text-align: center;
+        }
+        .confirm-icon {
+            font-size: 44px;
+            color: #f59e0b;
+            margin-bottom: 12px;
+        }
+        .confirm-title {
+            font-size: 18px;
+            font-weight: 700;
+            color: #0f172a;
+            margin-bottom: 8px;
+        }
+        .confirm-msg {
+            font-size: 14px;
+            color: #64748b;
+            margin-bottom: 20px;
+        }
+        .confirm-actions {
+            display: flex;
+            gap: 10px;
+            justify-content: center;
+        }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: scale(0.95); }
+            to { opacity: 1; transform: scale(1); }
+        }
+    </style>
 </head>
 <body class="admin-body">
 
 <div class="admin-container">
     <!-- Sidebar -->
     <div class="admin-sidebar">
-        <div class="admin-brand">
-            <i class="fa-solid fa-paper-plane"></i>
-            <span>DUT Mail Admin</span>
-        </div>
+		<div class="admin-brand" onclick="location.reload()" style="cursor: pointer;" title="Tải lại trang">
+		            <i class="fa-solid fa-paper-plane"></i>
+		            <span>DUT Mail Admin</span>
+		</div>
         <ul class="admin-menu">
             <li>
                 <a href="#" class="active" onclick="switchAdminTab('users', this)">
@@ -95,11 +142,7 @@
 
                 <div class="card-panel">
                     <h3><i class="fa-solid fa-clock-rotate-left"></i> Nhật ký hoạt động & Đăng nhập (System Logs)</h3>
-                    <div class="log-box" id="login-logs">
-                        [SYSTEM LOG] Web Server API active at http://20.24.219.239:8080<br>
-                        [SYSTEM LOG] Admin Session Authenticated for 'admin@pbl4.com'<br>
-                        [SYSTEM LOG] User Store linked to data/users.json
-                    </div>
+                    <div class="log-box" id="login-logs">Đang tải nhật ký hệ thống...</div>
                 </div>
             </div>
 
@@ -136,18 +179,86 @@
     </div>
 </div>
 
+<!-- KHUNG CHỨA TOAST NOTIFICATION -->
+<div id="toast-container"></div>
+
+<!-- CUSTOM CONFIRM MODAL -->
+<div id="confirm-modal" class="confirm-modal-overlay hidden">
+    <div class="confirm-modal-box">
+        <i class="fa-solid fa-circle-exclamation confirm-icon" id="confirm-modal-icon"></i>
+        <div class="confirm-title" id="confirm-modal-title">Xác nhận</div>
+        <div class="confirm-msg" id="confirm-modal-msg">Bạn có chắc chắn muốn thực hiện hành động này?</div>
+        <div class="confirm-actions">
+            <button class="btn btn-outline" onclick="closeConfirmModal(false)">Hủy bỏ</button>
+            <button class="btn btn-primary" id="confirm-btn-yes" onclick="closeConfirmModal(true)">Đồng ý</button>
+        </div>
+    </div>
+</div>
+
 <script>
     const token = localStorage.getItem('authToken');
     const userRole = localStorage.getItem('userRole');
 
-    // Chặn truy cập nếu không phải Admin
     if (!token || userRole !== 'ADMIN') {
-        alert('Bạn không có quyền truy cập trang quản trị!');
-        window.location.href = '/index.html';
+        showToast('Bạn không có quyền truy cập trang quản trị!', 'error');
+        setTimeout(() => window.location.href = '/index.html', 1000);
     }
 
-    // Tải danh sách người dùng thực tế từ Server ngay khi mở trang
-    document.addEventListener('DOMContentLoaded', loadUsersList);
+    document.addEventListener('DOMContentLoaded', () => {
+        loadUsersList();
+        loadSystemLogs();
+    });
+
+    let confirmCallback = null;
+
+    function showConfirmModal(title, msg, onConfirm, isDanger = false) {
+        document.getElementById('confirm-modal-title').innerText = title;
+        document.getElementById('confirm-modal-msg').innerText = msg;
+        const btnYes = document.getElementById('confirm-btn-yes');
+        const icon = document.getElementById('confirm-modal-icon');
+
+        if (isDanger) {
+            btnYes.className = 'btn btn-primary';
+            btnYes.style.background = '#ef4444';
+            icon.style.color = '#ef4444';
+        } else {
+            btnYes.className = 'btn btn-primary';
+            btnYes.style.background = '#5046e5';
+            icon.style.color = '#f59e0b';
+        }
+
+        confirmCallback = onConfirm;
+        document.getElementById('confirm-modal').classList.remove('hidden');
+    }
+
+    function closeConfirmModal(result) {
+        document.getElementById('confirm-modal').classList.add('hidden');
+        if (result && typeof confirmCallback === 'function') {
+            confirmCallback();
+        }
+        confirmCallback = null;
+    }
+
+    function showToast(message, type = 'success') {
+        const container = document.getElementById('toast-container');
+        if (!container) return;
+
+        const toast = document.createElement('div');
+        toast.className = `toast ${type}`;
+        const iconClass = type === 'success' ? 'fa-circle-check' : 'fa-circle-exclamation';
+        
+        toast.innerHTML = `
+            <i class="fa-solid ${iconClass} toast-icon"></i>
+            <span class="toast-message">${escapeHtml(message)}</span>
+        `;
+
+        container.appendChild(toast);
+        setTimeout(() => toast.classList.add('show'), 10);
+        setTimeout(() => {
+            toast.classList.remove('show');
+            setTimeout(() => toast.remove(), 300);
+        }, 3000);
+    }
 
     function switchAdminTab(tabName, element) {
         document.querySelectorAll('.tab-content').forEach(tab => tab.classList.remove('active'));
@@ -167,51 +278,116 @@
             if (data.success) {
                 const tbody = document.getElementById('user-table-body');
                 tbody.innerHTML = '';
-
                 document.getElementById('stat-total-users').innerText = data.users.length;
 
                 data.users.forEach(u => {
                     const row = document.createElement('tr');
                     const isSystemAdmin = u.username.toLowerCase() === 'admin@pbl4.com';
                     const role = isSystemAdmin ? 'ADMIN' : 'USER';
+                    const isLocked = u.status === 'LOCKED';
+
+                    const statusBadge = isLocked 
+                        ? '<span class="status-badge status-locked">Tạm khóa</span>' 
+                        : '<span class="status-badge status-active">Hoạt động</span>';
+
+                    const lockBtn = isLocked 
+                        ? `<button class="btn-action btn-unlock" onclick="toggleLockUser('${escapeHtml(u.username)}', 'unlock')"><i class="fa-solid fa-lock-open"></i> Mở khóa</button>` 
+                        : `<button class="btn-action btn-lock" onclick="toggleLockUser('${escapeHtml(u.username)}', 'lock')"><i class="fa-solid fa-lock"></i> Khóa</button>`;
 
                     row.innerHTML = `
                         <td><strong>${escapeHtml(u.username)}</strong></td>
                         <td><span style="color:${isSystemAdmin ? '#5046e5' : '#64748b'}; font-weight:600;">${role}</span></td>
-                        <td><span class="status-badge status-active">Hoạt động</span></td>
-                        <td>2026-09-29</td>
+                        <td>${statusBadge}</td>
+                        <td>2026-09-30</td>
                         <td>
-                            ${!isSystemAdmin ? `<button class="btn-action btn-delete" onclick="deleteUser('${escapeHtml(u.username)}')"><i class="fa-solid fa-trash"></i> Xóa</button>` : '<em>Tài khoản hệ thống</em>'}
+                            ${!isSystemAdmin ? `${lockBtn} <button class="btn-action btn-delete" onclick="deleteUser('${escapeHtml(u.username)}')"><i class="fa-solid fa-trash"></i> Xóa</button>` : '<em>Tài khoản hệ thống</em>'}
                         </td>
                     `;
                     tbody.appendChild(row);
                 });
             } else {
-                alert(data.message || 'Không thể lấy danh sách người dùng');
+                showToast(data.message || 'Không thể lấy danh sách người dùng', 'error');
             }
         } catch (err) {
             console.error('Lỗi tải danh sách người dùng:', err);
         }
     }
 
-    async function deleteUser(email) {
-        if (confirm(`CẢNH BÁO: Xóa vĩnh viễn tài khoản ${email} và toàn bộ hộp thư?`)) {
-            try {
-                const res = await fetch('/api/admin/user/delete', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/x-www-form-urlencoded',
-                        'Authorization': 'Bearer ' + token
-                    },
-                    body: `targetUser=${encodeURIComponent(email)}`
-                });
-                const data = await res.json();
-                alert(data.message);
-                if (data.success) loadUsersList();
-            } catch (err) {
-                alert('Lỗi kết nối Server!');
+    async function loadSystemLogs() {
+        try {
+            const response = await fetch('/api/admin/logs', {
+                headers: { 'Authorization': 'Bearer ' + token }
+            });
+            const data = await response.json();
+            if (data.success) {
+                const logBox = document.getElementById('login-logs');
+                logBox.innerHTML = data.logs.join('<br>');
+                logBox.scrollTop = logBox.scrollHeight;
             }
+        } catch (err) {
+            console.error('Lỗi tải nhật ký hệ thống:', err);
         }
+    }
+
+    function toggleLockUser(email, action) {
+        const actionText = action === 'lock' ? 'KHÓA' : 'MỞ KHÓA';
+        showConfirmModal(
+            `Xác nhận ${actionText}`,
+            `Bạn có chắc chắn muốn ${actionText.toLowerCase()} tài khoản ${email}?`,
+            async () => {
+                try {
+                    const res = await fetch('/api/admin/user/toggle-lock', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/x-www-form-urlencoded',
+                            'Authorization': 'Bearer ' + token
+                        },
+                        body: `targetUser=${encodeURIComponent(email)}&action=${encodeURIComponent(action)}`
+                    });
+                    const data = await res.json();
+                    if (data.success) {
+                        showToast(data.message, 'success');
+                        loadUsersList();
+                        loadSystemLogs();
+                    } else {
+                        showToast(data.message, 'error');
+                    }
+                } catch (err) {
+                    showToast('Lỗi kết nối Server!', 'error');
+                }
+            },
+            action === 'lock'
+        );
+    }
+
+    function deleteUser(email) {
+        showConfirmModal(
+            'CẢNH BÁO XÓA TÀI KHOẢN',
+            `Hành động này sẽ xóa vĩnh viễn tài khoản ${email} và toàn bộ hộp thư! Bạn có chắc chắn không?`,
+            async () => {
+                try {
+                    const res = await fetch('/api/admin/user/delete', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/x-www-form-urlencoded',
+                            'Authorization': 'Bearer ' + token
+                        },
+                        body: `targetUser=${encodeURIComponent(email)}`
+                    });
+                    const data = await res.json();
+                    if (data.success) {
+                        showToast(data.message, 'success');
+                        loadUsersList();
+                        loadSystemLogs();
+                    } else {
+                        showToast(data.message, 'error');
+                    }
+                } catch (err) {
+                    showToast('Lỗi kết nối Server!', 'error');
+                }
+            },
+            true
+        );
     }
 
     async function handleSendBroadcast(e) {
@@ -219,35 +395,45 @@
         const subject = document.getElementById('broadcast-subject').value;
         const body = document.getElementById('broadcast-body').value;
 
-        try {
-            const res = await fetch('/api/admin/broadcast', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/x-www-form-urlencoded',
-                    'Authorization': 'Bearer ' + token
-                },
-                body: `subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`
-            });
-            const data = await res.json();
-            alert(data.message);
-            if (data.success) {
-                document.getElementById('broadcast-subject').value = '';
-                document.getElementById('broadcast-body').value = '';
+        showConfirmModal(
+            'Xác nhận phát thông báo',
+            `Bạn chuẩn bị gửi thư thông báo tới TẤT CẢ người dùng trong hệ thống. Tiếp tục?`,
+            async () => {
+                try {
+                    const res = await fetch('/api/admin/broadcast', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/x-www-form-urlencoded',
+                            'Authorization': 'Bearer ' + token
+                        },
+                        body: `subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`
+                    });
+                    const data = await res.json();
+                    if (data.success) {
+                        showToast(data.message, 'success');
+                        document.getElementById('broadcast-subject').value = '';
+                        document.getElementById('broadcast-body').value = '';
+                        loadSystemLogs();
+                    } else {
+                        showToast(data.message, 'error');
+                    }
+                } catch (err) {
+                    showToast('Lỗi khi gửi thông báo!', 'error');
+                }
             }
-        } catch (err) {
-            alert('Lỗi khi gửi thông báo!');
-        }
+        );
     }
 
     function handleSaveQuota(e) {
         e.preventDefault();
         const limit = document.getElementById('quota-limit').value;
-        alert(`Đã cập nhật cấu hình Quota hộp thư thành: ${limit} MB/tài khoản!`);
+        showToast(`Đã cập nhật cấu hình Quota hộp thư thành: ${limit} MB/tài khoản!`, 'success');
     }
 
     function logoutAdmin() {
         localStorage.clear();
-        window.location.href = '/index.html';
+        showToast('Đã đăng xuất tài khoản Admin!', 'success');
+        setTimeout(() => window.location.href = '/index.html', 500);
     }
 
     function escapeHtml(str) {

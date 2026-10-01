@@ -48,6 +48,7 @@ public class MailHandler implements HttpHandler {
     private void handleSendMail(HttpExchange exchange, String from, String token) throws IOException {
         String body = readBody(exchange);
         String to = getParamValue(body, "to");
+        if (to != null) to = to.trim();
         String subject = getParamValue(body, "subject");
         String content = getParamValue(body, "body");
 
@@ -101,12 +102,16 @@ public class MailHandler implements HttpHandler {
             boolean isBody = false;
 
             for (String line : lines) {
-                if (isBody) bodyBuilder.append(line).append("\\n");
+                if (isBody) bodyBuilder.append(line).append('\n');
                 else if (line.startsWith("From: ")) from = line.substring(6).trim();
                 else if (line.startsWith("To: ")) to = line.substring(4).trim();
                 else if (line.startsWith("Subject: ")) subject = line.substring(9).trim();
                 else if (line.startsWith("Date: ")) date = line.substring(6).trim();
                 else if (line.isEmpty()) isBody = true;
+            }
+
+            if (bodyBuilder.length() > 0 && bodyBuilder.charAt(bodyBuilder.length() - 1) == '\n') {
+                bodyBuilder.setLength(bodyBuilder.length() - 1);
             }
 
             sb.append("{")
@@ -125,7 +130,7 @@ public class MailHandler implements HttpHandler {
 
     private String escapeJson(String input) {
         if (input == null) return "";
-        return input.replace("\\", "\\\\").replace("\"", "\\\"").replace("\r", "");
+        return input.replace("\r", "").replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\t", "\\t");
     }
 
     private String readBody(HttpExchange exchange) throws IOException {
@@ -138,9 +143,9 @@ public class MailHandler implements HttpHandler {
 
     private String getParamValue(String body, String paramName) {
         for (String pair : body.split("&")) {
-            String[] kv = pair.split("=");
-            if (kv.length == 2 && kv[0].equalsIgnoreCase(paramName)) {
-                return java.net.URLDecoder.decode(kv[1], StandardCharsets.UTF_8);
+            int separator = pair.indexOf('=');
+            if (separator > 0 && pair.substring(0, separator).equalsIgnoreCase(paramName)) {
+                return java.net.URLDecoder.decode(pair.substring(separator + 1), StandardCharsets.UTF_8);
             }
         }
         return null;

@@ -1,4 +1,7 @@
+
 let selectedFiles = [];
+
+let activeMailbox = 'inbox';
 
 document.addEventListener('DOMContentLoaded', () => {
     const currentUser = localStorage.getItem('currentUser');
@@ -23,9 +26,11 @@ function showToast(message, type = 'success') {
 
     const toast = document.createElement('div');
     toast.className = `toast ${type}`;
-    
-    const iconClass = type === 'success' ? 'fa-circle-check' : 'fa-circle-exclamation';
-    
+
+    const iconClass = type === 'success'
+        ? 'fa-circle-check'
+        : 'fa-circle-exclamation';
+
     toast.innerHTML = `
         <i class="fa-solid ${iconClass} toast-icon"></i>
         <span class="toast-message">${escapeHtml(message)}</span>
@@ -58,12 +63,17 @@ function resetComposeForm() {
 
 function handleFileSelect(event) {
     const files = Array.from(event.target.files);
+
     files.forEach(file => {
-        const isDuplicate = selectedFiles.some(f => f.name === file.name && f.size === file.size);
+        const isDuplicate = selectedFiles.some(
+            f => f.name === file.name && f.size === file.size
+        );
+
         if (!isDuplicate) {
             selectedFiles.push(file);
         }
     });
+
     event.target.value = '';
     renderFilePreview();
 }
@@ -78,10 +88,12 @@ function renderFilePreview() {
     if (!previewContainer) return;
 
     previewContainer.innerHTML = '';
+
     if (selectedFiles.length === 0) return;
 
     selectedFiles.forEach((file, index) => {
         const fileChip = document.createElement('div');
+
         fileChip.style.cssText = `
             display: inline-flex;
             align-items: center;
@@ -98,8 +110,13 @@ function renderFilePreview() {
         fileChip.innerHTML = `
             <i class="fa-solid fa-file" style="color: #2563eb;"></i>
             <span>${escapeHtml(file.name)}</span>
-            <span style="color: #64748b; font-size: 11px;">(${formatFileSize(file.size)})</span>
-            <i class="fa-solid fa-xmark" style="cursor: pointer; color: #ef4444; margin-left: 4px; font-size: 14px;" onclick="removeFile(${index})" title="Xóa file này"></i>
+            <span style="color: #64748b; font-size: 11px;">
+                (${formatFileSize(file.size)})
+            </span>
+            <i class="fa-solid fa-xmark"
+               style="cursor: pointer; color: #ef4444; margin-left: 4px; font-size: 14px;"
+               onclick="removeFile(${index})"
+               title="Xóa file này"></i>
         `;
 
         previewContainer.appendChild(fileChip);
@@ -108,15 +125,19 @@ function renderFilePreview() {
 
 function formatFileSize(bytes) {
     if (bytes === 0) return '0 B';
+
     const k = 1024;
     const sizes = ['B', 'KB', 'MB', 'GB'];
     const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(1))
+        + ' ' + sizes[i];
 }
 
 function convertFileToBase64(file) {
     return new Promise((resolve, reject) => {
         const reader = new FileReader();
+
         reader.readAsDataURL(file);
         reader.onload = () => resolve(reader.result);
         reader.onerror = error => reject(error);
@@ -125,6 +146,7 @@ function convertFileToBase64(file) {
 
 async function handleSendMail(event) {
     event.preventDefault();
+
     const token = localStorage.getItem('authToken');
     const to = document.getElementById('compose-to').value;
     const subject = document.getElementById('compose-subject').value;
@@ -135,9 +157,12 @@ async function handleSendMail(event) {
     if (selectedFiles.length > 0) {
         for (let i = 0; i < selectedFiles.length; i++) {
             const file = selectedFiles[i];
+
             try {
                 const base64 = await convertFileToBase64(file);
-                attachmentData += `\n[ATTACHMENT:${file.name}]${base64}[/ATTACHMENT]`;
+
+                attachmentData +=
+                    `\n[ATTACHMENT:${file.name}]${base64}[/ATTACHMENT]`;
             } catch (err) {
                 showToast(`Lỗi đọc file: ${file.name}`, 'error');
                 return;
@@ -150,19 +175,22 @@ async function handleSendMail(event) {
     try {
         const response = await fetch('/api/mails/send', {
             method: 'POST',
-            headers: { 
+            headers: {
                 'Content-Type': 'application/x-www-form-urlencoded',
                 'Authorization': 'Bearer ' + token
             },
-            body: `to=${encodeURIComponent(to)}&subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(fullContent)}`
+            body:
+                `to=${encodeURIComponent(to)}` +
+                `&subject=${encodeURIComponent(subject)}` +
+                `&body=${encodeURIComponent(fullContent)}`
         });
 
         const data = await response.json();
-        
+
         if (data.success) {
             closeComposeModal();
             showToast(data.message || 'Gửi thư thành công!', 'success');
-            loadInbox();
+            refreshMails();
         } else {
             showToast(data.message || 'Gửi thư thất bại!', 'error');
         }
@@ -173,9 +201,12 @@ async function handleSendMail(event) {
 
 async function loadInbox(event) {
     if (event) event.preventDefault();
+
+    activeMailbox = 'inbox';
     updateActiveNav('nav-inbox', 'Hộp thư đến');
 
     const token = localStorage.getItem('authToken');
+
     try {
         const response = await fetch('/api/mails/inbox', {
             method: 'GET',
@@ -198,9 +229,12 @@ async function loadInbox(event) {
 
 async function loadSentMail(event) {
     if (event) event.preventDefault();
+
+    activeMailbox = 'sent';
     updateActiveNav('nav-sent', 'Thư đã gửi');
 
     const token = localStorage.getItem('authToken');
+
     try {
         const response = await fetch('/api/mails/sent', {
             method: 'GET',
@@ -226,7 +260,11 @@ function renderEmailList(mails) {
     emailListDiv.innerHTML = '';
 
     if (!mails || mails.length === 0) {
-        emailListDiv.innerHTML = '<div style="padding: 20px; text-align: center; color: #94a3b8;">Không có email nào.</div>';
+        emailListDiv.innerHTML = `
+            <div style="padding: 20px; text-align: center; color: #94a3b8;">
+                Không có email nào.
+            </div>
+        `;
         return;
     }
 
@@ -234,20 +272,25 @@ function renderEmailList(mails) {
 
     sortedMails.forEach(mail => {
         const item = document.createElement('div');
+
         item.className = 'email-item';
         item.onclick = () => selectEmail(mail, item);
 
         item.innerHTML = `
             <div class="email-sender">${escapeHtml(mail.sender)}</div>
             <div class="email-subject">${escapeHtml(mail.subject)}</div>
-            <div class="email-date">${mail.timestamp || ''}</div>
+            <div class="email-date">${escapeHtml(formatMailDate(mail.timestamp))}</div>
         `;
+
         emailListDiv.appendChild(item);
     });
 }
 
 function selectEmail(mail, element) {
-    document.querySelectorAll('.email-item').forEach(item => item.classList.remove('active'));
+    document.querySelectorAll('.email-item').forEach(item => {
+        item.classList.remove('active');
+    });
+
     element.classList.add('active');
 
     document.getElementById('no-email-selected').classList.add('hidden');
@@ -255,9 +298,11 @@ function selectEmail(mail, element) {
 
     document.getElementById('detail-subject').textContent = mail.subject;
     document.getElementById('detail-sender').textContent = mail.sender;
-    document.getElementById('detail-receiver').textContent = mail.recipient || localStorage.getItem('currentUser');
-    document.getElementById('detail-time').textContent = mail.timestamp || '';
-    
+    document.getElementById('detail-receiver').textContent =
+        mail.recipient || localStorage.getItem('currentUser');
+    document.getElementById('detail-time').textContent =
+        formatMailDate(mail.timestamp);
+
     const detailBodyElem = document.getElementById('detail-body');
     let bodyText = mail.body || '';
 
@@ -269,25 +314,36 @@ function selectEmail(mail, element) {
         for (let i = 1; i < parts.length; i++) {
             const attachParts = parts[i].split(']');
             const fileName = attachParts[0];
-            const base64Data = attachParts[1].replace('[/ATTACHMENT]', '').trim();
+
+            const base64Data = (attachParts[1] || '')
+                .replace('[/ATTACHMENT]', '')
+                .trim();
 
             attachmentsHTML += `
                 <div style="margin-top: 10px; padding: 10px 14px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; display: inline-block; margin-right: 10px;">
                     <div style="font-weight: 600; color: #334155; font-size: 13px; margin-bottom: 4px;">
-                        <i class="fa-solid fa-paperclip"></i> ${escapeHtml(fileName)}
+                        <i class="fa-solid fa-paperclip"></i>
+                        ${escapeHtml(fileName)}
                     </div>
-                    <a href="${base64Data}" download="${escapeHtml(fileName)}" class="btn btn-outline" style="font-size: 11px; padding: 3px 8px; text-decoration: none; color: #2563eb; display: inline-flex; align-items: center; gap: 4px;">
+                    <a href="${base64Data}"
+                       download="${escapeHtml(fileName)}"
+                       class="btn btn-outline"
+                       style="font-size: 11px; padding: 3px 8px; text-decoration: none; color: #2563eb; display: inline-flex; align-items: center; gap: 4px;">
                         <i class="fa-solid fa-download"></i> Tải về
                     </a>
-                </div>`;
+                </div>
+            `;
         }
 
         detailBodyElem.innerHTML = `
             <div style="white-space: pre-wrap;">${escapeHtml(textContent)}</div>
             <div style="margin-top: 25px; border-top: 1px dashed #cbd5e1; padding-top: 15px;">
-                <strong style="color: #475569; font-size: 13px;">📎 Danh sách file đính kèm:</strong><br/>
+                <strong style="color: #475569; font-size: 13px;">
+                    📎 Danh sách file đính kèm:
+                </strong><br/>
                 <div style="margin-top: 8px;">${attachmentsHTML}</div>
-            </div>`;
+            </div>
+        `;
     } else {
         detailBodyElem.textContent = bodyText;
     }
@@ -295,25 +351,80 @@ function selectEmail(mail, element) {
 
 function escapeHtml(text) {
     if (!text) return '';
-    return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+    return String(text)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
 }
 
 function updateActiveNav(activeId, title) {
-    document.querySelectorAll('.nav-item').forEach(nav => nav.classList.remove('active'));
+    document.querySelectorAll('.nav-item').forEach(nav => {
+        nav.classList.remove('active');
+    });
+
     const activeNav = document.getElementById(activeId);
     if (activeNav) activeNav.classList.add('active');
-    
+
     const boxTitle = document.getElementById('box-title');
     if (boxTitle) boxTitle.textContent = title;
 }
 
+// Làm mới đúng hộp thư đang mở.
 function refreshMails() {
-    loadInbox();
+    if (activeMailbox === 'sent') {
+        loadSentMail();
+    } else {
+        loadInbox();
+    }
 }
 
-// DUY NHẤT 1 HÀM LOGOUT CHUẨN GỌI API ĐĂNG XUẤT
+// Chuẩn hóa timestamp Java và hiển thị theo giờ Việt Nam.
+function formatMailDate(value) {
+    if (!value) return '';
+
+    let normalized = String(value).trim();
+
+    // Bỏ hậu tố múi giờ dạng [Etc/UTC].
+    normalized = normalized.replace(/\[[^\]]+\]$/, '');
+
+    // Giới hạn phần nano giây về mili giây để trình duyệt đọc được.
+    normalized = normalized.replace(
+        /(\.\d{3})\d+(?=Z|[+-]\d{2}:?\d{2}$)/,
+        '$1'
+    );
+
+    let date = new Date(normalized);
+
+    if (Number.isNaN(date.getTime())) {
+        // Hỗ trợ dạng yyyy-MM-dd HH:mm:ss.
+        date = new Date(
+            normalized.replace(/^(\d{4}-\d{2}-\d{2})\s+/, '$1T')
+        );
+    }
+
+    if (Number.isNaN(date.getTime())) {
+        return String(value);
+    }
+
+    return new Intl.DateTimeFormat('vi-VN', {
+        timeZone: 'Asia/Ho_Chi_Minh',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: false
+    }).format(date);
+}
+
+// Đăng xuất.
 async function logout() {
     const token = localStorage.getItem('authToken');
+
     try {
         if (token) {
             await fetch('/api/auth/logout', {

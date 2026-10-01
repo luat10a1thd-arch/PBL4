@@ -33,6 +33,7 @@ public class SmtpHandler implements Runnable {
             StringBuilder dataBuilder = new StringBuilder();
             boolean isDataMode = false;
             boolean isAuthenticated = false;
+            String authenticatedUser = null;
 
             while ((line = in.readLine()) != null) {
                 if (isDataMode) {
@@ -48,6 +49,8 @@ public class SmtpHandler implements Runnable {
                         } else {
                             out.println("451 Requested action aborted: local error");
                         }
+                        rcptTo = "";
+                        dataBuilder.setLength(0);
                     } else {
                         dataBuilder.append(line).append("\n");
                     }
@@ -72,6 +75,7 @@ public class SmtpHandler implements Runnable {
                     String storedHash = UserStore.findHash(decodedUser);
                     if (storedHash != null && SecurityUtils.checkPassword(decodedPass, storedHash)) {
                         isAuthenticated = true;
+                        authenticatedUser = decodedUser;
                         out.println("235 2.7.0 Authentication successful");
                     } else {
                         out.println("535 5.7.8 Authentication credentials invalid");
@@ -83,7 +87,11 @@ public class SmtpHandler implements Runnable {
                         continue;
                     }
                     mailFrom = parseAddress(line);
-                    out.println("250 OK");
+                    if (!mailFrom.equalsIgnoreCase(authenticatedUser)) {
+                        out.println("553 5.7.1 Sender must match authenticated account");
+                    } else {
+                        out.println("250 OK");
+                    }
                 } 
                 else if (upperLine.startsWith("RCPT TO:")) {
                     if (!isAuthenticated) {

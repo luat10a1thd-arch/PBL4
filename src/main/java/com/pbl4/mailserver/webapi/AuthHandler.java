@@ -7,6 +7,8 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 
 import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
@@ -18,7 +20,6 @@ public class AuthHandler implements HttpHandler {
     private static final String ADMIN_DEFAULT_PASS = "@Luat0105";
 
     public AuthHandler() {
-        // Tự động khởi tạo tài khoản Admin mặc định nếu chưa tồn tại trong hệ thống
         ensureAdminAccountExists();
     }
 
@@ -48,7 +49,6 @@ public class AuthHandler implements HttpHandler {
 
         String path = exchange.getRequestURI().getPath();
 
-        // 1. Xử lý ĐĂNG XUẤT (POST /api/auth/logout)
         if ("POST".equalsIgnoreCase(exchange.getRequestMethod()) && path.endsWith("/logout")) {
             handleLogout(exchange);
             return;
@@ -116,11 +116,15 @@ public class AuthHandler implements HttpHandler {
             return;
         }
 
+        // Kiểm tra nếu tài khoản đang trong trạng thái LOCKED
+        if (checkIsLocked(username)) {
+            sendResponse(exchange, 403, "{\"success\": false, \"message\": \"Tài khoản của bạn đã bị Admin khóa!\"}");
+            return;
+        }
+
         boolean isValid = SecurityUtils.checkPassword(password, storedHash);
         if (isValid) {
             String token = SessionManager.createSession(username, password);
-            
-            // Xกำหนด Phân quyền dựa trên tài khoản Email
             String role = ADMIN_EMAIL.equalsIgnoreCase(username) ? "ADMIN" : "USER";
 
             sendResponse(exchange, 200,
@@ -133,11 +137,33 @@ public class AuthHandler implements HttpHandler {
         }
     }
 
+    private boolean checkIsLocked(String username) {
+        File file = new File("data/users.json");
+        if (!file.exists()) return false;
+
+        try (BufferedReader br = new BufferedReader(new FileReader(file, StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = br.readLine()) != null) {
+                if (line.contains("\"username\":\"" + username + "\"") || line.contains("\"" + username + "\"")) {
+                    return line.contains("\"status\":\"LOCKED\"");
+                }
+            }
+        } catch (IOException ignored) {}
+        return false;
+    }
+
     private String getParamValue(String body, String paramName) {
-        for (String pair : body.split("&")) {
-            String[] kv = pair.split("=");
-            if (kv.length == 2 && kv[0].equalsIgnoreCase(paramName)) {
-                return java.net.URLDecoder.decode(kv[1], StandardCharsets.UTF_8);
+        if (body == null || body.isEmpty()) return null;
+        for (String pair : body.split("&", -1)) {
+            int separator = pair.indexOf('=');
+            if (separator < 0) continue;
+            String key = pair.substring(0, separator);
+            if (key.equalsIgnoreCase(paramName)) {
+                try {
+                    return java.net.URLDecoder.decode(pair.substring(separator + 1), StandardCharsets.UTF_8);
+                } catch (IllegalArgumentException e) {
+                    return null;
+                }
             }
         }
         return null;

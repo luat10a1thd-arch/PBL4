@@ -24,7 +24,7 @@ public class Pop3Handler implements Runnable {
     public void run() {
         try (
             BufferedReader in = new BufferedReader(new InputStreamReader(clientSocket.getInputStream(), StandardCharsets.UTF_8));
-            PrintWriter out = new PrintWriter(clientSocket.getOutputStream(), true)
+            PrintWriter out = new PrintWriter(new java.io.OutputStreamWriter(clientSocket.getOutputStream(), StandardCharsets.UTF_8), true)
         ) {
             out.println("+OK PBL4 POP3 Server Ready");
 
@@ -90,7 +90,12 @@ public class Pop3Handler implements Runnable {
                         int index = Integer.parseInt(argument) - 1;
                         if (index >= 0 && index < emails.size()) {
                             out.println("+OK Octets follows");
-                            out.println(emails.get(index));
+                            String message = emails.get(index).replace("\r\n", "\n").replace('\r', '\n');
+                            String[] messageLines = message.split("\n", -1);
+                            for (String messageLine : messageLines) {
+                                // POP3 dot-stuffing: mọi dòng bắt đầu bằng dấu chấm phải được nhân đôi.
+                                out.println(messageLine.startsWith(".") ? "." + messageLine : messageLine);
+                            }
                             out.println(".");
                         } else {
                             out.println("-ERR Message not found");

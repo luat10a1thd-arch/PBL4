@@ -8,12 +8,14 @@ import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.io.PrintWriter;
 import java.net.Socket;
+import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 
 public class SmtpHandler implements Runnable {
 
     private final Socket clientSocket;
+    private static final int SOCKET_TIMEOUT_MS = 30000; // --- MỤC 8.5: Timeout 30s ---
 
     public SmtpHandler(Socket socket) {
         this.clientSocket = socket;
@@ -21,6 +23,11 @@ public class SmtpHandler implements Runnable {
 
     @Override
     public void run() {
+        try {
+            // --- MỤC 8.5: Cấu hình Read Timeout phòng chống treo kết nối làm ngạt ThreadPool ---
+            clientSocket.setSoTimeout(SOCKET_TIMEOUT_MS);
+        } catch (Exception ignored) {}
+
         try (
             BufferedReader in = new BufferedReader(new InputStreamReader(clientSocket.getInputStream(), StandardCharsets.UTF_8));
             PrintWriter out = new PrintWriter(clientSocket.getOutputStream(), true)
@@ -52,6 +59,10 @@ public class SmtpHandler implements Runnable {
                         rcptTo = "";
                         dataBuilder.setLength(0);
                     } else {
+                        // FIX MỤC 8.2: Unstuffing
+                        if (line.startsWith("..")) {
+                            line = line.substring(1);
+                        }
                         dataBuilder.append(line).append("\n");
                     }
                     continue;
@@ -86,10 +97,13 @@ public class SmtpHandler implements Runnable {
                         out.println("530 5.7.0 Authentication required");
                         continue;
                     }
-                    mailFrom = parseAddress(line);
-                    if (!mailFrom.equalsIgnoreCase(authenticatedUser)) {
+                    
+                    // FIX MỤC 8.1: Kiểm tra chống giả mạo
+                    String candidate = parseAddress(line);
+                    if (candidate.isEmpty() || !candidate.equalsIgnoreCase(authenticatedUser)) {
                         out.println("553 5.7.1 Sender must match authenticated account");
                     } else {
+                        mailFrom = candidate;
                         out.println("250 OK");
                     }
                 } 
@@ -98,13 +112,17 @@ public class SmtpHandler implements Runnable {
                         out.println("530 5.7.0 Authentication required");
                         continue;
                     }
-                    String candidate = parseAddress(line);
 
-                    // Tách biến candidate kiểm tra tồn tại trước khi gán rcptTo
+                    if (mailFrom == null || mailFrom.isEmpty()) {
+                        out.println("503 5.5.1 Need valid MAIL FROM first");
+                        continue;
+                    }
+
+                    String candidate = parseAddress(line);
                     if (!UserStore.exists(candidate)) {
                         out.println("550 5.1.1 No such user here");
                     } else {
-                        rcptTo = candidate; // Chỉ gán khi người nhận hợp lệ
+                        rcptTo = candidate;
                         out.println("250 OK");
                     }
                 } 
@@ -113,15 +131,32 @@ public class SmtpHandler implements Runnable {
                         out.println("530 5.7.0 Authentication required");
                         continue;
                     }
-                    // Chặn nếu chưa có người nhận (RCPT TO) hợp lệ
+
+                    if (mailFrom == null || mailFrom.isEmpty()) {
+                        out.println("503 5.5.1 Need valid MAIL FROM");
+                        continue;
+                    }
                     if (rcptTo == null || rcptTo.isEmpty()) {
                         out.println("503 5.5.1 Need RCPT (recipient)");
                         continue;
                     }
+
                     isDataMode = true;
                     dataBuilder.setLength(0);
                     out.println("354 Start mail input; end with <CR><LF>.<CR><LF>");
                 } 
+                // FIX MỤC 8.3: Bổ sung lệnh RSET
+                else if (upperLine.startsWith("RSET")) {
+                    mailFrom = "";
+                    rcptTo = "";
+                    dataBuilder.setLength(0);
+                    isDataMode = false;
+                    out.println("250 OK Reset completed");
+                }
+                // FIX MỤC 8.3: Bổ sung lệnh NOOP
+                else if (upperLine.startsWith("NOOP")) {
+                    out.println("250 OK");
+                }
                 else if (upperLine.startsWith("QUIT")) {
                     out.println("221 Bye");
                     break;
@@ -130,6 +165,8 @@ public class SmtpHandler implements Runnable {
                     out.println("500 Command unrecognized");
                 }
             }
+        } catch (SocketTimeoutException e) {
+            System.err.println("[SMTP] Ngắt kết nối do quá thời gian chờ (Timeout): " + clientSocket.getInetAddress());
         } catch (Exception e) {
             e.printStackTrace();
         } finally {

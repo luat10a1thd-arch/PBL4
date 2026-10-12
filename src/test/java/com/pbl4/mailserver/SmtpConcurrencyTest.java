@@ -1,5 +1,7 @@
 package com.pbl4.mailserver;
 
+import com.pbl4.mailserver.config.ServerConfig;
+
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.io.PrintWriter;
@@ -13,11 +15,11 @@ import java.util.concurrent.TimeUnit;
 public class SmtpConcurrencyTest {
 
     private static final String HOST = "localhost";
-    private static final int PORT = 2525;
+    private static final int PORT = ServerConfig.SMTP_PORT;
     private static final int THREAD_COUNT = 5;
 
     public static void main(String[] args) {
-        System.out.println("=== TEST SMTP AUTH + THREAD POOL (PORT 2525) ===");
+        System.out.println("=== TEST SMTP AUTH + THREAD POOL (PORT " + PORT + ") ===");
         ExecutorService executor = Executors.newFixedThreadPool(THREAD_COUNT);
 
         for (int i = 1; i <= THREAD_COUNT; i++) {
@@ -44,13 +46,14 @@ public class SmtpConcurrencyTest {
             out.println("HELO client" + clientNo);
             in.readLine();
 
-            // GỬI AUTH LOGIN VỚI TÀI KHOẢN ĐÃ ĐĂNG KÝ
             out.println("AUTH LOGIN");
             in.readLine(); // 334 Username:
             
-            // Encode Base64 cho User & Password
-            String userBase64 = Base64.getEncoder().encodeToString("luat@pbl4.com".getBytes(StandardCharsets.UTF_8));
-            String passBase64 = Base64.getEncoder().encodeToString("@Luat0105".getBytes(StandardCharsets.UTF_8));
+            String testUser = "luat@pbl4.com";
+            String testPass = "TestPass123!";
+
+            String userBase64 = Base64.getEncoder().encodeToString(testUser.getBytes(StandardCharsets.UTF_8));
+            String passBase64 = Base64.getEncoder().encodeToString(testPass.getBytes(StandardCharsets.UTF_8));
 
             out.println(userBase64);
             in.readLine(); // 334 Password:
@@ -59,7 +62,7 @@ public class SmtpConcurrencyTest {
             String authResp = in.readLine(); // 235 Auth successful
 
             if (authResp.startsWith("235")) {
-                out.println("MAIL FROM:<userA@pbl4.com>");
+                out.println("MAIL FROM:<" + testUser + ">");
                 in.readLine();
 
                 out.println("RCPT TO:<receiver@pbl4.com>");

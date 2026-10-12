@@ -2,9 +2,21 @@ package com.pbl4.mailserver.config;
 
 public class ServerConfig {
 
-	public static void main(String[] args) {
-		// TODO Auto-generated method stub
+    // Cấu hình Cổng giao thức (Port)
+    public static final int HTTP_PORT = 8080;
+    public static final int SMTP_PORT = 2525;
+    public static final int POP3_PORT = 1110;
 
-	}
+    // Cấu hình Luồng & Quản lý kết nối
+    public static final int THREAD_POOL_SIZE = 20;
+    public static final int SOCKET_TIMEOUT_MS = 30000; // 30 giây
 
+    // Cấu hình Đường dẫn lưu trữ & SSL Keystore
+    public static final String BASE_DATA_DIR = "data/mailboxes/";
+    public static final String KEYSTORE_PATH = "data/keystore.jks";
+    public static final String KEYSTORE_PASS = "pbl4secretpass";
+
+    // Khóa bí mật mã hóa (Lấy từ biến môi trường OS, fallback về khóa dev)
+    public static final String SECRET_KEY = System.getenv().getOrDefault(
+            "PBL4_SECRET_KEY", "dev-only-fallback-key-DO-NOT-USE-IN-PRODUCTION");
 }

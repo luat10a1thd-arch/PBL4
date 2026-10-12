@@ -1,21 +1,23 @@
 package com.pbl4.mailserver.core;
 
+import com.pbl4.mailserver.config.ServerConfig;
+
 import java.io.File;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Base64;
+import java.util.Comparator;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
+import javax.crypto.SecretKey;
 
 public class MailStorageEngine {
-
-    private static final String BASE_DATA_DIR = "data/mailboxes/";
-    private static final String SECRET_KEY = System.getenv().getOrDefault(
-            "PBL4_SECRET_KEY", "dev-only-fallback-key-DO-NOT-USE-IN-PRODUCTION");
 
     private static final ConcurrentHashMap<String, ReentrantReadWriteLock> userLocks = new ConcurrentHashMap<>();
 
@@ -24,7 +26,7 @@ public class MailStorageEngine {
     }
 
     public static void initMailbox(String username) {
-        File dir = new File(BASE_DATA_DIR + username);
+        File dir = new File(ServerConfig.BASE_DATA_DIR + username);
         if (!dir.exists()) {
             dir.mkdirs();
         }
@@ -36,16 +38,15 @@ public class MailStorageEngine {
         lock.writeLock().lock();
         
         try {
-            // Lấy salt thực tế của user từ UserStore, nếu chưa có thì dùng salt mặc định
             String cleanUser = recipient.replace("_sent", "");
             String base64Salt = UserStore.findSalt(cleanUser);
             byte[] saltBytes = (base64Salt != null) 
                     ? Base64.getDecoder().decode(base64Salt) 
                     : "PBL4_DEFAULT_SALT".getBytes(StandardCharsets.UTF_8);
 
-            String encryptedContent = SecurityUtils.encrypt(rawEmailContent, SECRET_KEY, saltBytes);
+            String encryptedContent = SecurityUtils.encrypt(rawEmailContent, ServerConfig.SECRET_KEY, saltBytes);
             String fileName = "msg_" + System.currentTimeMillis() + "_" + UUID.randomUUID() + ".enc";
-            String filePath = BASE_DATA_DIR + recipient + "/" + fileName;
+            String filePath = ServerConfig.BASE_DATA_DIR + recipient + "/" + fileName;
 
             Files.write(Paths.get(filePath), encryptedContent.getBytes(StandardCharsets.UTF_8));
             return true;
@@ -70,15 +71,20 @@ public class MailStorageEngine {
                     ? Base64.getDecoder().decode(base64Salt) 
                     : "PBL4_DEFAULT_SALT".getBytes(StandardCharsets.UTF_8);
 
-            File folder = new File(BASE_DATA_DIR + username);
+            File folder = new File(ServerConfig.BASE_DATA_DIR + username);
             File[] files = folder.listFiles((dir, name) -> name.endsWith(".enc"));
 
-            if (files != null) {
+            if (files != null && files.length > 0) {
+                Arrays.sort(files, Comparator.comparing(File::getName));
+                SecretKey derivedKey = SecurityUtils.deriveKey(ServerConfig.SECRET_KEY, saltBytes);
+
                 for (File file : files) {
                     byte[] bytes = Files.readAllBytes(file.toPath());
                     String encryptedData = new String(bytes, StandardCharsets.UTF_8);
-                    String decryptedContent = SecurityUtils.decrypt(encryptedData, SECRET_KEY, saltBytes);
-                    emails.add(decryptedContent);
+                    String decryptedContent = SecurityUtils.decryptWithKey(encryptedData, derivedKey);
+                    if (decryptedContent != null) {
+                        emails.add(decryptedContent);
+                    }
                 }
             }
         } catch (Exception e) {
@@ -88,5 +94,29 @@ public class MailStorageEngine {
         }
 
         return emails;
+    }
+
+    public static void deleteEmails(String username, Set<Integer> deletedIndices) {
+        initMailbox(username);
+        ReentrantReadWriteLock lock = getLockForUser(username);
+        lock.writeLock().lock();
+
+        try {
+            File folder = new File(ServerConfig.BASE_DATA_DIR + username);
+            File[] files = folder.listFiles((dir, name) -> name.endsWith(".enc"));
+
+            if (files != null && files.length > 0) {
+                Arrays.sort(files, Comparator.comparing(File::getName));
+                for (int i = 0; i < files.length; i++) {
+                    if (deletedIndices.contains(i + 1)) {
+                        files[i].delete();
+                    }
+                }
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        } finally {
+            lock.writeLock().unlock();
+        }
     }
 }

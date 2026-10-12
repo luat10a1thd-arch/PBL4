@@ -12,31 +12,16 @@ import java.security.SecureRandom;
 import java.security.spec.KeySpec;
 import java.util.Base64;
 
-/**
- * Lớp tiện ích quản lý bảo mật:
- * 1. Băm & đối soát mật khẩu bằng BCrypt.
- * 2. Mã hóa & giải mã nội dung email bằng AES-256-CBC với Salt riêng theo từng User.
- */
 public class SecurityUtils {
 
     private static final String ALGORITHM = "AES/CBC/PKCS5Padding";
     private static final int KEY_SIZE = 256;
     private static final int ITERATION_COUNT = 65536;
 
-    // ==========================================
-    // 1. XỬ LÝ MẬT KHẨU (BCRYPT)
-    // ==========================================
-
-    /**
-     * Băm mật khẩu người dùng với BCrypt (tự động tạo Salt)
-     */
     public static String hashPassword(String plainPassword) {
         return BCrypt.hashpw(plainPassword, BCrypt.gensalt(10));
     }
 
-    /**
-     * Đối soát mật khẩu nhập vào với chuỗi băm đã lưu
-     */
     public static boolean checkPassword(String plainPassword, String hashedPassword) {
         if (hashedPassword == null || !hashedPassword.startsWith("$2a$")) {
             return false;
@@ -44,38 +29,25 @@ public class SecurityUtils {
         return BCrypt.checkpw(plainPassword, hashedPassword);
     }
 
-    // ==========================================
-    // 2. MÃ HÓA & GIẢI MÃ NỘI DUNG MAIL (AES-256-CBC)
-    // ==========================================
-
-    /**
-     * Tạo ngẫu nhiên 16 bytes Salt riêng cho người dùng
-     */
     public static byte[] generateSalt() {
         byte[] salt = new byte[16];
         new SecureRandom().nextBytes(salt);
         return salt;
     }
 
-    /**
-     * Sinh khóa SecretKey 256-bit từ secretKey và userSalt riêng biệt
-     */
-    private static SecretKey deriveKey(String secretKey, byte[] salt) throws Exception {
+    // --- MỤC 8.5: Sinh SecretKey từ PBKDF2 ---
+    public static SecretKey deriveKey(String secretKey, byte[] salt) throws Exception {
         SecretKeyFactory factory = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256");
         KeySpec spec = new PBEKeySpec(secretKey.toCharArray(), salt, ITERATION_COUNT, KEY_SIZE);
         return new SecretKeySpec(factory.generateSecret(spec).getEncoded(), "AES");
     }
 
-    /**
-     * Mã hóa chuỗi văn bản bằng AES-256-CBC sử dụng userSalt riêng
-     * Trả về định dạng: Base64(IV) + ":" + Base64(Ciphertext)
-     */
     public static String encrypt(String plainText, String secretKey, byte[] userSalt) throws Exception {
         byte[] iv = new byte[16];
         new SecureRandom().nextBytes(iv);
         IvParameterSpec ivSpec = new IvParameterSpec(iv);
 
-        SecretKey key = deriveKey(secretKey, userSalt); // dùng salt riêng
+        SecretKey key = deriveKey(secretKey, userSalt);
         Cipher cipher = Cipher.getInstance(ALGORITHM);
         cipher.init(Cipher.ENCRYPT_MODE, key, ivSpec);
 
@@ -83,25 +55,28 @@ public class SecurityUtils {
         return Base64.getEncoder().encodeToString(iv) + ":" + Base64.getEncoder().encodeToString(encrypted);
     }
 
-    /**
-     * Giải mã dữ liệu mã hóa về chuỗi văn bản ban đầu sử dụng userSalt riêng
-     */
     public static String decrypt(String encryptedData, String secretKey, byte[] userSalt) throws Exception {
-        String[] parts = encryptedData.split(":");
-        if (parts.length != 2) {
-            throw new IllegalArgumentException("Định dạng dữ liệu mã hóa không hợp lệ.");
-        }
-
-        byte[] iv = Base64.getDecoder().decode(parts[0]);
-        byte[] cipherText = Base64.getDecoder().decode(parts[1]);
-
-        IvParameterSpec ivSpec = new IvParameterSpec(iv);
         SecretKey key = deriveKey(secretKey, userSalt);
+        return decryptWithKey(encryptedData, key);
+    }
 
-        Cipher cipher = Cipher.getInstance(ALGORITHM);
-        cipher.init(Cipher.DECRYPT_MODE, key, ivSpec);
+    // --- MỤC 8.5: Giải mã nhanh khi đã có sẵn SecretKey (không tốn công tính lại PBKDF2) ---
+    public static String decryptWithKey(String encryptedData, SecretKey secretKey) {
+        try {
+            String[] parts = encryptedData.split(":");
+            if (parts.length != 2) return null;
 
-        byte[] original = cipher.doFinal(cipherText);
-        return new String(original, StandardCharsets.UTF_8);
+            byte[] iv = Base64.getDecoder().decode(parts[0]);
+            byte[] cipherText = Base64.getDecoder().decode(parts[1]);
+
+            Cipher cipher = Cipher.getInstance(ALGORITHM);
+            cipher.init(Cipher.DECRYPT_MODE, secretKey, new IvParameterSpec(iv));
+
+            byte[] decryptedText = cipher.doFinal(cipherText);
+            return new String(decryptedText, StandardCharsets.UTF_8);
+        } catch (Exception e) {
+            e.printStackTrace();
+            return null;
+        }
     }
 }

@@ -494,3 +494,39 @@
     height: 200px;
     overflow-y: auto;
 }
+
+/* Custom scrollbar cho danh sách Thư đến và Thư đã gửi */
+.mail-list-container,
+#inbox-list,
+#sent-list {
+    max-height: 520px;            /* Chiều cao tối đa trước khi hiện thanh cuộn */
+    overflow-y: auto;             /* Tự động hiện thanh cuộn đứng khi danh sách dài */
+    padding-right: 4px;           /* Khoảng trống để không đè lên thẻ nội dung */
+}
+
+/* Tùy chỉnh kiểu dáng thanh cuộn cho mượt và đẹp mắt */
+.mail-list-container::-webkit-scrollbar,
+#inbox-list::-webkit-scrollbar,
+#sent-list::-webkit-scrollbar {
+    width: 6px;
+}
+
+.mail-list-container::-webkit-scrollbar-track,
+#inbox-list::-webkit-scrollbar-track,
+#sent-list::-webkit-scrollbar-track {
+    background: #f1f5f9;
+    border-radius: 10px;
+}
+
+.mail-list-container::-webkit-scrollbar-thumb,
+#inbox-list::-webkit-scrollbar-thumb,
+#sent-list::-webkit-scrollbar-thumb {
+    background: #cbd5e1;
+    border-radius: 10px;
+}
+
+.mail-list-container::-webkit-scrollbar-thumb:hover,
+#inbox-list::-webkit-scrollbar-thumb:hover,
+#sent-list::-webkit-scrollbar-thumb:hover {
+    background: #94a3b8;
+}

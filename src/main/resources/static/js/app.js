@@ -1,6 +1,4 @@
-
 let selectedFiles = [];
-
 let activeMailbox = 'inbox';
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -148,9 +146,22 @@ async function handleSendMail(event) {
     event.preventDefault();
 
     const token = localStorage.getItem('authToken');
-    const to = document.getElementById('compose-to').value;
-    const subject = document.getElementById('compose-subject').value;
+    const rawTo = document.getElementById('compose-to').value.trim();
+    const subject = document.getElementById('compose-subject').value.trim();
     const bodyText = document.getElementById('compose-body').value;
+
+    if (!rawTo || !subject || !bodyText) {
+        showToast('Vui lòng điền đầy đủ thông tin người nhận, tiêu đề và nội dung!', 'error');
+        return;
+    }
+
+    // Tách danh sách email theo khoảng trắng, dấu phẩy hoặc dấu chấm phẩy
+    const recipients = rawTo.split(/[\s,;]+/).filter(email => email.length > 0);
+
+    if (recipients.length === 0) {
+        showToast('Địa chỉ email người nhận không hợp lệ!', 'error');
+        return;
+    }
 
     let attachmentData = '';
 
@@ -180,7 +191,7 @@ async function handleSendMail(event) {
                 'Authorization': 'Bearer ' + token
             },
             body:
-                `to=${encodeURIComponent(to)}` +
+                `to=${encodeURIComponent(recipients.join(','))}` +
                 `&subject=${encodeURIComponent(subject)}` +
                 `&body=${encodeURIComponent(fullContent)}`
         });
@@ -372,7 +383,6 @@ function updateActiveNav(activeId, title) {
     if (boxTitle) boxTitle.textContent = title;
 }
 
-// Làm mới đúng hộp thư đang mở.
 function refreshMails() {
     if (activeMailbox === 'sent') {
         loadSentMail();
@@ -381,16 +391,11 @@ function refreshMails() {
     }
 }
 
-// Chuẩn hóa timestamp Java và hiển thị theo giờ Việt Nam.
 function formatMailDate(value) {
     if (!value) return '';
 
     let normalized = String(value).trim();
-
-    // Bỏ hậu tố múi giờ dạng [Etc/UTC].
     normalized = normalized.replace(/\[[^\]]+\]$/, '');
-
-    // Giới hạn phần nano giây về mili giây để trình duyệt đọc được.
     normalized = normalized.replace(
         /(\.\d{3})\d+(?=Z|[+-]\d{2}:?\d{2}$)/,
         '$1'
@@ -399,7 +404,6 @@ function formatMailDate(value) {
     let date = new Date(normalized);
 
     if (Number.isNaN(date.getTime())) {
-        // Hỗ trợ dạng yyyy-MM-dd HH:mm:ss.
         date = new Date(
             normalized.replace(/^(\d{4}-\d{2}-\d{2})\s+/, '$1T')
         );
@@ -421,7 +425,6 @@ function formatMailDate(value) {
     }).format(date);
 }
 
-// Đăng xuất.
 async function logout() {
     const token = localStorage.getItem('authToken');
 

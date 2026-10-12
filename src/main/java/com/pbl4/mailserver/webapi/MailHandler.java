@@ -47,23 +47,42 @@ public class MailHandler implements HttpHandler {
 
     private void handleSendMail(HttpExchange exchange, String from, String token) throws IOException {
         String body = readBody(exchange);
-        String to = getParamValue(body, "to");
-        if (to != null) to = to.trim();
+        String rawTo = getParamValue(body, "to");
         String subject = getParamValue(body, "subject");
         String content = getParamValue(body, "body");
 
-        if (to == null || subject == null || content == null) {
+        if (rawTo == null || subject == null || content == null) {
             sendResponse(exchange, 400, "{\"success\": false, \"message\": \"Thiếu thông tin gửi thư!\"}");
             return;
         }
 
+        // Tách danh sách người nhận theo khoảng trắng, dấu phẩy hoặc dấu chấm phẩy
+        String[] recipients = rawTo.trim().split("[\\s,;]+");
         String password = SessionManager.getPassword(token);
-        boolean sent = SMTPClient.send(from, password, to, subject, content);
 
-        if (sent) {
-            sendResponse(exchange, 200, "{\"success\": true, \"message\": \"Gửi thư thành công!\"}");
+        int successCount = 0;
+        int failCount = 0;
+
+        for (String to : recipients) {
+            to = to.trim();
+            if (to.isEmpty()) continue;
+
+            boolean sent = SMTPClient.send(from, password, to, subject, content);
+            if (sent) {
+                successCount++;
+            } else {
+                failCount++;
+            }
+        }
+
+        if (successCount > 0) {
+            String msg = "Đã gửi thư thành công tới " + successCount + " người nhận!";
+            if (failCount > 0) {
+                msg += " (" + failCount + " người nhận thất bại)";
+            }
+            sendResponse(exchange, 200, "{\"success\": true, \"message\": \"" + escapeJson(msg) + "\"}");
         } else {
-            sendResponse(exchange, 500, "{\"success\": false, \"message\": \"Gửi thư thất bại!\"}");
+            sendResponse(exchange, 500, "{\"success\": false, \"message\": \"Gửi thư thất bại cho toàn bộ người nhận!\"}");
         }
     }
 
@@ -80,8 +99,6 @@ public class MailHandler implements HttpHandler {
 
     private void handleGetSent(HttpExchange exchange, String username, String token) throws IOException {
         String password = SessionManager.getPassword(token);
-        // Hộp thư "đã gửi" vẫn lưu ở mailbox riêng "{username}_sent" như thiết kế cũ,
-        // POP3Server cần được cấu hình cho phép user tự đọc mailbox "_sent" của chính mình.
         List<String> rawMails = POP3Client.fetchAll(username + "_sent", password);
 
         if (rawMails == null) {

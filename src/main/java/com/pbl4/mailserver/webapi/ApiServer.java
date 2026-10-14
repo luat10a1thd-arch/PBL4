@@ -27,7 +27,7 @@ public class ApiServer {
             // 2. Đăng ký các cổng API xử lý Đăng nhập, Đăng ký, Gửi/Nhận mail & Quản trị (Admin)
             server.createContext("/api/auth", new CorsHandlerWrapper(new AuthHandler()));
             server.createContext("/api/mails", new CorsHandlerWrapper(new MailHandler()));
-            server.createContext("/api/admin", new CorsHandlerWrapper(new AdminHandler())); // Bổ sung đăng ký AdminHandler
+            server.createContext("/api/admin", new CorsHandlerWrapper(new AdminHandler()));
 
             server.setExecutor(null); // Sử dụng default executor
             server.start();
@@ -39,11 +39,14 @@ public class ApiServer {
     }
 
     /**
-     * Wrapper tự động chèn các Header CORS vào tất cả các phản hồi API
-     * Giải quyết triệt để lỗi "Lỗi kết nối tới Server!" do trình duyệt chặn Cross-Origin.
+     * FIX VẤN ĐỀ 12 BÁO CÁO: Quản lý CORS tập trung và đọc linh hoạt từ biến môi trường.
+     * Mặc định fallback về "http://localhost:8080" hoặc "*" khi chạy Dev local để thuận tiện demo.
      */
     static class CorsHandlerWrapper implements HttpHandler {
         private final HttpHandler handler;
+        
+        // Đọc origin được phép từ biến môi trường PBL4_ALLOWED_ORIGIN, fallback an toàn cho Dev local
+        private static final String ALLOWED_ORIGIN = System.getenv().getOrDefault("PBL4_ALLOWED_ORIGIN", "http://localhost:8080");
 
         public CorsHandlerWrapper(HttpHandler handler) {
             this.handler = handler;
@@ -51,10 +54,10 @@ public class ApiServer {
 
         @Override
         public void handle(HttpExchange exchange) throws IOException {
-            // Cho phép tất cả các nguồn gửi yêu cầu đến API
-            exchange.getResponseHeaders().set("Access-Control-Allow-Origin", "*");
+            exchange.getResponseHeaders().set("Access-Control-Allow-Origin", ALLOWED_ORIGIN);
             exchange.getResponseHeaders().set("Access-Control-Allow-Methods", "GET, POST, OPTIONS, PUT, DELETE");
             exchange.getResponseHeaders().set("Access-Control-Allow-Headers", "Content-Type, Authorization");
+            exchange.getResponseHeaders().set("Access-Control-Allow-Credentials", "true");
 
             // Xử lý yêu cầu Pre-flight (OPTIONS) của trình duyệt
             if ("OPTIONS".equalsIgnoreCase(exchange.getRequestMethod())) {

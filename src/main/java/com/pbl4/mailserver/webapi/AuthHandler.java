@@ -8,7 +8,6 @@ import com.sun.net.httpserver.HttpHandler;
 
 import java.io.BufferedReader;
 import java.io.File;
-import java.io.FileReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
@@ -17,7 +16,9 @@ import java.nio.charset.StandardCharsets;
 public class AuthHandler implements HttpHandler {
 
     private static final String ADMIN_EMAIL = "admin@pbl4.com";
-    private static final String ADMIN_DEFAULT_PASS = "@Luat0105";
+    
+    // --- MỤC 1 BÁO CÁO: Đọc từ biến môi trường PBL4_ADMIN_PASSWORD, fallback mặc định giữ nguyên @Luat0105 ---
+    private static final String ADMIN_DEFAULT_PASS = System.getenv().getOrDefault("PBL4_ADMIN_PASSWORD", "@Luat0105");
 
     public AuthHandler() {
         ensureAdminAccountExists();
@@ -25,6 +26,12 @@ public class AuthHandler implements HttpHandler {
 
     private synchronized void ensureAdminAccountExists() {
         try {
+            // Tự động kiểm tra và tạo thư mục data/ nếu chưa có để tránh lỗi "The system cannot find the path specified"
+            File dataDir = new File("data");
+            if (!dataDir.exists()) {
+                dataDir.mkdirs();
+            }
+
             if (!UserStore.exists(ADMIN_EMAIL)) {
                 String passwordHash = SecurityUtils.hashPassword(ADMIN_DEFAULT_PASS);
                 UserStore.addUser(ADMIN_EMAIL, passwordHash);
@@ -95,17 +102,77 @@ public class AuthHandler implements HttpHandler {
         sendResponse(exchange, 200, "{\"success\": true, \"message\": \"Đã đăng xuất thành công!\"}");
     }
 
+    // ==========================================
+    // FIX MỤC 2 BÁO CÁO: Validate đăng ký chặt chẽ ở Backend
+    // ==========================================
     private synchronized void handleRegister(HttpExchange exchange, String username, String password) throws IOException {
+        // 1. Kiểm tra username phải đúng định dạng @pbl4.com
+        if (!username.toLowerCase().endsWith("@pbl4.com") || username.length() <= "@pbl4.com".length()) {
+            sendResponse(exchange, 400, "{\"success\": false, \"message\": \"Email đăng ký phải có định dạng @pbl4.com!\"}");
+            return;
+        }
+
+        // 2. Chặn đăng ký tài khoản admin@pbl4.com hoặc tài khoản bắt đầu bằng admin
+        String emailPrefix = username.substring(0, username.indexOf('@')).toLowerCase();
+        if ("admin@pbl4.com".equalsIgnoreCase(username) || emailPrefix.startsWith("admin")) {
+            sendResponse(exchange, 403, "{\"success\": false, \"message\": \"Không được phép đăng ký tài khoản Admin!\"}");
+            return;
+        }
+
+        // 3. Kiểm tra độ mạnh của mật khẩu
+        String passwordValidationResult = validatePasswordStrength(password);
+        if (passwordValidationResult != null) {
+            sendResponse(exchange, 400, "{\"success\": false, \"message\": \"" + passwordValidationResult + "\"}");
+            return;
+        }
+
+        // 4. Kiểm tra tài khoản đã tồn tại chưa
         if (UserStore.exists(username)) {
             sendResponse(exchange, 400, "{\"success\": false, \"message\": \"Tài khoản đã tồn tại!\"}");
             return;
         }
 
+        // Đủ điều kiện -> Đăng ký tài khoản và khởi tạo hòm thư
         String passwordHash = SecurityUtils.hashPassword(password);
         UserStore.addUser(username, passwordHash);
         MailStorageEngine.initMailbox(username);
 
         sendResponse(exchange, 200, "{\"success\": true, \"message\": \"Đăng ký tài khoản thành công!\"}");
+    }
+
+    /**
+     * Hàm kiểm tra độ mạnh của mật khẩu (Mục 2)
+     */
+    private String validatePasswordStrength(String password) {
+        if (password == null || password.length() < 8 || password.length() > 32) {
+            return "Mật khẩu phải có độ dài từ 8 đến 32 ký tự!";
+        }
+        
+        boolean hasLetter = false;
+        boolean hasDigit = false;
+        boolean hasSpecial = false;
+
+        for (char c : password.toCharArray()) {
+            if (Character.isLetter(c)) {
+                hasLetter = true;
+            } else if (Character.isDigit(c)) {
+                hasDigit = true;
+            } else {
+                hasSpecial = true;
+            }
+        }
+
+        if (!hasLetter) {
+            return "Mật khẩu phải chứa ít nhất một chữ cái!";
+        }
+        if (!hasDigit) {
+            return "Mật khẩu phải chứa ít nhất một chữ số!";
+        }
+        if (!hasSpecial) {
+            return "Mật khẩu phải chứa ít nhất một ký tự đặc biệt (!@#$%^&*...)!";
+        }
+
+        return null; // Mật khẩu hợp lệ
     }
 
     private void handleLogin(HttpExchange exchange, String username, String password) throws IOException {
@@ -137,19 +204,11 @@ public class AuthHandler implements HttpHandler {
         }
     }
 
+    // ==========================================
+    // FIX MỤC 4 BÁO CÁO: Gọi trực tiếp trạng thái từ UserStore thay vì tự đọc chuỗi file
+    // ==========================================
     private boolean checkIsLocked(String username) {
-        File file = new File("data/users.json");
-        if (!file.exists()) return false;
-
-        try (BufferedReader br = new BufferedReader(new FileReader(file, StandardCharsets.UTF_8))) {
-            String line;
-            while ((line = br.readLine()) != null) {
-                if (line.contains("\"username\":\"" + username + "\"") || line.contains("\"" + username + "\"")) {
-                    return line.contains("\"status\":\"LOCKED\"");
-                }
-            }
-        } catch (IOException ignored) {}
-        return false;
+        return "LOCKED".equalsIgnoreCase(UserStore.getStatus(username));
     }
 
     private String getParamValue(String body, String paramName) {

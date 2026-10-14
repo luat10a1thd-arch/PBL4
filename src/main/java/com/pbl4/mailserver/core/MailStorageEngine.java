@@ -3,6 +3,7 @@ package com.pbl4.mailserver.core;
 import com.pbl4.mailserver.config.ServerConfig;
 
 import java.io.File;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Paths;
@@ -32,17 +33,38 @@ public class MailStorageEngine {
         }
     }
 
+    /**
+     * Tách hậu tố _sent chuẩn xác (Sửa Vấn đề 8: Không dùng replaceAll bừa bãi)
+     */
+    private static String getCleanUsername(String username) {
+        if (username != null && username.endsWith("_sent")) {
+            return username.substring(0, username.length() - 5);
+        }
+        return username;
+    }
+
+    /**
+     * Lấy Salt của User từ UserStore (Sửa Vấn đề 7: Loại bỏ default salt cố định)
+     */
+    private static byte[] getUserSaltOrThrow(String username) throws IllegalArgumentException {
+        String cleanUser = getCleanUsername(username);
+        String base64Salt = UserStore.findSalt(cleanUser);
+
+        if (base64Salt == null || base64Salt.trim().isEmpty()) {
+            throw new IllegalArgumentException("[MAIL STORAGE] Không tìm thấy Salt cho tài khoản: " + cleanUser);
+        }
+
+        return Base64.getDecoder().decode(base64Salt);
+    }
+
     public static boolean saveEmail(String recipient, String rawEmailContent) {
         initMailbox(recipient);
         ReentrantReadWriteLock lock = getLockForUser(recipient);
         lock.writeLock().lock();
         
         try {
-            String cleanUser = recipient.replace("_sent", "");
-            String base64Salt = UserStore.findSalt(cleanUser);
-            byte[] saltBytes = (base64Salt != null) 
-                    ? Base64.getDecoder().decode(base64Salt) 
-                    : "PBL4_DEFAULT_SALT".getBytes(StandardCharsets.UTF_8);
+            // Lấy Salt chuẩn của user, nếu không có sẽ ném lỗi rõ ràng (Vấn đề 7)
+            byte[] saltBytes = getUserSaltOrThrow(recipient);
 
             String encryptedContent = SecurityUtils.encrypt(rawEmailContent, ServerConfig.SECRET_KEY, saltBytes);
             String fileName = "msg_" + System.currentTimeMillis() + "_" + UUID.randomUUID() + ".enc";
@@ -51,7 +73,7 @@ public class MailStorageEngine {
             Files.write(Paths.get(filePath), encryptedContent.getBytes(StandardCharsets.UTF_8));
             return true;
         } catch (Exception e) {
-            e.printStackTrace();
+            System.err.println("[MAIL STORAGE] Lỗi khi lưu thư cho " + recipient + ": " + e.getMessage());
             return false;
         } finally {
             lock.writeLock().unlock();
@@ -65,11 +87,8 @@ public class MailStorageEngine {
         lock.readLock().lock();
 
         try {
-            String cleanUser = username.replace("_sent", "");
-            String base64Salt = UserStore.findSalt(cleanUser);
-            byte[] saltBytes = (base64Salt != null) 
-                    ? Base64.getDecoder().decode(base64Salt) 
-                    : "PBL4_DEFAULT_SALT".getBytes(StandardCharsets.UTF_8);
+            // Lấy Salt chuẩn của user (Vấn đề 7 & 8)
+            byte[] saltBytes = getUserSaltOrThrow(username);
 
             File folder = new File(ServerConfig.BASE_DATA_DIR + username);
             File[] files = folder.listFiles((dir, name) -> name.endsWith(".enc"));
@@ -88,7 +107,7 @@ public class MailStorageEngine {
                 }
             }
         } catch (Exception e) {
-            e.printStackTrace();
+            System.err.println("[MAIL STORAGE] Lỗi khi đọc thư của " + username + ": " + e.getMessage());
         } finally {
             lock.readLock().unlock();
         }
@@ -109,12 +128,20 @@ public class MailStorageEngine {
                 Arrays.sort(files, Comparator.comparing(File::getName));
                 for (int i = 0; i < files.length; i++) {
                     if (deletedIndices.contains(i + 1)) {
-                        files[i].delete();
+                        // Sửa Vấn đề 9: Dùng Files.deleteIfExists để bắt IOException chính xác
+                        try {
+                            boolean deleted = Files.deleteIfExists(files[i].toPath());
+                            if (!deleted) {
+                                System.err.println("[MAIL STORAGE] Không thể xóa file mail: " + files[i].getName());
+                            }
+                        } catch (IOException ioe) {
+                            System.err.println("[MAIL STORAGE] Lỗi I/O khi xóa file " + files[i].getName() + ": " + ioe.getMessage());
+                        }
                     }
                 }
             }
         } catch (Exception e) {
-            e.printStackTrace();
+            System.err.println("[MAIL STORAGE] Lỗi khi xử lý xóa thư của " + username + ": " + e.getMessage());
         } finally {
             lock.writeLock().unlock();
         }

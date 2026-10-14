@@ -1,13 +1,18 @@
 package com.pbl4.mailserver.webapi;
 
-import com.pbl4.mailserver.client.POP3Client;
-import com.pbl4.mailserver.client.SMTPClient;
+import com.pbl4.mailserver.core.MailStorageEngine;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 
-import java.io.*;
+import java.io.BufferedReader;
+import java.io.IOException;
+import java.io.InputStreamReader;
+import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
+import java.text.SimpleDateFormat;
+import java.util.Date;
 import java.util.List;
+import java.util.Locale;
 
 public class MailHandler implements HttpHandler {
 
@@ -35,17 +40,17 @@ public class MailHandler implements HttpHandler {
         String path = exchange.getRequestURI().getPath();
 
         if ("POST".equalsIgnoreCase(exchange.getRequestMethod()) && path.endsWith("/send")) {
-            handleSendMail(exchange, authedUser, token);
+            handleSendMail(exchange, authedUser);
         } else if ("GET".equalsIgnoreCase(exchange.getRequestMethod()) && path.endsWith("/inbox")) {
-            handleGetInbox(exchange, authedUser, token);
+            handleGetInbox(exchange, authedUser);
         } else if ("GET".equalsIgnoreCase(exchange.getRequestMethod()) && path.endsWith("/sent")) {
-            handleGetSent(exchange, authedUser, token);
+            handleGetSent(exchange, authedUser);
         } else {
             sendResponse(exchange, 404, "{\"success\": false, \"message\": \"Endpoint không tồn tại!\"}");
         }
     }
 
-    private void handleSendMail(HttpExchange exchange, String from, String token) throws IOException {
+    private void handleSendMail(HttpExchange exchange, String from) throws IOException {
         String body = readBody(exchange);
         String rawTo = getParamValue(body, "to");
         String subject = getParamValue(body, "subject");
@@ -56,19 +61,30 @@ public class MailHandler implements HttpHandler {
             return;
         }
 
-        // Tách danh sách người nhận theo khoảng trắng, dấu phẩy hoặc dấu chấm phẩy
         String[] recipients = rawTo.trim().split("[\\s,;]+");
-        String password = SessionManager.getPassword(token);
 
         int successCount = 0;
         int failCount = 0;
+
+        String dateStr = new SimpleDateFormat("EEE, dd MMM yyyy HH:mm:ss Z", Locale.ENGLISH).format(new Date());
 
         for (String to : recipients) {
             to = to.trim();
             if (to.isEmpty()) continue;
 
-            boolean sent = SMTPClient.send(from, password, to, subject, content);
-            if (sent) {
+            // Dựng định dạng thư chuẩn RFC 822
+            String rawEmail = "From: " + from + "\n" +
+                             "To: " + to + "\n" +
+                             "Subject: " + subject + "\n" +
+                             "Date: " + dateStr + "\n\n" +
+                             content;
+
+            // 1. Lưu thư vào hòm thư người nhận
+            boolean savedRecipient = MailStorageEngine.saveEmail(to, rawEmail);
+            // 2. Lưu thư vào hòm thư đã gửi của người gửi
+            boolean savedSent = MailStorageEngine.saveEmail(from + "_sent", rawEmail);
+
+            if (savedRecipient || savedSent) {
                 successCount++;
             } else {
                 failCount++;
@@ -86,23 +102,23 @@ public class MailHandler implements HttpHandler {
         }
     }
 
-    private void handleGetInbox(HttpExchange exchange, String username, String token) throws IOException {
-        String password = SessionManager.getPassword(token);
-        List<String> rawMails = POP3Client.fetchAll(username, password);
+    private void handleGetInbox(HttpExchange exchange, String username) throws IOException {
+        // Khớp hàm readAllEmails của MailStorageEngine
+        List<String> rawMails = MailStorageEngine.readAllEmails(username);
 
         if (rawMails == null) {
-            sendResponse(exchange, 500, "[]");
+            sendResponse(exchange, 200, "[]");
             return;
         }
         sendResponse(exchange, 200, convertMailsToJson(rawMails));
     }
 
-    private void handleGetSent(HttpExchange exchange, String username, String token) throws IOException {
-        String password = SessionManager.getPassword(token);
-        List<String> rawMails = POP3Client.fetchAll(username + "_sent", password);
+    private void handleGetSent(HttpExchange exchange, String username) throws IOException {
+        // Khớp hàm readAllEmails của MailStorageEngine
+        List<String> rawMails = MailStorageEngine.readAllEmails(username + "_sent");
 
         if (rawMails == null) {
-            sendResponse(exchange, 500, "[]");
+            sendResponse(exchange, 200, "[]");
             return;
         }
         sendResponse(exchange, 200, convertMailsToJson(rawMails));

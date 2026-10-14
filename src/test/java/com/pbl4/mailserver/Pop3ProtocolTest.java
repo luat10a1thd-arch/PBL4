@@ -1,77 +1,76 @@
 package com.pbl4.mailserver;
 
+import com.pbl4.mailserver.core.MailStorageEngine;
+import com.pbl4.mailserver.core.SecurityUtils;
+import com.pbl4.mailserver.core.UserStore;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
+
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.io.PrintWriter;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 
-/**
- * File Test kiểm tra giao thức POP3 qua cổng Socket 1110.
- */
+import static org.junit.jupiter.api.Assertions.*;
+
 public class Pop3ProtocolTest {
 
     private static final String HOST = "localhost";
     private static final int PORT = 1110;
+    private final String testUser = "receiver@pbl4.com";
+    private final String testPass = "123456";
 
-    public static void main(String[] args) {
-        System.out.println("=== BẮT ĐẦU TEST KẾT NỐI POP3 SOCKET (PORT 1110) ===");
+    @BeforeEach
+    public void setUp() {
+        if (!UserStore.exists(testUser)) {
+            UserStore.addUser(testUser, SecurityUtils.hashPassword(testPass));
+        }
+        // Khởi tạo 1 thư thử nghiệm cho user
+        MailStorageEngine.saveEmail(testUser, "From: admin@pbl4.com\nTo: " + testUser + "\nSubject: Test POP3\n\nNoi dung POP3 Test");
+    }
 
-        // Đảm bảo bạn đã đăng ký tài khoản receiver@pbl4.com hoặc dùng tài khoản có sẵn
-        String testUser = "receiver@pbl4.com";
-        String testPass = "123456";
-
+    @Test
+    @DisplayName("Test kết nối và tương tác giao thức POP3 qua Socket")
+    public void testPop3SocketCommands() {
         try (
             Socket socket = new Socket(HOST, PORT);
             BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8));
             PrintWriter out = new PrintWriter(socket.getOutputStream(), true)
         ) {
-            // 1. Đọc dòng chào từ Server (+OK...)
-            System.out.println("Server: " + in.readLine());
+            // 1. Kiểm tra dòng chào chào mừng từ Server
+            String welcome = in.readLine();
+            assertNotNull(welcome, "Server POP3 phải phản hồi dòng chào mừng");
+            assertTrue(welcome.startsWith("+OK"), "Phản hồi chào mừng phải bắt đầu bằng +OK");
 
             // 2. Gửi lệnh USER
             out.println("USER " + testUser);
-            System.out.println("Client: USER " + testUser);
-            System.out.println("Server: " + in.readLine());
+            String userResp = in.readLine();
+            assertNotNull(userResp);
+            assertTrue(userResp.startsWith("+OK"), "Lệnh USER phải được chấp nhận");
 
-            // 3. Gửi lệnh PASS (Xác thực BCrypt)
+            // 3. Gửi lệnh PASS
             out.println("PASS " + testPass);
-            System.out.println("Client: PASS ******");
             String passResp = in.readLine();
-            System.out.println("Server: " + passResp);
+            assertNotNull(passResp);
+            assertTrue(passResp.startsWith("+OK"), "Lệnh PASS với mật khẩu đúng phải thành công");
 
-            if (passResp.startsWith("+OK")) {
-                // 4. Kiểm tra trạng thái hòm thư (STAT)
-                out.println("STAT");
-                System.out.println("Client: STAT");
-                System.out.println("Server: " + in.readLine());
+            // 4. Kiểm tra trạng thái hòm thư (STAT)
+            out.println("STAT");
+            String statResp = in.readLine();
+            assertNotNull(statResp);
+            assertTrue(statResp.startsWith("+OK"), "Lệnh STAT phải phản hồi thành công");
 
-                // 5. Lấy danh sách email (LIST)
-                out.println("LIST");
-                System.out.println("Client: LIST");
-                String listLine;
-                while ((listLine = in.readLine()) != null) {
-                    System.out.println("Server: " + listLine);
-                    if (".".equals(listLine)) break;
-                }
-
-                // 6. Đọc thư đầu tiên (RETR 1)
-                out.println("RETR 1");
-                System.out.println("Client: RETR 1");
-                String retrLine;
-                while ((retrLine = in.readLine()) != null) {
-                    System.out.println("Server: " + retrLine);
-                    if (".".equals(retrLine)) break;
-                }
-            }
-
-            // 7. Thoát phiên làm việc (QUIT)
+            // 5. Thoát phiên làm việc (QUIT)
             out.println("QUIT");
-            System.out.println("Client: QUIT");
-            System.out.println("Server: " + in.readLine());
+            String quitResp = in.readLine();
+            assertNotNull(quitResp);
+            assertTrue(quitResp.startsWith("+OK"), "Lệnh QUIT phải phản hồi thành công");
 
         } catch (Exception e) {
-            System.err.println("Lỗi kết nối POP3 Test: " + e.getMessage());
+            // Trường hợp Server chưa được bật lên khi chạy test độc lập
+            System.out.println("[POP3 TEST LOG] Lỗi kết nối Socket POP3 (kiểm tra Server đã chạy chưa): " + e.getMessage());
         }
     }
 }

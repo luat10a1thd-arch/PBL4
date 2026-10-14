@@ -14,9 +14,16 @@ public class ServerConfig {
     // Cấu hình Đường dẫn lưu trữ & SSL Keystore
     public static final String BASE_DATA_DIR = "data/mailboxes/";
     public static final String KEYSTORE_PATH = "data/keystore.jks";
-    public static final String KEYSTORE_PASS = "pbl4secretpass";
 
-    // Khóa bí mật mã hóa (Lấy từ biến môi trường OS, fallback về khóa dev)
+    // =========================================================================
+    // FIX VẤN ĐỀ 6 BÁO CÁO: Đọc KEYSTORE_PASS và SECRET_KEY từ Biến môi trường
+    // =========================================================================
+
+    // Mật khẩu Keystore chứa chứng chỉ SSL/TLS (Đọc từ PBL4_KEYSTORE_PASS, fallback cho Dev)
+    public static final String KEYSTORE_PASS = System.getenv().getOrDefault(
+            "PBL4_KEYSTORE_PASS", "pbl4secretpass");
+
+    // Khóa bí mật mã hóa (Đọc từ PBL4_SECRET_KEY, fallback cho Dev)
     public static final String SECRET_KEY = System.getenv().getOrDefault(
             "PBL4_SECRET_KEY", "dev-only-fallback-key-DO-NOT-USE-IN-PRODUCTION");
 }

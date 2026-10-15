@@ -1,5 +1,6 @@
 package com.pbl4.mailserver.webapi;
 
+import com.pbl4.mailserver.config.ServerConfig;
 import com.pbl4.mailserver.core.MailStorageEngine;
 import com.pbl4.mailserver.core.User;
 import com.pbl4.mailserver.core.UserStore;
@@ -57,9 +58,15 @@ public class AdminHandler implements HttpHandler {
             return;
         }
 
-        // 2. GET /api/admin/logs - Lấy nhật ký hệ thống thật
+        // 2. GET /api/admin/logs - Lấy nhật ký hệ thống
         if ("GET".equalsIgnoreCase(method) && path.endsWith("/logs")) {
             handleGetLogs(exchange);
+            return;
+        }
+
+        // 3. GET /api/admin/stats - Lấy thống kê số thư, dung lượng & quota
+        if ("GET".equalsIgnoreCase(method) && path.endsWith("/stats")) {
+            handleGetStats(exchange);
             return;
         }
 
@@ -77,6 +84,9 @@ public class AdminHandler implements HttpHandler {
                 String subject = getParamValue(body, "subject");
                 String content = getParamValue(body, "body");
                 handleBroadcast(exchange, subject, content);
+            } else if (path.endsWith("/quota")) {
+                String quotaStr = getParamValue(body, "quota");
+                handleSaveQuota(exchange, quotaStr);
             } else {
                 sendResponse(exchange, 404, "{\"success\": false, \"message\": \"Endpoint không tồn tại!\"}");
             }
@@ -86,7 +96,6 @@ public class AdminHandler implements HttpHandler {
     }
 
     private void handleGetUsers(HttpExchange exchange) throws IOException {
-        // Đồng bộ Vấn đề 4 & 13: Lấy danh sách trực tiếp từ UserStore
         List<User> users = UserStore.getAllUsers();
         StringBuilder jsonBuilder = new StringBuilder("[");
         for (int i = 0; i < users.size(); i++) {
@@ -100,6 +109,46 @@ public class AdminHandler implements HttpHandler {
         jsonBuilder.append("]");
 
         sendResponse(exchange, 200, "{\"success\": true, \"users\": " + jsonBuilder.toString() + "}");
+    }
+
+    private void handleGetStats(HttpExchange exchange) throws IOException {
+        long totalMails = MailStorageEngine.getTotalMailCount();
+        long totalBytes = MailStorageEngine.getTotalStorageSizeBytes();
+        String formattedSize = formatBytes(totalBytes);
+
+        String json = String.format(
+            "{\"success\": true, \"totalMails\": %d, \"totalSizeBytes\": %d, \"formattedSize\": \"%s\", \"quotaMb\": %d}",
+            totalMails, totalBytes, formattedSize, ServerConfig.MAX_MAILBOX_QUOTA_MB
+        );
+        sendResponse(exchange, 200, json);
+    }
+
+    private void handleSaveQuota(HttpExchange exchange, String quotaStr) throws IOException {
+        if (quotaStr == null || quotaStr.trim().isEmpty()) {
+            sendResponse(exchange, 400, "{\"success\": false, \"message\": \"Vui lòng nhập giá trị Quota hợp lệ!\"}");
+            return;
+        }
+
+        try {
+            long newQuota = Long.parseLong(quotaStr.trim());
+            if (newQuota < 1) {
+                sendResponse(exchange, 400, "{\"success\": false, \"message\": \"Quota phải lớn hơn 0 MB!\"}");
+                return;
+            }
+
+            ServerConfig.MAX_MAILBOX_QUOTA_MB = newQuota;
+            appendLog("Cập nhật Quota mặc định cho Hòm thư: " + newQuota + " MB");
+            sendResponse(exchange, 200, "{\"success\": true, \"message\": \"Đã cập nhật cấu hình Quota thành công: " + newQuota + " MB/hòm thư!\", \"quotaMb\": " + newQuota + "}");
+        } catch (NumberFormatException e) {
+            sendResponse(exchange, 400, "{\"success\": false, \"message\": \"Giá trị Quota không đúng định dạng số!\"}");
+        }
+    }
+
+    private String formatBytes(long bytes) {
+        if (bytes < 1024) return bytes + " B";
+        if (bytes < 1024 * 1024) return String.format("%.2f KB", bytes / 1024.0);
+        if (bytes < 1024 * 1024 * 1024) return String.format("%.2f MB", bytes / (1024.0 * 1024));
+        return String.format("%.2f GB", bytes / (1024.0 * 1024 * 1024));
     }
 
     private void handleGetLogs(HttpExchange exchange) throws IOException {
@@ -142,7 +191,6 @@ public class AdminHandler implements HttpHandler {
         }
         String newStatus = "lock".equalsIgnoreCase(action) ? "LOCKED" : "ACTIVE";
         
-        // Đồng bộ Vấn đề 13: Đổi trạng thái khóa/mở khóa qua UserStore
         boolean updated = UserStore.setStatus(targetUser, newStatus);
 
         if (updated) {
@@ -170,11 +218,9 @@ public class AdminHandler implements HttpHandler {
             return;
         }
 
-        // FIX VẤN ĐỀ 13 BÁO CÁO: Gọi trực tiếp UserStore.deleteUser để xóa vĩnh viễn user khỏi RAM và file users.json
         boolean removed = UserStore.deleteUser(targetUser);
 
         if (removed) {
-            // Xóa toàn bộ thư mục hòm thư đĩa (inbox và _sent)
             deleteUserMailbox("data/mailboxes/" + targetUser);
             deleteUserMailbox("data/mailboxes/" + targetUser + "_sent");
 

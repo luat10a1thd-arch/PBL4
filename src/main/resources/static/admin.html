@@ -106,14 +106,14 @@
                     <div class="stat-icon"><i class="fa-solid fa-envelope"></i></div>
                     <div class="stat-info">
                         <h4>Thư đã khởi tạo</h4>
-                        <div class="value" id="stat-total-mails">--</div>
+                        <div class="value" id="stat-total-mails">0</div>
                     </div>
                 </div>
                 <div class="stat-card">
                     <div class="stat-icon"><i class="fa-solid fa-hard-drive"></i></div>
                     <div class="stat-info">
                         <h4>Dung lượng sử dụng</h4>
-                        <div class="value" id="stat-storage-used">Active</div>
+                        <div class="value" id="stat-storage-used">0 B</div>
                     </div>
                 </div>
             </div>
@@ -153,7 +153,7 @@
                     <form onsubmit="handleSaveQuota(event)">
                         <div class="form-group">
                             <label>Dung lượng tối đa mặc định cho mỗi Hộp thư (MB):</label>
-                            <input type="number" class="form-control" id="quota-limit" value="100" min="10" max="2048">
+                            <input type="number" class="form-control" id="quota-limit" value="100" min="1" max="10240">
                         </div>
                         <button type="submit" class="btn-primary-admin"><i class="fa-solid fa-floppy-disk"></i> Lưu cấu hình Quota</button>
                     </form>
@@ -207,6 +207,7 @@
     document.addEventListener('DOMContentLoaded', () => {
         loadUsersList();
         loadSystemLogs();
+        loadServerStats();
     });
 
     let confirmCallback = null;
@@ -266,6 +267,22 @@
 
         document.getElementById('tab-' + tabName).classList.add('active');
         element.classList.add('active');
+    }
+
+    async function loadServerStats() {
+        try {
+            const res = await fetch('/api/admin/stats', {
+                headers: { 'Authorization': 'Bearer ' + token }
+            });
+            const data = await res.json();
+            if (data.success) {
+                document.getElementById('stat-total-mails').innerText = data.totalMails;
+                document.getElementById('stat-storage-used').innerText = data.formattedSize;
+                document.getElementById('quota-limit').value = data.quotaMb;
+            }
+        } catch (err) {
+            console.error('Lỗi tải thống kê server:', err);
+        }
     }
 
     async function loadUsersList() {
@@ -379,6 +396,7 @@
                         showToast(data.message, 'success');
                         loadUsersList();
                         loadSystemLogs();
+                        loadServerStats();
                     } else {
                         showToast(data.message, 'error');
                     }
@@ -414,6 +432,7 @@
                         document.getElementById('broadcast-subject').value = '';
                         document.getElementById('broadcast-body').value = '';
                         loadSystemLogs();
+                        loadServerStats();
                     } else {
                         showToast(data.message, 'error');
                     }
@@ -424,10 +443,30 @@
         );
     }
 
-    function handleSaveQuota(e) {
+    async function handleSaveQuota(e) {
         e.preventDefault();
         const limit = document.getElementById('quota-limit').value;
-        showToast(`Đã cập nhật cấu hình Quota hộp thư thành: ${limit} MB/tài khoản!`, 'success');
+
+        try {
+            const res = await fetch('/api/admin/quota', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                    'Authorization': 'Bearer ' + token
+                },
+                body: `quota=${encodeURIComponent(limit)}`
+            });
+            const data = await res.json();
+            if (data.success) {
+                showToast(data.message, 'success');
+                loadSystemLogs();
+                loadServerStats();
+            } else {
+                showToast(data.message || 'Lỗi khi cập nhật Quota!', 'error');
+            }
+        } catch (err) {
+            showToast('Lỗi kết nối Server!', 'error');
+        }
     }
 
     function logoutAdmin() {

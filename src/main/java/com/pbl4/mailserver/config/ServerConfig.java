@@ -15,6 +15,9 @@ public class ServerConfig {
     public static final String BASE_DATA_DIR = "data/mailboxes/";
     public static final String KEYSTORE_PATH = "data/keystore.jks";
 
+    // Cấu hình Quota dung lượng mặc định mỗi Hòm thư (MB)
+    public static volatile long MAX_MAILBOX_QUOTA_MB = 100;
+
     // =========================================================================
     // FIX VẤN ĐỀ 6 BÁO CÁO: Đọc KEYSTORE_PASS và SECRET_KEY từ Biến môi trường
     // =========================================================================

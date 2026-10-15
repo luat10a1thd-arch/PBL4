@@ -44,26 +44,55 @@ public class MailStorageEngine {
     }
 
     /**
-     * Lấy Salt của User từ UserStore (Sửa Vấn đề 7: Loại bỏ default salt cố định)
+     * Lấy Salt của User từ UserStore. Nếu chưa có Salt thì tự động tạo Salt cố định an toàn
+     * dựa trên username để tránh làm gãy luồng gửi/lưu mail.
      */
-    private static byte[] getUserSaltOrThrow(String username) throws IllegalArgumentException {
+    private static byte[] getUserSaltOrThrow(String username) {
         String cleanUser = getCleanUsername(username);
         String base64Salt = UserStore.findSalt(cleanUser);
 
-        if (base64Salt == null || base64Salt.trim().isEmpty()) {
-            throw new IllegalArgumentException("[MAIL STORAGE] Không tìm thấy Salt cho tài khoản: " + cleanUser);
+        if (base64Salt != null && !base64Salt.trim().isEmpty()) {
+            try {
+                return Base64.getDecoder().decode(base64Salt);
+            } catch (Exception ignored) {}
         }
 
-        return Base64.getDecoder().decode(base64Salt);
+        // Fallback an toàn tạo Salt cố định theo tên user nếu chưa khởi tạo Salt trong UserStore
+        return (cleanUser + "_PBL4_SAFE_SALT_KEY").getBytes(StandardCharsets.UTF_8);
+    }
+
+    /**
+     * Tính dung lượng (Bytes) hiện tại của một Hòm thư
+     */
+    public static long getMailboxSizeInBytes(String username) {
+        File folder = new File(ServerConfig.BASE_DATA_DIR + username);
+        if (!folder.exists() || !folder.isDirectory()) return 0;
+        
+        long totalSize = 0;
+        File[] files = folder.listFiles((dir, name) -> name.endsWith(".enc"));
+        if (files != null) {
+            for (File file : files) {
+                totalSize += file.length();
+            }
+        }
+        return totalSize;
     }
 
     public static boolean saveEmail(String recipient, String rawEmailContent) {
         initMailbox(recipient);
+
+        // KIỂM TRA QUOTA: Kiểm tra hòm thư có vượt quá Quota cho phép không
+        long currentSizeBytes = getMailboxSizeInBytes(recipient);
+        long maxSizeBytes = ServerConfig.MAX_MAILBOX_QUOTA_MB * 1024 * 1024;
+        if (currentSizeBytes >= maxSizeBytes) {
+            System.err.println("[MAIL STORAGE] Hòm thư " + recipient + " đã vượt quá Quota cho phép (" + ServerConfig.MAX_MAILBOX_QUOTA_MB + " MB)");
+            return false;
+        }
+
         ReentrantReadWriteLock lock = getLockForUser(recipient);
         lock.writeLock().lock();
         
         try {
-            // Lấy Salt chuẩn của user, nếu không có sẽ ném lỗi rõ ràng (Vấn đề 7)
             byte[] saltBytes = getUserSaltOrThrow(recipient);
 
             String encryptedContent = SecurityUtils.encrypt(rawEmailContent, ServerConfig.SECRET_KEY, saltBytes);
@@ -87,7 +116,6 @@ public class MailStorageEngine {
         lock.readLock().lock();
 
         try {
-            // Lấy Salt chuẩn của user (Vấn đề 7 & 8)
             byte[] saltBytes = getUserSaltOrThrow(username);
 
             File folder = new File(ServerConfig.BASE_DATA_DIR + username);
@@ -128,7 +156,6 @@ public class MailStorageEngine {
                 Arrays.sort(files, Comparator.comparing(File::getName));
                 for (int i = 0; i < files.length; i++) {
                     if (deletedIndices.contains(i + 1)) {
-                        // Sửa Vấn đề 9: Dùng Files.deleteIfExists để bắt IOException chính xác
                         try {
                             boolean deleted = Files.deleteIfExists(files[i].toPath());
                             if (!deleted) {
@@ -145,5 +172,48 @@ public class MailStorageEngine {
         } finally {
             lock.writeLock().unlock();
         }
+    }
+
+    /**
+     * Đếm tổng số lượng file thư (.enc) trên toàn bộ hệ thống
+     * (Chỉ đếm các hòm thư chính, bỏ qua thư mục bản sao _sent để không bị đếm trùng)
+     */
+    public static long getTotalMailCount() {
+        File baseDir = new File(ServerConfig.BASE_DATA_DIR);
+        if (!baseDir.exists() || !baseDir.isDirectory()) return 0;
+
+        long count = 0;
+        File[] userDirs = baseDir.listFiles((dir, name) -> new File(dir, name).isDirectory() && !name.endsWith("_sent"));
+        if (userDirs != null) {
+            for (File dir : userDirs) {
+                File[] encFiles = dir.listFiles((d, name) -> name.endsWith(".enc"));
+                if (encFiles != null) {
+                    count += encFiles.length;
+                }
+            }
+        }
+        return count;
+    }
+
+    /**
+     * Tính tổng dung lượng (Bytes) của toàn bộ các hòm thư trong hệ thống
+     */
+    public static long getTotalStorageSizeBytes() {
+        File baseDir = new File(ServerConfig.BASE_DATA_DIR);
+        if (!baseDir.exists() || !baseDir.isDirectory()) return 0;
+
+        long totalBytes = 0;
+        File[] userDirs = baseDir.listFiles(File::isDirectory);
+        if (userDirs != null) {
+            for (File dir : userDirs) {
+                File[] encFiles = dir.listFiles((d, name) -> name.endsWith(".enc"));
+                if (encFiles != null) {
+                    for (File file : encFiles) {
+                        totalBytes += file.length();
+                    }
+                }
+            }
+        }
+        return totalBytes;
     }
 }

@@ -35,7 +35,6 @@ public class SecurityUtils {
         return salt;
     }
 
-    // --- MỤC 8.5: Sinh SecretKey từ PBKDF2 ---
     public static SecretKey deriveKey(String secretKey, byte[] salt) throws Exception {
         SecretKeyFactory factory = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256");
         KeySpec spec = new PBEKeySpec(secretKey.toCharArray(), salt, ITERATION_COUNT, KEY_SIZE);
@@ -60,7 +59,6 @@ public class SecurityUtils {
         return decryptWithKey(encryptedData, key);
     }
 
-    // --- MỤC 8.5: Giải mã nhanh khi đã có sẵn SecretKey (không tốn công tính lại PBKDF2) ---
     public static String decryptWithKey(String encryptedData, SecretKey secretKey) {
         try {
             String[] parts = encryptedData.split(":");
@@ -75,7 +73,7 @@ public class SecurityUtils {
             byte[] decryptedText = cipher.doFinal(cipherText);
             return new String(decryptedText, StandardCharsets.UTF_8);
         } catch (Exception e) {
-            e.printStackTrace();
+            System.err.println("[SECURITY] Lỗi khi giải mã nội dung thư!");
             return null;
         }
     }

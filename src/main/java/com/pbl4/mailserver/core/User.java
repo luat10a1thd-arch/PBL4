@@ -3,9 +3,9 @@ package com.pbl4.mailserver.core;
 public class User {
     private String username;
     private String passwordHash;
-    private String salt;   // Base64 salt
-    private String status; // "ACTIVE" hoặc "LOCKED"
-    private String role;   // "ADMIN" hoặc "USER"
+    private String salt;
+    private String status;
+    private String role;
 
     public User() {}
 
@@ -31,4 +31,9 @@ public class User {
 
     public String getRole() { return role; }
     public void setRole(String role) { this.role = role; }
+
+    @Override
+    public String toString() {
+        return "User{username='" + username + "', status='" + status + "', role='" + role + "'}";
+    }
 }

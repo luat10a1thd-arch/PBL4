@@ -1,19 +1,27 @@
 package com.pbl4.mailserver.core;
 
 import java.io.File;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.FileSystems;
 import java.nio.file.Files;
+import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.file.StandardCopyOption;
+import java.nio.file.attribute.PosixFilePermission;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
+import java.util.Locale;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 public class UserStore {
 
     private static final String USERS_FILE_PATH = "data/users.json";
-    
-    // Cache lưu trữ danh sách User trong RAM để thao tác an toàn và nhanh
     private static final ConcurrentHashMap<String, User> userMap = new ConcurrentHashMap<>();
     private static boolean isLoaded = false;
 
@@ -22,6 +30,23 @@ public class UserStore {
             loadUsersFromFile();
             isLoaded = true;
         }
+    }
+
+    public static String canonical(String name) {
+        if (name == null || name.trim().isEmpty()) return null;
+        ensureLoaded();
+        
+        String cleanName = name.trim();
+        boolean isSent = cleanName.endsWith("_sent");
+        if (isSent) {
+            cleanName = cleanName.substring(0, cleanName.length() - 5);
+        }
+
+        User u = userMap.get(cleanName.toLowerCase(Locale.ROOT));
+        if (u == null) return null;
+
+        String canonicalUsername = u.getUsername().toLowerCase(Locale.ROOT);
+        return isSent ? canonicalUsername + "_sent" : canonicalUsername;
     }
 
     private static synchronized void loadUsersFromFile() {
@@ -34,18 +59,31 @@ public class UserStore {
         try {
             byte[] bytes = Files.readAllBytes(file.toPath());
             String json = new String(bytes, StandardCharsets.UTF_8).trim();
-            if (json.isEmpty() || !json.startsWith("[")) return;
-
-            // Bỏ ngoặc vuông [ ]
-            json = json.substring(1, json.length() - 1).trim();
             if (json.isEmpty()) return;
 
-            String[] objects = json.split("(?<=\\}),\\s*(?=\\{)");
-            for (String obj : objects) {
-                User user = parseUserObject(obj);
-                if (user != null && user.getUsername() != null) {
-                    userMap.put(user.getUsername().toLowerCase(), user);
+            Matcher m = Pattern.compile("\\{[^{}]*\\}").matcher(json);
+            int parsedCount = 0;
+            boolean dirty = false;
+
+            while (m.find()) {
+                User user = parseUserObject(m.group());
+                if (user != null && user.getUsername() != null && !user.getUsername().trim().isEmpty()) {
+                    parsedCount++;
+                    if (user.getSalt() == null || user.getSalt().trim().isEmpty()) {
+                        byte[] newSalt = SecurityUtils.generateSalt();
+                        user.setSalt(Base64.getEncoder().encodeToString(newSalt));
+                        dirty = true;
+                    }
+                    userMap.put(user.getUsername().toLowerCase(Locale.ROOT).trim(), user);
                 }
+            }
+
+            if (parsedCount == 0 && file.length() > 0) {
+                throw new IllegalStateException("Cảnh báo: File users.json có dữ liệu nhưng không thể parse tài khoản nào!");
+            }
+
+            if (dirty) {
+                saveUsersToFile();
             }
         } catch (Exception e) {
             System.err.println("[USERSTORE] Lỗi khi đọc file users.json: " + e.getMessage());
@@ -57,6 +95,7 @@ public class UserStore {
             File dataDir = new File("data");
             if (!dataDir.exists()) {
                 dataDir.mkdirs();
+                setFilePermissions(dataDir.toPath(), true);
             }
 
             StringBuilder sb = new StringBuilder("[\n");
@@ -75,26 +114,50 @@ public class UserStore {
             }
             sb.append("]");
 
-            Files.write(Paths.get(USERS_FILE_PATH), sb.toString().getBytes(StandardCharsets.UTF_8));
+            Path target = Paths.get(USERS_FILE_PATH);
+            Path backup = Paths.get(USERS_FILE_PATH + ".bak");
+            Path tmp = Paths.get(USERS_FILE_PATH + ".tmp");
+
+            if (Files.exists(target)) {
+                Files.copy(target, backup, StandardCopyOption.REPLACE_EXISTING);
+                setFilePermissions(backup, false);
+            }
+
+            Files.write(tmp, sb.toString().getBytes(StandardCharsets.UTF_8));
+            setFilePermissions(tmp, false);
+            
+            try {
+                Files.move(tmp, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+            } catch (IOException e) {
+                Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING);
+            }
+            setFilePermissions(target, false);
         } catch (Exception e) {
             System.err.println("[USERSTORE] Lỗi khi lưu file users.json: " + e.getMessage());
         }
     }
 
-    // ==========================================
-    // CÁC HÀM XỬ LÝ DỮ LIỆU TẬP TRUNG (MỤC 4 & 13 BÁO CÁO)
-    // ==========================================
+    private static void setFilePermissions(Path path, boolean isDir) {
+        try {
+            if (FileSystems.getDefault().supportedFileAttributeViews().contains("posix")) {
+                Set<PosixFilePermission> perms = isDir 
+                    ? PosixFilePermissions.fromString("rwx------")
+                    : PosixFilePermissions.fromString("rw-------");
+                Files.setPosixFilePermissions(path, perms);
+            }
+        } catch (Exception ignored) {}
+    }
 
     public static boolean exists(String username) {
         if (username == null) return false;
         ensureLoaded();
-        return userMap.containsKey(username.toLowerCase().trim());
+        return userMap.containsKey(username.toLowerCase(Locale.ROOT).trim());
     }
 
     public static User getUser(String username) {
         if (username == null) return null;
         ensureLoaded();
-        return userMap.get(username.toLowerCase().trim());
+        return userMap.get(username.toLowerCase(Locale.ROOT).trim());
     }
 
     public static String findHash(String username) {
@@ -112,6 +175,22 @@ public class UserStore {
         return u != null ? u.getStatus() : "ACTIVE";
     }
 
+    public static synchronized boolean addUserIfAbsent(String username, String passwordHash) {
+        ensureLoaded();
+        String key = username.toLowerCase(Locale.ROOT).trim();
+        if (userMap.containsKey(key)) {
+            return false;
+        }
+        byte[] saltBytes = SecurityUtils.generateSalt();
+        String saltBase64 = Base64.getEncoder().encodeToString(saltBytes);
+        String role = "admin@pbl4.com".equalsIgnoreCase(username) ? "ADMIN" : "USER";
+        
+        User user = new User(username.trim(), passwordHash, saltBase64, "ACTIVE", role);
+        userMap.put(key, user);
+        saveUsersToFile();
+        return true;
+    }
+
     public static synchronized void addUser(String username, String passwordHash) {
         byte[] saltBytes = SecurityUtils.generateSalt();
         String saltBase64 = Base64.getEncoder().encodeToString(saltBytes);
@@ -123,13 +202,13 @@ public class UserStore {
     public static synchronized void addUser(String username, String passwordHash, String saltBase64, String status, String role) {
         ensureLoaded();
         User user = new User(username.trim(), passwordHash, saltBase64, status, role);
-        userMap.put(username.toLowerCase().trim(), user);
+        userMap.put(username.toLowerCase(Locale.ROOT).trim(), user);
         saveUsersToFile();
     }
 
     public static synchronized boolean setStatus(String username, String newStatus) {
         ensureLoaded();
-        User u = userMap.get(username.toLowerCase().trim());
+        User u = userMap.get(username.toLowerCase(Locale.ROOT).trim());
         if (u != null) {
             u.setStatus(newStatus);
             saveUsersToFile();
@@ -138,11 +217,10 @@ public class UserStore {
         return false;
     }
 
-    // FIX VẤN ĐỀ 13: Bổ sung phương thức xóa User tập trung
     public static synchronized boolean deleteUser(String username) {
         if (username == null) return false;
         ensureLoaded();
-        String key = username.toLowerCase().trim();
+        String key = username.toLowerCase(Locale.ROOT).trim();
         if (userMap.containsKey(key)) {
             userMap.remove(key);
             saveUsersToFile();
@@ -155,8 +233,6 @@ public class UserStore {
         ensureLoaded();
         return new ArrayList<>(userMap.values());
     }
-
-    // --- CÁC HÀM PARSER HỖ TRỢ ---
 
     private static User parseUserObject(String objStr) {
         try {

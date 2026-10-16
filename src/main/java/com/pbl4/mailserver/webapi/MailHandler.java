@@ -1,6 +1,6 @@
 package com.pbl4.mailserver.webapi;
 
-import com.pbl4.mailserver.core.MailStorageEngine;
+import com.pbl4.mailserver.core.MailService;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 
@@ -9,10 +9,7 @@ import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
-import java.text.SimpleDateFormat;
-import java.util.Date;
 import java.util.List;
-import java.util.Locale;
 
 public class MailHandler implements HttpHandler {
 
@@ -53,58 +50,20 @@ public class MailHandler implements HttpHandler {
     private void handleSendMail(HttpExchange exchange, String from) throws IOException {
         String body = readBody(exchange);
         String rawTo = getParamValue(body, "to");
-        String subject = getParamValue(body, "subject");
+        String rawSubject = getParamValue(body, "subject");
         String content = getParamValue(body, "body");
 
-        if (rawTo == null || subject == null || content == null) {
-            sendResponse(exchange, 400, "{\"success\": false, \"message\": \"Thiếu thông tin gửi thư!\"}");
-            return;
-        }
+        MailService.DeliveryResult result = MailService.deliver(from, rawTo, rawSubject, content);
 
-        String[] recipients = rawTo.trim().split("[\\s,;]+");
-
-        int successCount = 0;
-        int failCount = 0;
-
-        String dateStr = new SimpleDateFormat("EEE, dd MMM yyyy HH:mm:ss Z", Locale.ENGLISH).format(new Date());
-
-        for (String to : recipients) {
-            to = to.trim();
-            if (to.isEmpty()) continue;
-
-            // Dựng định dạng thư chuẩn RFC 822
-            String rawEmail = "From: " + from + "\n" +
-                             "To: " + to + "\n" +
-                             "Subject: " + subject + "\n" +
-                             "Date: " + dateStr + "\n\n" +
-                             content;
-
-            // 1. Lưu thư vào hòm thư người nhận
-            boolean savedRecipient = MailStorageEngine.saveEmail(to, rawEmail);
-            // 2. Lưu thư vào hòm thư đã gửi của người gửi
-            boolean savedSent = MailStorageEngine.saveEmail(from + "_sent", rawEmail);
-
-            if (savedRecipient || savedSent) {
-                successCount++;
-            } else {
-                failCount++;
-            }
-        }
-
-        if (successCount > 0) {
-            String msg = "Đã gửi thư thành công tới " + successCount + " người nhận!";
-            if (failCount > 0) {
-                msg += " (" + failCount + " người nhận thất bại)";
-            }
-            sendResponse(exchange, 200, "{\"success\": true, \"message\": \"" + escapeJson(msg) + "\"}");
+        if (result.success) {
+            sendResponse(exchange, 200, "{\"success\": true, \"message\": \"" + escapeJson(result.message) + "\"}");
         } else {
-            sendResponse(exchange, 500, "{\"success\": false, \"message\": \"Gửi thư thất bại cho toàn bộ người nhận!\"}");
+            sendResponse(exchange, 400, "{\"success\": false, \"message\": \"" + escapeJson(result.message) + "\"}");
         }
     }
 
     private void handleGetInbox(HttpExchange exchange, String username) throws IOException {
-        // Khớp hàm readAllEmails của MailStorageEngine
-        List<String> rawMails = MailStorageEngine.readAllEmails(username);
+        List<String> rawMails = MailService.listInbox(username);
 
         if (rawMails == null) {
             sendResponse(exchange, 200, "[]");
@@ -114,8 +73,7 @@ public class MailHandler implements HttpHandler {
     }
 
     private void handleGetSent(HttpExchange exchange, String username) throws IOException {
-        // Khớp hàm readAllEmails của MailStorageEngine
-        List<String> rawMails = MailStorageEngine.readAllEmails(username + "_sent");
+        List<String> rawMails = MailService.listSent(username);
 
         if (rawMails == null) {
             sendResponse(exchange, 200, "[]");
@@ -135,30 +93,50 @@ public class MailHandler implements HttpHandler {
             boolean isBody = false;
 
             for (String line : lines) {
-                if (isBody) bodyBuilder.append(line).append('\n');
-                else if (line.startsWith("From: ")) from = line.substring(6).trim();
-                else if (line.startsWith("To: ")) to = line.substring(4).trim();
-                else if (line.startsWith("Subject: ")) subject = line.substring(9).trim();
-                else if (line.startsWith("Date: ")) date = line.substring(6).trim();
-                else if (line.isEmpty()) isBody = true;
+                if (isBody) {
+                    bodyBuilder.append(line).append('\n');
+                } else if (line.isEmpty()) {
+                    isBody = true;
+                } else if (from.isEmpty() && line.startsWith("From: ")) {
+                    from = line.substring(6).trim();
+                } else if (to.isEmpty() && line.startsWith("To: ")) {
+                    to = line.substring(4).trim();
+                } else if (subject.isEmpty() && line.startsWith("Subject: ")) {
+                    subject = line.substring(9).trim();
+                } else if (date.isEmpty() && line.startsWith("Date: ")) {
+                    date = line.substring(6).trim();
+                }
             }
 
             if (bodyBuilder.length() > 0 && bodyBuilder.charAt(bodyBuilder.length() - 1) == '\n') {
                 bodyBuilder.setLength(bodyBuilder.length() - 1);
             }
 
+            String sanitizedBody = sanitizeHtml(bodyBuilder.toString());
+
             sb.append("{")
               .append("\"sender\":\"").append(escapeJson(from)).append("\",")
               .append("\"recipient\":\"").append(escapeJson(to)).append("\",")
               .append("\"subject\":\"").append(escapeJson(subject)).append("\",")
               .append("\"timestamp\":\"").append(escapeJson(date)).append("\",")
-              .append("\"body\":\"").append(escapeJson(bodyBuilder.toString())).append("\"")
+              .append("\"body\":\"").append(escapeJson(sanitizedBody)).append("\"")
               .append("}");
 
             if (i < rawMails.size() - 1) sb.append(",");
         }
         sb.append("]");
         return sb.toString();
+    }
+
+    private String sanitizeHtml(String html) {
+        if (html == null) return "";
+        return html.replaceAll("(?i)<script.*?>.*?</script>", "")
+                   .replaceAll("(?i)<iframe.*?>.*?</iframe>", "")
+                   .replaceAll("(?i)<object.*?>.*?</object>", "")
+                   .replaceAll("(?i)<embed.*?>.*?</embed>", "")
+                   .replaceAll("(?i)on\\w+\\s*=\\s*\"[^\"]*\"", "")
+                   .replaceAll("(?i)on\\w+\\s*=\\s*'[^']*'", "")
+                   .replaceAll("(?i)javascript:", "");
     }
 
     private String escapeJson(String input) {

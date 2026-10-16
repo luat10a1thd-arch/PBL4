@@ -155,7 +155,6 @@ async function handleSendMail(event) {
         return;
     }
 
-    // Tách danh sách email theo khoảng trắng, dấu phẩy hoặc dấu chấm phẩy
     const recipients = rawTo.split(/[\s,;]+/).filter(email => email.length > 0);
 
     if (recipients.length === 0) {
@@ -315,12 +314,34 @@ function selectEmail(mail, element) {
         formatMailDate(mail.timestamp);
 
     const detailBodyElem = document.getElementById('detail-body');
+    detailBodyElem.innerHTML = ''; // Clear cũ
+
     let bodyText = mail.body || '';
 
     if (bodyText.includes('[ATTACHMENT:')) {
         const parts = bodyText.split('[ATTACHMENT:');
         const textContent = parts[0];
-        let attachmentsHTML = '';
+
+        // Khung chứa nội dung văn bản (An toàn XSS)
+        const textDiv = document.createElement('div');
+        textDiv.style.whiteSpace = 'pre-wrap';
+        textDiv.textContent = textContent;
+        detailBodyElem.appendChild(textDiv);
+
+        // Khung danh sách đính kèm
+        const attachSection = document.createElement('div');
+        attachSection.style.cssText = 'margin-top: 25px; border-top: 1px dashed #cbd5e1; padding-top: 15px;';
+        
+        const attachTitle = document.createElement('strong');
+        attachTitle.style.cssText = 'color: #475569; font-size: 13px;';
+        attachTitle.textContent = '📎 Danh sách file đính kèm:';
+        attachSection.appendChild(attachTitle);
+
+        const attachContainer = document.createElement('div');
+        attachContainer.style.marginTop = '8px';
+
+        // Regex kiểm tra định dạng Data URL chuẩn mã hóa Base64
+        const DATA_URL_REGEX = /^data:[a-z0-9.+-]+\/[a-z0-9.+-]+;base64,[A-Za-z0-9+/=]+$/i;
 
         for (let i = 1; i < parts.length; i++) {
             const attachParts = parts[i].split(']');
@@ -330,31 +351,39 @@ function selectEmail(mail, element) {
                 .replace('[/ATTACHMENT]', '')
                 .trim();
 
-            attachmentsHTML += `
-                <div style="margin-top: 10px; padding: 10px 14px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; display: inline-block; margin-right: 10px;">
-                    <div style="font-weight: 600; color: #334155; font-size: 13px; margin-bottom: 4px;">
-                        <i class="fa-solid fa-paperclip"></i>
-                        ${escapeHtml(fileName)}
-                    </div>
-                    <a href="${base64Data}"
-                       download="${escapeHtml(fileName)}"
-                       class="btn btn-outline"
-                       style="font-size: 11px; padding: 3px 8px; text-decoration: none; color: #2563eb; display: inline-flex; align-items: center; gap: 4px;">
-                        <i class="fa-solid fa-download"></i> Tải về
-                    </a>
-                </div>
-            `;
+            const attachBox = document.createElement('div');
+            attachBox.style.cssText = 'margin-top: 10px; padding: 10px 14px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; display: inline-block; margin-right: 10px;';
+
+            const nameDiv = document.createElement('div');
+            nameDiv.style.cssText = 'font-weight: 600; color: #334155; font-size: 13px; margin-bottom: 4px;';
+            nameDiv.innerHTML = '<i class="fa-solid fa-paperclip"></i> ';
+            
+            const nameSpan = document.createElement('span');
+            nameSpan.textContent = fileName;
+            nameDiv.appendChild(nameSpan);
+            attachBox.appendChild(nameDiv);
+
+            // XỬ LÝ FIX XSS MỤC 2: Kiểm tra chuẩn Data URL & tạo thẻ qua DOM gán thuộc tính
+            if (DATA_URL_REGEX.test(base64Data)) {
+                const downloadLink = document.createElement('a');
+                downloadLink.href = base64Data;
+                downloadLink.download = fileName;
+                downloadLink.className = 'btn btn-outline';
+                downloadLink.style.cssText = 'font-size: 11px; padding: 3px 8px; text-decoration: none; color: #2563eb; display: inline-flex; align-items: center; gap: 4px;';
+                downloadLink.innerHTML = '<i class="fa-solid fa-download"></i> Tải về';
+                attachBox.appendChild(downloadLink);
+            } else {
+                const errorSpan = document.createElement('span');
+                errorSpan.style.cssText = 'font-size: 11px; color: #ef4444;';
+                errorSpan.textContent = '(File đính kèm không hợp lệ)';
+                attachBox.appendChild(errorSpan);
+            }
+
+            attachContainer.appendChild(attachBox);
         }
 
-        detailBodyElem.innerHTML = `
-            <div style="white-space: pre-wrap;">${escapeHtml(textContent)}</div>
-            <div style="margin-top: 25px; border-top: 1px dashed #cbd5e1; padding-top: 15px;">
-                <strong style="color: #475569; font-size: 13px;">
-                    📎 Danh sách file đính kèm:
-                </strong><br/>
-                <div style="margin-top: 8px;">${attachmentsHTML}</div>
-            </div>
-        `;
+        attachSection.appendChild(attachContainer);
+        detailBodyElem.appendChild(attachSection);
     } else {
         detailBodyElem.textContent = bodyText;
     }

@@ -5,6 +5,9 @@ import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLServerSocketFactory;
 import java.io.File;
 import java.io.FileInputStream;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Paths;
 import java.security.KeyStore;
 
 public class SslContextFactory {
@@ -16,7 +19,6 @@ public class SslContextFactory {
         try {
             File file = new File(KEYSTORE_PATH);
             if (!file.exists()) {
-                // Tự động tạo keystore bằng lệnh keytool hệ thống nếu chưa có
                 generateKeystoreWithKeytool();
             }
 
@@ -33,28 +35,48 @@ public class SslContextFactory {
 
             return sslContext.getServerSocketFactory();
         } catch (Exception e) {
-            System.err.println("[SSL FACTORY] Lỗi khởi tạo SSLContext: " + e.getMessage());
+            System.err.println("[SSL FACTORY] CẢNH BÁO: Lỗi khởi tạo SSLContext (Server sẽ chạy Plaintext): " + e.getMessage());
             return null;
         }
     }
 
-    private static void generateKeystoreWithKeytool() {
+    private static synchronized void generateKeystoreWithKeytool() {
+        if (Files.exists(Paths.get(KEYSTORE_PATH))) {
+            return;
+        }
+
         try {
             File dataDir = new File("data");
             if (!dataDir.exists()) {
                 dataDir.mkdirs();
             }
 
-            String cmd = String.format(
-                "keytool -genkeypair -alias pbl4mail -keyalg RSA -keysize 2048 " +
-                "-keystore %s -storepass %s -keypass %s -validity 365 " +
-                "-dname \"CN=PBL4 Mail Server, OU=DUT, O=DUT, L=DaNang, C=VN\"",
-                KEYSTORE_PATH, KEYSTORE_PASS, KEYSTORE_PASS
+            String keytoolPath = Paths.get(System.getProperty("java.home"), "bin", "keytool").toString();
+
+            ProcessBuilder pb = new ProcessBuilder(
+                keytoolPath,
+                "-genkeypair",
+                "-alias", "pbl4",
+                "-keyalg", "RSA",
+                "-keysize", "2048",
+                "-validity", "365",
+                "-keystore", KEYSTORE_PATH,
+                "-storepass", KEYSTORE_PASS,
+                "-keypass", KEYSTORE_PASS,
+                "-dname", "CN=localhost, O=PBL4"
             );
 
-            Process process = Runtime.getRuntime().exec(cmd);
-            process.waitFor();
-            System.out.println("[SSL FACTORY] Đã tự động sinh file keystore.jks thành công!");
+            pb.redirectErrorStream(true);
+            Process p = pb.start();
+
+            String output = new String(p.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+            int exitCode = p.waitFor();
+
+            if (exitCode == 0 && Files.exists(Paths.get(KEYSTORE_PATH))) {
+                System.out.println("[SSL FACTORY] Đã tự động sinh file keystore.jks thành công!");
+            } else {
+                System.err.println("[SSL FACTORY] Lỗi keytool (Exit Code " + exitCode + "): " + output);
+            }
         } catch (Exception e) {
             System.err.println("[SSL FACTORY] Không thể tự sinh keystore qua keytool: " + e.getMessage());
         }

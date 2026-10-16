@@ -52,25 +52,21 @@ public class AdminHandler implements HttpHandler {
         String path = exchange.getRequestURI().getPath();
         String method = exchange.getRequestMethod();
 
-        // 1. GET /api/admin/users
         if ("GET".equalsIgnoreCase(method) && path.endsWith("/users")) {
             handleGetUsers(exchange);
             return;
         }
 
-        // 2. GET /api/admin/logs - Lấy nhật ký hệ thống
         if ("GET".equalsIgnoreCase(method) && path.endsWith("/logs")) {
             handleGetLogs(exchange);
             return;
         }
 
-        // 3. GET /api/admin/stats - Lấy thống kê số thư, dung lượng & quota
         if ("GET".equalsIgnoreCase(method) && path.endsWith("/stats")) {
             handleGetStats(exchange);
             return;
         }
 
-        // Các route POST
         if ("POST".equalsIgnoreCase(method)) {
             String body = readRequestBody(exchange);
             String targetUser = getParamValue(body, "targetUser");
@@ -131,12 +127,12 @@ public class AdminHandler implements HttpHandler {
 
         try {
             long newQuota = Long.parseLong(quotaStr.trim());
-            if (newQuota < 1) {
-                sendResponse(exchange, 400, "{\"success\": false, \"message\": \"Quota phải lớn hơn 0 MB!\"}");
+            if (newQuota < 1 || newQuota > 10240) {
+                sendResponse(exchange, 400, "{\"success\": false, \"message\": \"Quota phải nằm trong khoảng từ 1 MB đến 10240 MB!\"}");
                 return;
             }
 
-            ServerConfig.MAX_MAILBOX_QUOTA_MB = newQuota;
+            ServerConfig.saveQuotaConfig(newQuota);
             appendLog("Cập nhật Quota mặc định cho Hòm thư: " + newQuota + " MB");
             sendResponse(exchange, 200, "{\"success\": true, \"message\": \"Đã cập nhật cấu hình Quota thành công: " + newQuota + " MB/hòm thư!\", \"quotaMb\": " + newQuota + "}");
         } catch (NumberFormatException e) {
@@ -194,6 +190,9 @@ public class AdminHandler implements HttpHandler {
         boolean updated = UserStore.setStatus(targetUser, newStatus);
 
         if (updated) {
+            if ("LOCKED".equals(newStatus)) {
+                SessionManager.invalidateUser(targetUser);
+            }
             String actName = "LOCKED".equals(newStatus) ? "Khóa tài khoản" : "Mở khóa tài khoản";
             appendLog(actName + ": " + targetUser);
             sendResponse(exchange, 200, "{\"success\": true, \"message\": \"Đã " + actName.toLowerCase() + " " + targetUser + " thành công!\"}");
@@ -221,6 +220,7 @@ public class AdminHandler implements HttpHandler {
         boolean removed = UserStore.deleteUser(targetUser);
 
         if (removed) {
+            SessionManager.invalidateUser(targetUser);
             deleteUserMailbox("data/mailboxes/" + targetUser);
             deleteUserMailbox("data/mailboxes/" + targetUser + "_sent");
 
@@ -269,19 +269,20 @@ public class AdminHandler implements HttpHandler {
                 boolean saved = MailStorageEngine.saveEmail(recipient, rawEmail);
                 if (saved) {
                     sent++;
-                    if (!MailStorageEngine.saveEmail("admin@pbl4.com_sent", rawEmail)) {
-                        appendLog("Broadcast: đã gửi tới " + recipient
-                                + " nhưng không lưu được bản sao trong Đã gửi của Admin.");
-                    }
                 } else {
                     failed++;
                     appendLog("Broadcast thất bại khi lưu thư cho " + recipient);
                 }
             } catch (Exception e) {
                 failed++;
-                appendLog("Broadcast lỗi với tài khoản " + recipient + ": " + e.getMessage());
+                appendLog("Broadcast lỗi với tài khoản " + recipient + ": " + sanitizeLogMessage(e.getMessage()));
             }
         }
+
+        try {
+            String adminRecord = "From: admin@pbl4.com\nTo: ALL_USERS\nSubject: " + safeSubject + "\nDate: " + nowStr + "\n\n" + content;
+            MailStorageEngine.saveEmail("admin@pbl4.com_sent", adminRecord);
+        } catch (Exception ignored) {}
 
         appendLog("Broadcast: gửi thành công " + sent + "/" + eligible
                 + " tài khoản; thất bại " + failed + ". Tiêu đề: " + safeSubject);
@@ -307,11 +308,17 @@ public class AdminHandler implements HttpHandler {
             File parent = logFile.getParentFile();
             if (parent != null && !parent.exists()) parent.mkdirs();
 
+            String cleanMsg = sanitizeLogMessage(message);
             String timeStr = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
             try (FileWriter fw = new FileWriter(logFile, StandardCharsets.UTF_8, true)) {
-                fw.write("[LOG " + timeStr + "] " + message + "\n");
+                fw.write("[LOG " + timeStr + "] " + cleanMsg + "\n");
             }
         } catch (IOException ignored) {}
+    }
+
+    private String sanitizeLogMessage(String raw) {
+        if (raw == null) return "";
+        return raw.replace("\r", " ").replace("\n", " ").trim();
     }
 
     private void deleteUserMailbox(String pathStr) {
@@ -328,7 +335,7 @@ public class AdminHandler implements HttpHandler {
                      }
                  });
         } catch (IOException e) {
-            appendLog("Lỗi khi xóa thư mục " + pathStr + ": " + e.getMessage());
+            appendLog("Lỗi khi xóa thư mục " + pathStr + ": " + sanitizeLogMessage(e.getMessage()));
         }
     }
 

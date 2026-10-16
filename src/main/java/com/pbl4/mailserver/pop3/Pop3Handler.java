@@ -1,5 +1,6 @@
 package com.pbl4.mailserver.pop3;
 
+import com.pbl4.mailserver.core.LoginThrottle;
 import com.pbl4.mailserver.core.MailStorageEngine;
 import com.pbl4.mailserver.core.SecurityUtils;
 import com.pbl4.mailserver.core.UserStore;
@@ -18,7 +19,7 @@ import java.util.Set;
 public class Pop3Handler implements Runnable {
 
     private final Socket clientSocket;
-    private static final int SOCKET_TIMEOUT_MS = 30000; // --- MỤC 8.5: Timeout 30s ---
+    private static final int SOCKET_TIMEOUT_MS = 30000;
 
     public Pop3Handler(Socket socket) {
         this.clientSocket = socket;
@@ -27,7 +28,6 @@ public class Pop3Handler implements Runnable {
     @Override
     public void run() {
         try {
-            // --- MỤC 8.5: Cấu hình Read Timeout phòng chống treo kết nối ---
             clientSocket.setSoTimeout(SOCKET_TIMEOUT_MS);
         } catch (Exception ignored) {}
 
@@ -38,9 +38,10 @@ public class Pop3Handler implements Runnable {
             out.println("+OK PBL4 POP3 Server Ready");
 
             String line;
+            String pendingUser = null;
             String currentUser = null;
             boolean isAuthenticated = false;
-            List<String> emails = new ArrayList<>();
+            List<MailStorageEngine.StoredMail> emails = new ArrayList<>();
             Set<Integer> deletedIndices = new HashSet<>();
 
             while ((line = in.readLine()) != null) {
@@ -49,26 +50,45 @@ public class Pop3Handler implements Runnable {
                 String argument = tokens.length > 1 ? tokens[1].trim() : "";
 
                 if ("USER".equals(command)) {
-                    currentUser = argument;
+                    if (isAuthenticated) {
+                        out.println("-ERR Already authenticated");
+                        continue;
+                    }
+                    pendingUser = argument;
                     out.println("+OK User accepted");
                 } 
                 else if ("PASS".equals(command)) {
-                    if (currentUser == null) {
+                    if (isAuthenticated) {
+                        out.println("-ERR Already authenticated");
+                        continue;
+                    }
+                    if (pendingUser == null) {
                         out.println("-ERR USER command required first");
                         continue;
                     }
 
-                    String authCheckUser = currentUser.endsWith("_sent")
-                            ? currentUser.substring(0, currentUser.length() - 5)
-                            : currentUser;
+                    String authCheckUser = pendingUser.endsWith("_sent")
+                            ? pendingUser.substring(0, pendingUser.length() - 5)
+                            : pendingUser;
+
+                    if (LoginThrottle.isThrottled(authCheckUser)) {
+                        out.println("-ERR Too many failed attempts, try again later");
+                        continue;
+                    }
 
                     String storedHash = UserStore.findHash(authCheckUser);
-                    if (storedHash != null && SecurityUtils.checkPassword(argument, storedHash)) {
+                    boolean isLocked = "LOCKED".equalsIgnoreCase(UserStore.getStatus(authCheckUser));
+
+                    if (storedHash != null && !isLocked && SecurityUtils.checkPassword(argument, storedHash)) {
+                        LoginThrottle.resetAttempts(authCheckUser);
                         isAuthenticated = true;
-                        emails = MailStorageEngine.readAllEmails(currentUser);
+                        currentUser = pendingUser;
+                        pendingUser = null;
+                        emails = MailStorageEngine.listMails(currentUser);
                         deletedIndices.clear();
                         out.println("+OK Logged in successfully");
                     } else {
+                        LoginThrottle.recordFailedAttempt(authCheckUser);
                         out.println("-ERR Invalid username or password");
                     }
                 } 
@@ -77,13 +97,13 @@ public class Pop3Handler implements Runnable {
                         out.println("-ERR Please authenticate first");
                         continue;
                     }
-                    // FIX MỤC 8.3: Chuẩn định dạng STAT
                     int activeCount = 0;
                     long totalBytes = 0;
                     for (int i = 0; i < emails.size(); i++) {
                         if (!deletedIndices.contains(i + 1)) {
                             activeCount++;
-                            totalBytes += emails.get(i).getBytes(StandardCharsets.UTF_8).length;
+                            String content = emails.get(i).content;
+                            totalBytes += (content != null) ? content.getBytes(StandardCharsets.UTF_8).length : 0;
                         }
                     }
                     out.println("+OK " + activeCount + " " + totalBytes);
@@ -99,7 +119,8 @@ public class Pop3Handler implements Runnable {
                             if (idx < 1 || idx > emails.size() || deletedIndices.contains(idx)) {
                                 out.println("-ERR No such message");
                             } else {
-                                int size = emails.get(idx - 1).getBytes(StandardCharsets.UTF_8).length;
+                                String content = emails.get(idx - 1).content;
+                                int size = (content != null) ? content.getBytes(StandardCharsets.UTF_8).length : 0;
                                 out.println("+OK " + idx + " " + size);
                             }
                         } catch (NumberFormatException e) {
@@ -110,12 +131,40 @@ public class Pop3Handler implements Runnable {
                         out.println("+OK " + activeCount + " messages");
                         for (int i = 0; i < emails.size(); i++) {
                             if (!deletedIndices.contains(i + 1)) {
-                                out.println((i + 1) + " " + emails.get(i).getBytes(StandardCharsets.UTF_8).length);
+                                String content = emails.get(i).content;
+                                int size = (content != null) ? content.getBytes(StandardCharsets.UTF_8).length : 0;
+                                out.println((i + 1) + " " + size);
                             }
                         }
                         out.println(".");
                     }
                 } 
+                else if ("UIDL".equals(command)) {
+                    if (!isAuthenticated) {
+                        out.println("-ERR Please authenticate first");
+                        continue;
+                    }
+                    if (!argument.isEmpty()) {
+                        try {
+                            int idx = Integer.parseInt(argument);
+                            if (idx < 1 || idx > emails.size() || deletedIndices.contains(idx)) {
+                                out.println("-ERR No such message");
+                            } else {
+                                out.println("+OK " + idx + " " + emails.get(idx - 1).id);
+                            }
+                        } catch (NumberFormatException e) {
+                            out.println("-ERR Invalid message number");
+                        }
+                    } else {
+                        out.println("+OK Unique-ID listing follows");
+                        for (int i = 0; i < emails.size(); i++) {
+                            if (!deletedIndices.contains(i + 1)) {
+                                out.println((i + 1) + " " + emails.get(i).id);
+                            }
+                        }
+                        out.println(".");
+                    }
+                }
                 else if ("RETR".equals(command)) {
                     if (!isAuthenticated) {
                         out.println("-ERR Please authenticate first");
@@ -124,8 +173,14 @@ public class Pop3Handler implements Runnable {
                     try {
                         int index = Integer.parseInt(argument) - 1;
                         if (index >= 0 && index < emails.size() && !deletedIndices.contains(index + 1)) {
-                            out.println("+OK Octets follows");
-                            String message = emails.get(index).replace("\r\n", "\n").replace('\r', '\n');
+                            String mailContent = emails.get(index).content;
+                            if (mailContent == null) {
+                                out.println("-ERR Message decryption failed");
+                                continue;
+                            }
+                            int size = mailContent.getBytes(StandardCharsets.UTF_8).length;
+                            out.println("+OK " + size + " octets");
+                            String message = mailContent.replace("\r\n", "\n").replace('\r', '\n');
                             String[] messageLines = message.split("\n", -1);
                             for (String messageLine : messageLines) {
                                 out.println(messageLine.startsWith(".") ? "." + messageLine : messageLine);
@@ -138,7 +193,6 @@ public class Pop3Handler implements Runnable {
                         out.println("-ERR Invalid message number");
                     }
                 } 
-                // FIX MỤC 8.3: Bổ sung lệnh DELE
                 else if ("DELE".equals(command)) {
                     if (!isAuthenticated) {
                         out.println("-ERR Please authenticate first");
@@ -156,7 +210,6 @@ public class Pop3Handler implements Runnable {
                         out.println("-ERR Invalid message number");
                     }
                 }
-                // FIX MỤC 8.3: Bổ sung lệnh RSET
                 else if ("RSET".equals(command)) {
                     if (!isAuthenticated) {
                         out.println("-ERR Please authenticate first");
@@ -165,14 +218,18 @@ public class Pop3Handler implements Runnable {
                     deletedIndices.clear();
                     out.println("+OK Reset state, all marked deletions cleared");
                 }
-                // FIX MỤC 8.3: Bổ sung lệnh NOOP
                 else if ("NOOP".equals(command)) {
                     out.println("+OK");
                 }
                 else if ("QUIT".equals(command)) {
-                    // FIX MỤC 8.3: Xóa vĩnh viễn các file thư bị đánh dấu
-                    if (isAuthenticated && !deletedIndices.isEmpty()) {
-                        MailStorageEngine.deleteEmails(currentUser, deletedIndices);
+                    if (isAuthenticated && currentUser != null && !deletedIndices.isEmpty()) {
+                        List<String> idsToDelete = new ArrayList<>();
+                        for (int idx : deletedIndices) {
+                            if (idx >= 1 && idx <= emails.size()) {
+                                idsToDelete.add(emails.get(idx - 1).id);
+                            }
+                        }
+                        MailStorageEngine.deleteMailsByIds(currentUser, idsToDelete);
                     }
                     out.println("+OK Logging out");
                     break;

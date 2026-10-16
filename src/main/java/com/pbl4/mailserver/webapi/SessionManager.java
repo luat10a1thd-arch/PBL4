@@ -1,5 +1,7 @@
 package com.pbl4.mailserver.webapi;
 
+import com.pbl4.mailserver.core.UserStore;
+
 import java.security.SecureRandom;
 import java.util.Base64;
 import java.util.concurrent.ConcurrentHashMap;
@@ -9,10 +11,9 @@ import java.util.concurrent.TimeUnit;
 
 public class SessionManager {
 
-    private static final long EXPIRY_MS = 2 * 60 * 60 * 1000; // Hết hạn sau 2 giờ
+    private static final long EXPIRY_MS = 2 * 60 * 60 * 1000;
     private static final SecureRandom RANDOM = new SecureRandom();
 
-    // Lớp Session lưu RAM - TUYỆT ĐỐI KHÔNG LƯU MẬT KHẨU GỐC (Đạt tiêu chí Mục 5 Báo cáo)
     private static class Session {
         final String username;
         long lastAccess;
@@ -26,7 +27,6 @@ public class SessionManager {
     private static final ConcurrentHashMap<String, Session> sessions = new ConcurrentHashMap<>();
 
     static {
-        // Tự động dọn dẹp các Session hết hạn mỗi 15 phút
         ScheduledExecutorService cleaner = Executors.newSingleThreadScheduledExecutor();
         cleaner.scheduleAtFixedRate(SessionManager::cleanupExpiredSessions, 15, 15, TimeUnit.MINUTES);
     }
@@ -41,7 +41,14 @@ public class SessionManager {
 
     public static String validate(String token) {
         Session s = getValidSession(token);
-        return s != null ? s.username : null;
+        if (s == null) return null;
+
+        if (!UserStore.exists(s.username) || "LOCKED".equalsIgnoreCase(UserStore.getStatus(s.username))) {
+            invalidate(token);
+            return null;
+        }
+
+        return s.username;
     }
 
     public static String getUsername(String token) {
@@ -64,6 +71,11 @@ public class SessionManager {
         if (token != null) {
             sessions.remove(token);
         }
+    }
+
+    public static void invalidateUser(String username) {
+        if (username == null) return;
+        sessions.entrySet().removeIf(entry -> entry.getValue().username.equalsIgnoreCase(username.trim()));
     }
 
     private static void cleanupExpiredSessions() {

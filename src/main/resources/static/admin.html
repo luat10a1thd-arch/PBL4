@@ -307,19 +307,33 @@
                         ? '<span class="status-badge status-locked">Tạm khóa</span>' 
                         : '<span class="status-badge status-active">Hoạt động</span>';
 
-                    const lockBtn = isLocked 
-                        ? `<button class="btn-action btn-unlock" onclick="toggleLockUser('${escapeHtml(u.username)}', 'unlock')"><i class="fa-solid fa-lock-open"></i> Mở khóa</button>` 
-                        : `<button class="btn-action btn-lock" onclick="toggleLockUser('${escapeHtml(u.username)}', 'lock')"><i class="fa-solid fa-lock"></i> Khóa</button>`;
+                    // FIX XSS MỤC 2: Tạo nút bấm bằng DOM và gán EventListener an toàn 100%
+                    const actionTd = document.createElement('td');
+                    if (!isSystemAdmin) {
+                        const lockBtn = document.createElement('button');
+                        lockBtn.className = isLocked ? 'btn-action btn-unlock' : 'btn-action btn-lock';
+                        lockBtn.innerHTML = isLocked ? '<i class="fa-solid fa-lock-open"></i> Mở khóa' : '<i class="fa-solid fa-lock"></i> Khóa';
+                        lockBtn.addEventListener('click', () => toggleLockUser(u.username, isLocked ? 'unlock' : 'lock'));
+
+                        const delBtn = document.createElement('button');
+                        delBtn.className = 'btn-action btn-delete';
+                        delBtn.style.marginLeft = '4px';
+                        delBtn.innerHTML = '<i class="fa-solid fa-trash"></i> Xóa';
+                        delBtn.addEventListener('click', () => deleteUser(u.username));
+
+                        actionTd.appendChild(lockBtn);
+                        actionTd.appendChild(delBtn);
+                    } else {
+                        actionTd.innerHTML = '<em>Tài khoản hệ thống</em>';
+                    }
 
                     row.innerHTML = `
                         <td><strong>${escapeHtml(u.username)}</strong></td>
                         <td><span style="color:${isSystemAdmin ? '#5046e5' : '#64748b'}; font-weight:600;">${role}</span></td>
                         <td>${statusBadge}</td>
                         <td>2026-09-30</td>
-                        <td>
-                            ${!isSystemAdmin ? `${lockBtn} <button class="btn-action btn-delete" onclick="deleteUser('${escapeHtml(u.username)}')"><i class="fa-solid fa-trash"></i> Xóa</button>` : '<em>Tài khoản hệ thống</em>'}
-                        </td>
                     `;
+                    row.appendChild(actionTd);
                     tbody.appendChild(row);
                 });
             } else {
@@ -338,7 +352,15 @@
             const data = await response.json();
             if (data.success) {
                 const logBox = document.getElementById('login-logs');
-                logBox.innerHTML = data.logs.join('<br>');
+                logBox.innerHTML = ''; // Clear cũ
+
+                // FIX XSS MỤC 2: Render từng dòng log bằng textContent an toàn
+                data.logs.forEach(logLine => {
+                    const lineDiv = document.createElement('div');
+                    lineDiv.textContent = logLine;
+                    logBox.appendChild(lineDiv);
+                });
+
                 logBox.scrollTop = logBox.scrollHeight;
             }
         } catch (err) {
@@ -475,8 +497,15 @@
         setTimeout(() => window.location.href = '/index.html', 500);
     }
 
+    // FIX XSS MỤC 2: Escape bổ sung dấu nháy đơn ' và dấu nháy kép "
     function escapeHtml(str) {
-        return str ? str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;") : '';
+        if (!str) return '';
+        return String(str)
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/"/g, "&quot;")
+            .replace(/'/g, "&#39;");
     }
 </script>
 

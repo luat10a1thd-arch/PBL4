@@ -7,14 +7,16 @@ import com.pbl4.mailserver.webapi.ApiServer;
 public class MainApplication {
     public static void main(String[] args) {
         System.out.println("=== Đang khởi động DUT Secure Mail Server ===");
-        
-        // 1. Web API Server (8080)
+
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            System.out.println("\n=== Đang tắt Mail Server an toàn... ===");
+            SmtpServerManager.stopServer();
+            Pop3ServerManager.stopServer();
+            System.out.println("=== Đã đóng tất cả Socket và ThreadPool thành công! ===");
+        }));
+
         ApiServer.startServer();
-
-        // 2. SMTP Socket Server (2525)
         SmtpServerManager.startServer();
-
-        // 3. POP3 Socket Server (1110)
         Pop3ServerManager.startServer();
     }
 }

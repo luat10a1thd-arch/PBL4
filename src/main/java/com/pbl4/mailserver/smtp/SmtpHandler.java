@@ -1,6 +1,7 @@
 package com.pbl4.mailserver.smtp;
 
-import com.pbl4.mailserver.core.MailStorageEngine;
+import com.pbl4.mailserver.core.LoginThrottle;
+import com.pbl4.mailserver.core.MailService;
 import com.pbl4.mailserver.core.SecurityUtils;
 import com.pbl4.mailserver.core.UserStore;
 
@@ -15,7 +16,7 @@ import java.util.Base64;
 public class SmtpHandler implements Runnable {
 
     private final Socket clientSocket;
-    private static final int SOCKET_TIMEOUT_MS = 30000; // --- MỤC 8.5: Timeout 30s ---
+    private static final int SOCKET_TIMEOUT_MS = 30000;
 
     public SmtpHandler(Socket socket) {
         this.clientSocket = socket;
@@ -24,7 +25,6 @@ public class SmtpHandler implements Runnable {
     @Override
     public void run() {
         try {
-            // --- MỤC 8.5: Cấu hình Read Timeout phòng chống treo kết nối làm ngạt ThreadPool ---
             clientSocket.setSoTimeout(SOCKET_TIMEOUT_MS);
         } catch (Exception ignored) {}
 
@@ -39,6 +39,7 @@ public class SmtpHandler implements Runnable {
             String rcptTo = "";
             StringBuilder dataBuilder = new StringBuilder();
             boolean isDataMode = false;
+            boolean inClientHeaders = true;
             boolean isAuthenticated = false;
             String authenticatedUser = null;
 
@@ -46,12 +47,10 @@ public class SmtpHandler implements Runnable {
                 if (isDataMode) {
                     if (".".equals(line)) {
                         isDataMode = false;
-                        String rawEmailContent = "From: " + mailFrom + "\nTo: " + rcptTo + "\n" + dataBuilder.toString();
 
-                        boolean savedToRecipient = MailStorageEngine.saveEmail(rcptTo, rawEmailContent);
-                        boolean savedToSender = MailStorageEngine.saveEmail(mailFrom + "_sent", rawEmailContent);
+                        MailService.DeliveryResult result = MailService.deliver(mailFrom, rcptTo, "SMTP Message", dataBuilder.toString());
 
-                        if (savedToRecipient && savedToSender) {
+                        if (result.success) {
                             out.println("250 OK: Message accepted for delivery");
                         } else {
                             out.println("451 Requested action aborted: local error");
@@ -59,10 +58,21 @@ public class SmtpHandler implements Runnable {
                         rcptTo = "";
                         dataBuilder.setLength(0);
                     } else {
-                        // FIX MỤC 8.2: Unstuffing
                         if (line.startsWith("..")) {
                             line = line.substring(1);
                         }
+                        
+                        if (inClientHeaders) {
+                            if (line.isEmpty()) {
+                                inClientHeaders = false;
+                            } else {
+                                String lower = line.toLowerCase();
+                                if (lower.startsWith("from:") || lower.startsWith("to:") || lower.startsWith("sender:")) {
+                                    continue;
+                                }
+                            }
+                        }
+                        
                         dataBuilder.append(line).append("\n");
                     }
                     continue;
@@ -83,12 +93,21 @@ public class SmtpHandler implements Runnable {
                     if (encodedPass == null) break;
                     String decodedPass = new String(Base64.getDecoder().decode(encodedPass.trim()), StandardCharsets.UTF_8);
 
+                    if (LoginThrottle.isThrottled(decodedUser)) {
+                        out.println("454 4.7.0 Too many failed attempts, try again later");
+                        continue;
+                    }
+
                     String storedHash = UserStore.findHash(decodedUser);
-                    if (storedHash != null && SecurityUtils.checkPassword(decodedPass, storedHash)) {
+                    boolean isLocked = "LOCKED".equalsIgnoreCase(UserStore.getStatus(decodedUser));
+
+                    if (storedHash != null && !isLocked && SecurityUtils.checkPassword(decodedPass, storedHash)) {
+                        LoginThrottle.resetAttempts(decodedUser);
                         isAuthenticated = true;
                         authenticatedUser = decodedUser;
                         out.println("235 2.7.0 Authentication successful");
                     } else {
+                        LoginThrottle.recordFailedAttempt(decodedUser);
                         out.println("535 5.7.8 Authentication credentials invalid");
                     }
                 } 
@@ -98,7 +117,6 @@ public class SmtpHandler implements Runnable {
                         continue;
                     }
                     
-                    // FIX MỤC 8.1: Kiểm tra chống giả mạo
                     String candidate = parseAddress(line);
                     if (candidate.isEmpty() || !candidate.equalsIgnoreCase(authenticatedUser)) {
                         out.println("553 5.7.1 Sender must match authenticated account");
@@ -142,18 +160,18 @@ public class SmtpHandler implements Runnable {
                     }
 
                     isDataMode = true;
+                    inClientHeaders = true;
                     dataBuilder.setLength(0);
                     out.println("354 Start mail input; end with <CR><LF>.<CR><LF>");
                 } 
-                // FIX MỤC 8.3: Bổ sung lệnh RSET
                 else if (upperLine.startsWith("RSET")) {
                     mailFrom = "";
                     rcptTo = "";
                     dataBuilder.setLength(0);
                     isDataMode = false;
+                    inClientHeaders = true;
                     out.println("250 OK Reset completed");
                 }
-                // FIX MỤC 8.3: Bổ sung lệnh NOOP
                 else if (upperLine.startsWith("NOOP")) {
                     out.println("250 OK");
                 }

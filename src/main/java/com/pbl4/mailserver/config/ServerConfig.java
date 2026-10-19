@@ -14,6 +14,7 @@ public class ServerConfig {
 
     public static final int THREAD_POOL_SIZE = 20;
     public static final int SOCKET_TIMEOUT_MS = 30000;
+    public static final long MAX_MESSAGE_BYTES = 25 * 1024 * 1024L;
 
     public static final String BASE_DATA_DIR = "data/mailboxes/";
     public static final String KEYSTORE_PATH = "data/keystore.jks";

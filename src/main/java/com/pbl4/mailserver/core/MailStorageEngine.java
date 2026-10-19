@@ -180,6 +180,33 @@ public class MailStorageEngine {
         return mails;
     }
 
+    public static StoredMail getSingleMail(String username, String fileId) {
+        if (fileId == null || fileId.contains("/") || fileId.contains("\\") || fileId.contains("..")) {
+            return null;
+        }
+        initMailbox(username);
+        ReentrantReadWriteLock lock = getLockForUser(username);
+        lock.readLock().lock();
+
+        try {
+            Path filePath = mailboxDir(username).resolve(fileId).normalize();
+            File file = filePath.toFile();
+            if (!file.exists()) return null;
+
+            byte[] saltBytes = getUserSaltOrThrow(username);
+            SecretKey derivedKey = SecurityUtils.deriveKey(ServerConfig.SECRET_KEY, saltBytes);
+
+            byte[] bytes = Files.readAllBytes(filePath);
+            String encryptedData = new String(bytes, StandardCharsets.UTF_8);
+            String decryptedContent = SecurityUtils.decryptWithKey(encryptedData, derivedKey);
+            return new StoredMail(file.getName(), decryptedContent);
+        } catch (Exception e) {
+            return null;
+        } finally {
+            lock.readLock().unlock();
+        }
+    }
+
     public static List<String> readAllEmails(String username) {
         List<StoredMail> storedMails = listMails(username);
         List<String> emails = new ArrayList<>();

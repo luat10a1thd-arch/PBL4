@@ -4,7 +4,6 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>DUT Mail - Admin Portal</title>
-    <!-- FontAwesome & Style chung -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <link rel="stylesheet" href="css/style.css">
     <style>
@@ -58,11 +57,10 @@
 <body class="admin-body">
 
 <div class="admin-container">
-    <!-- Sidebar -->
     <div class="admin-sidebar">
 		<div class="admin-brand" onclick="location.reload()" style="cursor: pointer;" title="Tải lại trang">
-		            <i class="fa-solid fa-paper-plane"></i>
-		            <span>DUT Mail Admin</span>
+		    <i class="fa-solid fa-paper-plane"></i>
+		    <span>DUT Mail Admin</span>
 		</div>
         <ul class="admin-menu">
             <li>
@@ -78,9 +76,7 @@
         </ul>
     </div>
 
-    <!-- Main Content Area -->
     <div class="admin-main">
-        <!-- Top Header -->
         <div class="admin-header">
             <div style="font-weight: 600; font-size: 18px;">Trang Quản Trị Hệ Thống</div>
             <div class="admin-user-info">
@@ -93,7 +89,6 @@
         </div>
 
         <div class="admin-content">
-            <!-- Metric Cards -->
             <div class="stats-grid">
                 <div class="stat-card">
                     <div class="stat-icon"><i class="fa-solid fa-users"></i></div>
@@ -118,7 +113,6 @@
                 </div>
             </div>
 
-            <!-- TAB 1: QUẢN LÝ TÀI KHOẢN VÀ NGƯỜI DÙNG -->
             <div id="tab-users" class="tab-content active">
                 <div class="card-panel">
                     <h3><i class="fa-solid fa-users-viewfinder"></i> Danh sách người dùng & Trạng thái</h3>
@@ -128,13 +122,12 @@
                                 <th>Tài khoản Email</th>
                                 <th>Quyền</th>
                                 <th>Trạng thái</th>
-                                <th>Lần đăng nhập cuối</th>
                                 <th>Thao tác</th>
                             </tr>
                         </thead>
                         <tbody id="user-table-body">
                             <tr>
-                                <td colspan="5" style="text-align: center; color: #64748b;">Đang tải danh sách tài khoản từ Server...</td>
+                                <td colspan="4" style="text-align: center; color: #64748b;">Đang tải danh sách tài khoản từ Server...</td>
                             </tr>
                         </tbody>
                     </table>
@@ -146,7 +139,6 @@
                 </div>
             </div>
 
-            <!-- TAB 2: QUẢN LÝ THƯ TỪ VÀ DUNG LƯỢNG -->
             <div id="tab-mail-storage" class="tab-content">
                 <div class="card-panel">
                     <h3><i class="fa-solid fa-sliders"></i> Cấu hình Giới hạn Dung lượng Hộp thư (Quota)</h3>
@@ -179,10 +171,8 @@
     </div>
 </div>
 
-<!-- KHUNG CHỨA TOAST NOTIFICATION -->
 <div id="toast-container"></div>
 
-<!-- CUSTOM CONFIRM MODAL -->
 <div id="confirm-modal" class="confirm-modal-overlay hidden">
     <div class="confirm-modal-box">
         <i class="fa-solid fa-circle-exclamation confirm-icon" id="confirm-modal-icon"></i>
@@ -300,14 +290,13 @@
                 data.users.forEach(u => {
                     const row = document.createElement('tr');
                     const isSystemAdmin = u.username.toLowerCase() === 'admin@pbl4.com';
-                    const role = isSystemAdmin ? 'ADMIN' : 'USER';
+                    const role = u.role || (isSystemAdmin ? 'ADMIN' : 'USER');
                     const isLocked = u.status === 'LOCKED';
 
                     const statusBadge = isLocked 
                         ? '<span class="status-badge status-locked">Tạm khóa</span>' 
                         : '<span class="status-badge status-active">Hoạt động</span>';
 
-                    // FIX XSS MỤC 2: Tạo nút bấm bằng DOM và gán EventListener an toàn 100%
                     const actionTd = document.createElement('td');
                     if (!isSystemAdmin) {
                         const lockBtn = document.createElement('button');
@@ -329,9 +318,8 @@
 
                     row.innerHTML = `
                         <td><strong>${escapeHtml(u.username)}</strong></td>
-                        <td><span style="color:${isSystemAdmin ? '#5046e5' : '#64748b'}; font-weight:600;">${role}</span></td>
+                        <td><span style="color:${isSystemAdmin ? '#5046e5' : '#64748b'}; font-weight:600;">${escapeHtml(role)}</span></td>
                         <td>${statusBadge}</td>
-                        <td>2026-09-30</td>
                     `;
                     row.appendChild(actionTd);
                     tbody.appendChild(row);
@@ -352,9 +340,8 @@
             const data = await response.json();
             if (data.success) {
                 const logBox = document.getElementById('login-logs');
-                logBox.innerHTML = ''; // Clear cũ
+                logBox.innerHTML = '';
 
-                // FIX XSS MỤC 2: Render từng dòng log bằng textContent an toàn
                 data.logs.forEach(logLine => {
                     const lineDiv = document.createElement('div');
                     lineDiv.textContent = logLine;
@@ -497,7 +484,6 @@
         setTimeout(() => window.location.href = '/index.html', 500);
     }
 
-    // FIX XSS MỤC 2: Escape bổ sung dấu nháy đơn ' và dấu nháy kép "
     function escapeHtml(str) {
         if (!str) return '';
         return String(str)

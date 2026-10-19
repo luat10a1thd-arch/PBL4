@@ -499,12 +499,11 @@
 .mail-list-container,
 #inbox-list,
 #sent-list {
-    max-height: 520px;            /* Chiều cao tối đa trước khi hiện thanh cuộn */
-    overflow-y: auto;             /* Tự động hiện thanh cuộn đứng khi danh sách dài */
-    padding-right: 4px;           /* Khoảng trống để không đè lên thẻ nội dung */
+    max-height: 520px;
+    overflow-y: auto;
+    padding-right: 4px;
 }
 
-/* Tùy chỉnh kiểu dáng thanh cuộn cho mượt và đẹp mắt */
 .mail-list-container::-webkit-scrollbar,
 #inbox-list::-webkit-scrollbar,
 #sent-list::-webkit-scrollbar {
@@ -529,4 +528,66 @@
 #inbox-list::-webkit-scrollbar-thumb:hover,
 #sent-list::-webkit-scrollbar-thumb:hover {
     background: #94a3b8;
+}
+
+/* --- 6. CUSTOM CONFIRM MODAL STYLES --- */
+.confirm-modal-overlay {
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(15, 23, 42, 0.6);
+    backdrop-filter: blur(4px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 10000;
+    animation: fadeIn 0.2s ease-out;
+}
+
+.confirm-modal-box {
+    background: #ffffff;
+    width: 100%;
+    max-width: 400px;
+    border-radius: 16px;
+    padding: 24px;
+    box-shadow: var(--shadow-lg);
+    text-align: center;
+}
+
+.confirm-icon {
+    font-size: 42px;
+    color: #ef4444;
+    margin-bottom: 12px;
+}
+
+.confirm-title {
+    font-size: 18px;
+    font-weight: 700;
+    color: #0f172a;
+    margin-bottom: 8px;
+}
+
+.confirm-msg {
+    font-size: 14px;
+    color: #64748b;
+    margin-bottom: 20px;
+}
+
+.confirm-actions {
+    display: flex;
+    gap: 10px;
+    justify-content: center;
+}
+
+.btn-danger {
+    background: #ef4444;
+    color: #ffffff;
+}
+
+.btn-danger:hover {
+    background: #dc2626;
+}
+
+@keyframes fadeIn {
+    from { opacity: 0; transform: scale(0.95); }
+    to { opacity: 1; transform: scale(1); }
 }

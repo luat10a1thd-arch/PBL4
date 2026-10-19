@@ -32,6 +32,16 @@ public class UserStore {
         }
     }
 
+    public static synchronized void initDefaultUsers() {
+        ensureLoaded();
+        if (!exists("admin@pbl4.com")) {
+            byte[] salt = SecurityUtils.generateSalt();
+            String saltBase64 = Base64.getEncoder().encodeToString(salt);
+            String hash = SecurityUtils.hashPassword("@Luat0105");
+            addUser("admin@pbl4.com", hash, saltBase64, "ACTIVE", "ADMIN");
+        }
+    }
+
     public static String canonical(String name) {
         if (name == null || name.trim().isEmpty()) return null;
         ensureLoaded();

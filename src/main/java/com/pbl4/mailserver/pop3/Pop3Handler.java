@@ -3,10 +3,15 @@ package com.pbl4.mailserver.pop3;
 import com.pbl4.mailserver.core.LoginThrottle;
 import com.pbl4.mailserver.core.MailStorageEngine;
 import com.pbl4.mailserver.core.SecurityUtils;
+import com.pbl4.mailserver.core.SslContextFactory;
 import com.pbl4.mailserver.core.UserStore;
 
+import javax.net.ssl.SSLServerSocketFactory;
+import javax.net.ssl.SSLSocket;
+import javax.net.ssl.SSLSocketFactory;
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
+import java.io.OutputStreamWriter;
 import java.io.PrintWriter;
 import java.net.Socket;
 import java.net.SocketTimeoutException;
@@ -18,7 +23,7 @@ import java.util.Set;
 
 public class Pop3Handler implements Runnable {
 
-    private final Socket clientSocket;
+    private Socket clientSocket;
     private static final int SOCKET_TIMEOUT_MS = 30000;
 
     public Pop3Handler(Socket socket) {
@@ -31,16 +36,19 @@ public class Pop3Handler implements Runnable {
             clientSocket.setSoTimeout(SOCKET_TIMEOUT_MS);
         } catch (Exception ignored) {}
 
-        try (
+        String clientIp = clientSocket.getInetAddress().getHostAddress();
+
+        try {
             BufferedReader in = new BufferedReader(new InputStreamReader(clientSocket.getInputStream(), StandardCharsets.UTF_8));
-            PrintWriter out = new PrintWriter(new java.io.OutputStreamWriter(clientSocket.getOutputStream(), StandardCharsets.UTF_8), true)
-        ) {
+            PrintWriter out = new PrintWriter(new OutputStreamWriter(clientSocket.getOutputStream(), StandardCharsets.UTF_8), true);
+
             out.println("+OK PBL4 POP3 Server Ready");
 
             String line;
             String pendingUser = null;
             String currentUser = null;
             boolean isAuthenticated = false;
+            boolean isTlsActive = false;
             List<MailStorageEngine.StoredMail> emails = new ArrayList<>();
             Set<Integer> deletedIndices = new HashSet<>();
 
@@ -49,7 +57,34 @@ public class Pop3Handler implements Runnable {
                 String command = tokens[0].toUpperCase();
                 String argument = tokens.length > 1 ? tokens[1].trim() : "";
 
-                if ("USER".equals(command)) {
+                if ("STLS".equals(command)) {
+                    if (isTlsActive) {
+                        out.println("-ERR TLS already active");
+                        continue;
+                    }
+                    SSLServerSocketFactory sslFactory = SslContextFactory.createSSLServerSocketFactory();
+                    if (sslFactory == null) {
+                        out.println("-ERR STLS not available");
+                        continue;
+                    }
+                    out.println("+OK Begin TLS negotiation now");
+
+                    SSLSocketFactory sf = (SSLSocketFactory) SSLSocketFactory.getDefault();
+                    SSLSocket sslSocket = (SSLSocket) sf.createSocket(
+                            clientSocket,
+                            clientSocket.getInetAddress().getHostAddress(),
+                            clientSocket.getPort(),
+                            true
+                    );
+                    sslSocket.setUseClientMode(false);
+                    sslSocket.startHandshake();
+
+                    clientSocket = sslSocket;
+                    in = new BufferedReader(new InputStreamReader(clientSocket.getInputStream(), StandardCharsets.UTF_8));
+                    out = new PrintWriter(new OutputStreamWriter(clientSocket.getOutputStream(), StandardCharsets.UTF_8), true);
+                    isTlsActive = true;
+                }
+                else if ("USER".equals(command)) {
                     if (isAuthenticated) {
                         out.println("-ERR Already authenticated");
                         continue;
@@ -67,11 +102,12 @@ public class Pop3Handler implements Runnable {
                         continue;
                     }
 
-                    String authCheckUser = pendingUser.endsWith("_sent")
+                    boolean isSentFolder = pendingUser.endsWith("_sent");
+                    String authCheckUser = isSentFolder
                             ? pendingUser.substring(0, pendingUser.length() - 5)
                             : pendingUser;
 
-                    if (LoginThrottle.isThrottled(authCheckUser)) {
+                    if (LoginThrottle.isThrottled(clientIp)) {
                         out.println("-ERR Too many failed attempts, try again later");
                         continue;
                     }
@@ -80,15 +116,18 @@ public class Pop3Handler implements Runnable {
                     boolean isLocked = "LOCKED".equalsIgnoreCase(UserStore.getStatus(authCheckUser));
 
                     if (storedHash != null && !isLocked && SecurityUtils.checkPassword(argument, storedHash)) {
-                        LoginThrottle.resetAttempts(authCheckUser);
+                        LoginThrottle.resetAttempts(clientIp);
                         isAuthenticated = true;
-                        currentUser = pendingUser;
+                        
+                        String canonicalUser = UserStore.canonical(authCheckUser);
+                        currentUser = isSentFolder ? canonicalUser + "_sent" : canonicalUser;
+                        
                         pendingUser = null;
                         emails = MailStorageEngine.listMails(currentUser);
                         deletedIndices.clear();
                         out.println("+OK Logged in successfully");
                     } else {
-                        LoginThrottle.recordFailedAttempt(authCheckUser);
+                        LoginThrottle.recordFailedAttempt(clientIp);
                         out.println("-ERR Invalid username or password");
                     }
                 } 

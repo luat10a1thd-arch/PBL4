@@ -44,7 +44,8 @@ public class AdminHandler implements HttpHandler {
             return;
         }
 
-        if (!"admin@pbl4.com".equalsIgnoreCase(currentUser)) {
+        User u = UserStore.getUser(currentUser);
+        if (u == null || !"ADMIN".equalsIgnoreCase(u.getRole())) {
             sendResponse(exchange, 403, "{\"success\": false, \"message\": \"Từ chối truy cập! Quyền Admin bắt buộc.\"}");
             return;
         }
@@ -97,6 +98,7 @@ public class AdminHandler implements HttpHandler {
         for (int i = 0; i < users.size(); i++) {
             User u = users.get(i);
             jsonBuilder.append("{\"username\":\"").append(escapeJson(u.getUsername()))
+                       .append("\",\"role\":\"").append(escapeJson(u.getRole() == null ? "USER" : u.getRole()))
                        .append("\",\"status\":\"").append(escapeJson(u.getStatus() == null ? "ACTIVE" : u.getStatus())).append("\"}");
             if (i < users.size() - 1) {
                 jsonBuilder.append(",");

@@ -1,9 +1,7 @@
 package com.pbl4.mailserver.core;
 
 import java.text.SimpleDateFormat;
-import java.util.Date;
-import java.util.List;
-import java.util.Locale;
+import java.util.*;
 
 public class MailService {
 
@@ -27,53 +25,93 @@ public class MailService {
         }
 
         String safeSubject = subject.replace('\r', ' ').replace('\n', ' ').trim();
-        String[] recipients = recipientsRaw.trim().split("[\\s,;]+");
-        String dateStr = new SimpleDateFormat("EEE, dd MMM yyyy HH:mm:ss Z", Locale.ENGLISH).format(new Date());
-
-        int successCount = 0;
+        String[] recipientsArr = recipientsRaw.trim().split("[\\s,;]+");
+        
+        Set<String> validRecipients = new LinkedHashSet<>();
         int failCount = 0;
 
-        for (String to : recipients) {
+        for (String to : recipientsArr) {
             to = to.trim();
             if (to.isEmpty()) continue;
 
             String canonicalTo = UserStore.canonical(to);
-            if (canonicalTo == null || !UserStore.exists(canonicalTo)) {
+            if (canonicalTo != null && UserStore.exists(canonicalTo)) {
+                validRecipients.add(canonicalTo);
+            } else {
                 failCount++;
-                continue;
             }
+        }
 
-            String canonicalSender = UserStore.canonical(sender);
-            if (canonicalSender == null) {
-                canonicalSender = sender.toLowerCase(Locale.ROOT);
-            }
+        if (validRecipients.isEmpty()) {
+            return new DeliveryResult(false, 0, failCount, "Gửi thư thất bại cho toàn bộ người nhận!");
+        }
 
-            String rawEmail = "From: " + canonicalSender + "\n" +
-                             "To: " + canonicalTo + "\n" +
-                             "Subject: " + safeSubject + "\n" +
-                             "Date: " + dateStr + "\n\n" +
-                             body;
+        String canonicalSender = UserStore.canonical(sender);
+        if (canonicalSender == null) {
+            canonicalSender = sender.toLowerCase(Locale.ROOT);
+        }
 
+        String dateStr = new SimpleDateFormat("EEE, dd MMM yyyy HH:mm:ss Z", Locale.ENGLISH).format(new Date());
+        String fullToHeader = String.join(", ", validRecipients);
+
+        String rawEmail = "From: " + canonicalSender + "\n" +
+                         "To: " + fullToHeader + "\n" +
+                         "Subject: " + safeSubject + "\n" +
+                         "Date: " + dateStr + "\n\n" +
+                         body;
+
+        int successCount = 0;
+        for (String canonicalTo : validRecipients) {
             boolean savedRecipient = MailStorageEngine.saveEmail(canonicalTo, rawEmail);
-
             if (savedRecipient) {
                 successCount++;
-                boolean savedSent = MailStorageEngine.saveEmail(canonicalSender + "_sent", rawEmail);
-                if (!savedSent) {
-                    System.err.println("[MAIL SERVICE] Không thể lưu bản sao _sent cho người gửi: " + canonicalSender);
-                }
             } else {
                 failCount++;
             }
         }
 
         if (successCount > 0) {
+            boolean savedSent = MailStorageEngine.saveEmail(canonicalSender + "_sent", rawEmail);
+            if (!savedSent) {
+                System.err.println("[MAIL SERVICE] Không thể lưu bản sao _sent cho người gửi: " + canonicalSender);
+            }
+
             String msg = "Đã gửi thư thành công tới " + successCount + " người nhận!";
             if (failCount > 0) msg += " (" + failCount + " người nhận thất bại)";
             return new DeliveryResult(true, successCount, failCount, msg);
         } else {
             return new DeliveryResult(false, 0, failCount, "Gửi thư thất bại cho toàn bộ người nhận!");
         }
+    }
+
+    public static DeliveryResult deliverRaw(String sender, Set<String> recipients, String rawMessage) {
+        if (sender == null || recipients == null || recipients.isEmpty() || rawMessage == null) {
+            return new DeliveryResult(false, 0, 0, "Thiếu thông tin gửi thư thô!");
+        }
+
+        String extractedSubject = "No Subject";
+        String[] lines = rawMessage.split("\n");
+        StringBuilder bodyBuilder = new StringBuilder();
+        boolean inHeaders = true;
+
+        for (String line : lines) {
+            if (inHeaders) {
+                if (line.trim().isEmpty()) {
+                    inHeaders = false;
+                    continue;
+                }
+                if (line.toLowerCase().startsWith("subject:")) {
+                    extractedSubject = line.substring(8).trim();
+                }
+            } else {
+                bodyBuilder.append(line).append("\n");
+            }
+        }
+
+        String body = bodyBuilder.length() > 0 ? bodyBuilder.toString() : rawMessage;
+        String recipientsRaw = String.join(",", recipients);
+
+        return deliver(sender, recipientsRaw, extractedSubject, body);
     }
 
     public static List<String> listInbox(String username) {

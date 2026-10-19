@@ -1,5 +1,7 @@
 let selectedFiles = [];
 let activeMailbox = 'inbox';
+let currentSelectedMail = null;
+let confirmCallback = null;
 
 document.addEventListener('DOMContentLoaded', () => {
     const currentUser = localStorage.getItem('currentUser');
@@ -42,6 +44,19 @@ function showToast(message, type = 'success') {
         toast.classList.remove('show');
         setTimeout(() => toast.remove(), 300);
     }, 3000);
+}
+
+function showConfirmModal(onConfirm) {
+    confirmCallback = onConfirm;
+    document.getElementById('confirm-modal').classList.remove('hidden');
+}
+
+function closeConfirmModal(result) {
+    document.getElementById('confirm-modal').classList.add('hidden');
+    if (result && typeof confirmCallback === 'function') {
+        confirmCallback();
+    }
+    confirmCallback = null;
 }
 
 function openComposeModal() {
@@ -214,6 +229,7 @@ async function loadInbox(event) {
 
     activeMailbox = 'inbox';
     updateActiveNav('nav-inbox', 'Hộp thư đến');
+    resetEmailDetail();
 
     const token = localStorage.getItem('authToken');
 
@@ -242,6 +258,7 @@ async function loadSentMail(event) {
 
     activeMailbox = 'sent';
     updateActiveNav('nav-sent', 'Thư đã gửi');
+    resetEmailDetail();
 
     const token = localStorage.getItem('authToken');
 
@@ -284,25 +301,90 @@ function renderEmailList(mails) {
         const item = document.createElement('div');
 
         item.className = 'email-item';
+        item.style.position = 'relative';
         item.onclick = () => selectEmail(mail, item);
 
         item.innerHTML = `
-            <div class="email-sender">${escapeHtml(mail.sender)}</div>
-            <div class="email-subject">${escapeHtml(mail.subject)}</div>
-            <div class="email-date">${escapeHtml(formatMailDate(mail.timestamp))}</div>
+            <div style="padding-right: 30px;">
+                <div class="email-sender">${escapeHtml(activeMailbox === 'sent' ? mail.recipient : mail.sender)}</div>
+                <div class="email-subject">${escapeHtml(mail.subject)}</div>
+                <div class="email-date">${escapeHtml(formatMailDate(mail.timestamp))}</div>
+            </div>
+            <button onclick="handleDeleteMail('${escapeHtml(mail.id)}', event)" title="Xóa thư"
+                    style="position: absolute; right: 12px; top: 12px; background: none; border: none; color: #ef4444; cursor: pointer; padding: 4px; font-size: 14px;">
+                <i class="fa-solid fa-trash"></i>
+            </button>
         `;
 
         emailListDiv.appendChild(item);
     });
 }
 
-function selectEmail(mail, element) {
+function handleDeleteMail(mailId, event) {
+    if (event) event.stopPropagation();
+
+    showConfirmModal(async () => {
+        const token = localStorage.getItem('authToken');
+
+        try {
+            const response = await fetch('/api/mails/delete', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                    'Authorization': 'Bearer ' + token
+                },
+                body: `id=${encodeURIComponent(mailId)}&folder=${encodeURIComponent(activeMailbox)}`
+            });
+
+            const data = await response.json();
+
+            if (data.success) {
+                showToast('Đã xóa thư thành công!', 'success');
+                refreshMails();
+            } else {
+                showToast(data.message || 'Xóa thư thất bại!', 'error');
+            }
+        } catch (err) {
+            showToast('Lỗi kết nối khi xóa thư!', 'error');
+        }
+    });
+}
+
+function resetEmailDetail() {
+    currentSelectedMail = null;
+    document.getElementById('no-email-selected').classList.remove('hidden');
+    document.getElementById('email-detail').classList.add('hidden');
+}
+
+async function selectEmail(mail, element) {
     document.querySelectorAll('.email-item').forEach(item => {
         item.classList.remove('active');
     });
 
     element.classList.add('active');
+    currentSelectedMail = mail;
 
+    const token = localStorage.getItem('authToken');
+    try {
+        const response = await fetch(`/api/mails/detail?id=${encodeURIComponent(mail.id)}&folder=${encodeURIComponent(activeMailbox)}`, {
+            method: 'GET',
+            headers: {
+                'Authorization': 'Bearer ' + token
+            }
+        });
+
+        if (response.ok) {
+            const detailMail = await response.json();
+            renderEmailDetail(detailMail);
+        } else {
+            renderEmailDetail(mail);
+        }
+    } catch (err) {
+        renderEmailDetail(mail);
+    }
+}
+
+function renderEmailDetail(mail) {
     document.getElementById('no-email-selected').classList.add('hidden');
     document.getElementById('email-detail').classList.remove('hidden');
 
@@ -314,7 +396,7 @@ function selectEmail(mail, element) {
         formatMailDate(mail.timestamp);
 
     const detailBodyElem = document.getElementById('detail-body');
-    detailBodyElem.innerHTML = ''; // Clear cũ
+    detailBodyElem.innerHTML = '';
 
     let bodyText = mail.body || '';
 
@@ -322,13 +404,11 @@ function selectEmail(mail, element) {
         const parts = bodyText.split('[ATTACHMENT:');
         const textContent = parts[0];
 
-        // Khung chứa nội dung văn bản (An toàn XSS)
         const textDiv = document.createElement('div');
         textDiv.style.whiteSpace = 'pre-wrap';
         textDiv.textContent = textContent;
         detailBodyElem.appendChild(textDiv);
 
-        // Khung danh sách đính kèm
         const attachSection = document.createElement('div');
         attachSection.style.cssText = 'margin-top: 25px; border-top: 1px dashed #cbd5e1; padding-top: 15px;';
         
@@ -340,7 +420,6 @@ function selectEmail(mail, element) {
         const attachContainer = document.createElement('div');
         attachContainer.style.marginTop = '8px';
 
-        // Regex kiểm tra định dạng Data URL chuẩn mã hóa Base64
         const DATA_URL_REGEX = /^data:[a-z0-9.+-]+\/[a-z0-9.+-]+;base64,[A-Za-z0-9+/=]+$/i;
 
         for (let i = 1; i < parts.length; i++) {
@@ -363,7 +442,6 @@ function selectEmail(mail, element) {
             nameDiv.appendChild(nameSpan);
             attachBox.appendChild(nameDiv);
 
-            // XỬ LÝ FIX XSS MỤC 2: Kiểm tra chuẩn Data URL & tạo thẻ qua DOM gán thuộc tính
             if (DATA_URL_REGEX.test(base64Data)) {
                 const downloadLink = document.createElement('a');
                 downloadLink.href = base64Data;

@@ -1,6 +1,5 @@
 package com.pbl4.mailserver.core;
 
-import java.util.Locale;
 import java.util.concurrent.ConcurrentHashMap;
 
 public class LoginThrottle {
@@ -20,17 +19,18 @@ public class LoginThrottle {
 
     private static final ConcurrentHashMap<String, AttemptInfo> attempts = new ConcurrentHashMap<>();
 
-    public static boolean isThrottled(String username) {
-        if (username == null || username.trim().isEmpty()) return false;
-        String key = username.trim().toLowerCase(Locale.ROOT);
+    public static boolean isThrottled(String clientIp) {
+        if (clientIp == null || clientIp.trim().isEmpty()) return false;
+        String key = clientIp.trim();
         AttemptInfo info = attempts.get(key);
         if (info == null) return false;
 
-        if (info.lockUntil > System.currentTimeMillis()) {
+        long now = System.currentTimeMillis();
+        if (info.lockUntil > now) {
             return true;
         }
 
-        if (info.lockUntil > 0 && info.lockUntil <= System.currentTimeMillis()) {
+        if (info.lockUntil > 0 && info.lockUntil <= now) {
             attempts.remove(key);
             return false;
         }
@@ -38,9 +38,9 @@ public class LoginThrottle {
         return false;
     }
 
-    public static void recordFailedAttempt(String username) {
-        if (username == null || username.trim().isEmpty()) return;
-        String key = username.trim().toLowerCase(Locale.ROOT);
+    public static void recordFailedAttempt(String clientIp) {
+        if (clientIp == null || clientIp.trim().isEmpty()) return;
+        String key = clientIp.trim();
         long now = System.currentTimeMillis();
 
         attempts.compute(key, (k, info) -> {
@@ -53,8 +53,8 @@ public class LoginThrottle {
         });
     }
 
-    public static void resetAttempts(String username) {
-        if (username == null) return;
-        attempts.remove(username.trim().toLowerCase(Locale.ROOT));
+    public static void resetAttempts(String clientIp) {
+        if (clientIp == null) return;
+        attempts.remove(clientIp.trim());
     }
 }

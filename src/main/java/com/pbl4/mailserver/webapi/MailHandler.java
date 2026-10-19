@@ -1,6 +1,7 @@
 package com.pbl4.mailserver.webapi;
 
 import com.pbl4.mailserver.core.MailService;
+import com.pbl4.mailserver.core.MailStorageEngine;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 
@@ -9,6 +10,7 @@ import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.Collections;
 import java.util.List;
 
 public class MailHandler implements HttpHandler {
@@ -16,7 +18,7 @@ public class MailHandler implements HttpHandler {
     @Override
     public void handle(HttpExchange exchange) throws IOException {
         exchange.getResponseHeaders().add("Access-Control-Allow-Origin", "*");
-        exchange.getResponseHeaders().add("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+        exchange.getResponseHeaders().add("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
         exchange.getResponseHeaders().add("Access-Control-Allow-Headers", "Content-Type, Authorization");
 
         if ("OPTIONS".equalsIgnoreCase(exchange.getRequestMethod())) {
@@ -35,13 +37,18 @@ public class MailHandler implements HttpHandler {
         }
 
         String path = exchange.getRequestURI().getPath();
+        String method = exchange.getRequestMethod();
 
-        if ("POST".equalsIgnoreCase(exchange.getRequestMethod()) && path.endsWith("/send")) {
+        if ("POST".equalsIgnoreCase(method) && path.endsWith("/send")) {
             handleSendMail(exchange, authedUser);
-        } else if ("GET".equalsIgnoreCase(exchange.getRequestMethod()) && path.endsWith("/inbox")) {
+        } else if ("GET".equalsIgnoreCase(method) && path.endsWith("/inbox")) {
             handleGetInbox(exchange, authedUser);
-        } else if ("GET".equalsIgnoreCase(exchange.getRequestMethod()) && path.endsWith("/sent")) {
+        } else if ("GET".equalsIgnoreCase(method) && path.endsWith("/sent")) {
             handleGetSent(exchange, authedUser);
+        } else if ("GET".equalsIgnoreCase(method) && path.endsWith("/detail")) {
+            handleGetMailDetail(exchange, authedUser);
+        } else if (("POST".equalsIgnoreCase(method) || "DELETE".equalsIgnoreCase(method)) && path.endsWith("/delete")) {
+            handleDeleteMail(exchange, authedUser);
         } else {
             sendResponse(exchange, 404, "{\"success\": false, \"message\": \"Endpoint không tồn tại!\"}");
         }
@@ -63,31 +70,71 @@ public class MailHandler implements HttpHandler {
     }
 
     private void handleGetInbox(HttpExchange exchange, String username) throws IOException {
-        List<String> rawMails = MailService.listInbox(username);
-
-        if (rawMails == null) {
-            sendResponse(exchange, 200, "[]");
-            return;
-        }
-        sendResponse(exchange, 200, convertMailsToJson(rawMails));
+        List<MailStorageEngine.StoredMail> mails = MailStorageEngine.listMails(username);
+        sendResponse(exchange, 200, convertMailsToJson(mails));
     }
 
     private void handleGetSent(HttpExchange exchange, String username) throws IOException {
-        List<String> rawMails = MailService.listSent(username);
-
-        if (rawMails == null) {
-            sendResponse(exchange, 200, "[]");
-            return;
-        }
-        sendResponse(exchange, 200, convertMailsToJson(rawMails));
+        List<MailStorageEngine.StoredMail> mails = MailStorageEngine.listMails(username + "_sent");
+        sendResponse(exchange, 200, convertMailsToJson(mails));
     }
 
-    private String convertMailsToJson(List<String> rawMails) {
-        StringBuilder sb = new StringBuilder("[");
-        for (int i = 0; i < rawMails.size(); i++) {
-            String mail = rawMails.get(i);
-            String[] lines = mail.split("\n");
+    private void handleGetMailDetail(HttpExchange exchange, String username) throws IOException {
+        String query = exchange.getRequestURI().getQuery();
+        String fileId = null;
+        String folder = "inbox";
 
+        if (query != null) {
+            for (String param : query.split("&")) {
+                String[] pair = param.split("=");
+                if (pair.length > 1) {
+                    if ("id".equalsIgnoreCase(pair[0])) fileId = java.net.URLDecoder.decode(pair[1], StandardCharsets.UTF_8);
+                    if ("folder".equalsIgnoreCase(pair[0])) folder = java.net.URLDecoder.decode(pair[1], StandardCharsets.UTF_8);
+                }
+            }
+        }
+
+        if (fileId == null) {
+            sendResponse(exchange, 400, "{\"success\": false, \"message\": \"Thiếu ID thư!\"}");
+            return;
+        }
+
+        String targetUser = "sent".equalsIgnoreCase(folder) ? username + "_sent" : username;
+        MailStorageEngine.StoredMail mail = MailStorageEngine.getSingleMail(targetUser, fileId);
+
+        if (mail == null || mail.content == null) {
+            sendResponse(exchange, 404, "{\"success\": false, \"message\": \"Không tìm thấy thư!\"}");
+            return;
+        }
+
+        sendResponse(exchange, 200, convertSingleMailToJson(mail));
+    }
+
+    private void handleDeleteMail(HttpExchange exchange, String username) throws IOException {
+        String body = readBody(exchange);
+        String fileId = getParamValue(body, "id");
+        String folder = getParamValue(body, "folder");
+
+        if (fileId == null || fileId.trim().isEmpty()) {
+            sendResponse(exchange, 400, "{\"success\": false, \"message\": \"Thiếu ID thư cần xóa!\"}");
+            return;
+        }
+
+        String targetUser = ("sent".equalsIgnoreCase(folder)) ? username + "_sent" : username;
+        MailStorageEngine.deleteMailsByIds(targetUser, Collections.singletonList(fileId));
+
+        sendResponse(exchange, 200, "{\"success\": true, \"message\": \"Đã xóa thư thành công!\"}");
+    }
+
+    private String convertMailsToJson(List<MailStorageEngine.StoredMail> mails) {
+        if (mails == null || mails.isEmpty()) return "[]";
+
+        StringBuilder sb = new StringBuilder("[");
+        for (int i = 0; i < mails.size(); i++) {
+            MailStorageEngine.StoredMail storedMail = mails.get(i);
+            if (storedMail.content == null) continue;
+
+            String[] lines = storedMail.content.split("\n");
             String from = "", to = "", subject = "", date = "";
             StringBuilder bodyBuilder = new StringBuilder();
             boolean isBody = false;
@@ -112,31 +159,55 @@ public class MailHandler implements HttpHandler {
                 bodyBuilder.setLength(bodyBuilder.length() - 1);
             }
 
-            String sanitizedBody = sanitizeHtml(bodyBuilder.toString());
-
             sb.append("{")
+              .append("\"id\":\"").append(escapeJson(storedMail.id)).append("\",")
               .append("\"sender\":\"").append(escapeJson(from)).append("\",")
               .append("\"recipient\":\"").append(escapeJson(to)).append("\",")
               .append("\"subject\":\"").append(escapeJson(subject)).append("\",")
               .append("\"timestamp\":\"").append(escapeJson(date)).append("\",")
-              .append("\"body\":\"").append(escapeJson(sanitizedBody)).append("\"")
+              .append("\"body\":\"").append(escapeJson(bodyBuilder.toString())).append("\"")
               .append("}");
 
-            if (i < rawMails.size() - 1) sb.append(",");
+            if (i < mails.size() - 1) sb.append(",");
         }
         sb.append("]");
         return sb.toString();
     }
 
-    private String sanitizeHtml(String html) {
-        if (html == null) return "";
-        return html.replaceAll("(?i)<script.*?>.*?</script>", "")
-                   .replaceAll("(?i)<iframe.*?>.*?</iframe>", "")
-                   .replaceAll("(?i)<object.*?>.*?</object>", "")
-                   .replaceAll("(?i)<embed.*?>.*?</embed>", "")
-                   .replaceAll("(?i)on\\w+\\s*=\\s*\"[^\"]*\"", "")
-                   .replaceAll("(?i)on\\w+\\s*=\\s*'[^']*'", "")
-                   .replaceAll("(?i)javascript:", "");
+    private String convertSingleMailToJson(MailStorageEngine.StoredMail storedMail) {
+        String[] lines = storedMail.content.split("\n");
+        String from = "", to = "", subject = "", date = "";
+        StringBuilder bodyBuilder = new StringBuilder();
+        boolean isBody = false;
+
+        for (String line : lines) {
+            if (isBody) {
+                bodyBuilder.append(line).append('\n');
+            } else if (line.isEmpty()) {
+                isBody = true;
+            } else if (from.isEmpty() && line.startsWith("From: ")) {
+                from = line.substring(6).trim();
+            } else if (to.isEmpty() && line.startsWith("To: ")) {
+                to = line.substring(4).trim();
+            } else if (subject.isEmpty() && line.startsWith("Subject: ")) {
+                subject = line.substring(9).trim();
+            } else if (date.isEmpty() && line.startsWith("Date: ")) {
+                date = line.substring(6).trim();
+            }
+        }
+
+        if (bodyBuilder.length() > 0 && bodyBuilder.charAt(bodyBuilder.length() - 1) == '\n') {
+            bodyBuilder.setLength(bodyBuilder.length() - 1);
+        }
+
+        return "{"
+          + "\"id\":\"" + escapeJson(storedMail.id) + "\","
+          + "\"sender\":\"" + escapeJson(from) + "\","
+          + "\"recipient\":\"" + escapeJson(to) + "\","
+          + "\"subject\":\"" + escapeJson(subject) + "\","
+          + "\"timestamp\":\"" + escapeJson(date) + "\","
+          + "\"body\":\"" + escapeJson(bodyBuilder.toString()) + "\""
+          + "}";
     }
 
     private String escapeJson(String input) {

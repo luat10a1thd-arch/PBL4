@@ -7,8 +7,6 @@ import java.io.IOException;
 
 public class CorsFilter extends Filter {
 
-    // FIX VẤN ĐỀ 12 BÁO CÁO: Đọc origin cho phép từ biến môi trường PBL4_ALLOWED_ORIGIN.
-    // Nếu chưa cấu hình (môi trường Dev/Demo local), mặc định fallback về "http://localhost:8080" hoặc "*"
     private static final String ALLOWED_ORIGIN = System.getenv().getOrDefault("PBL4_ALLOWED_ORIGIN", "http://localhost:8080");
 
     @Override
@@ -18,7 +16,6 @@ public class CorsFilter extends Filter {
         exchange.getResponseHeaders().set("Access-Control-Allow-Headers", "Content-Type, Authorization");
         exchange.getResponseHeaders().set("Access-Control-Allow-Credentials", "true");
 
-        // Xử lý Preflight Request (OPTIONS)
         if ("OPTIONS".equalsIgnoreCase(exchange.getRequestMethod())) {
             exchange.sendResponseHeaders(204, -1);
             return;

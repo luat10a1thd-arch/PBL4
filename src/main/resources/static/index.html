@@ -4,11 +4,9 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>DUT Mail - Đăng nhập</title>
-    <!-- FontAwesome Icon CDN -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <link rel="stylesheet" href="css/style.css">
     <style>
-        /* CSS cho Toast Notification ở trang Auth */
         #toast-container {
             position: fixed;
             top: 20px;
@@ -71,7 +69,6 @@
             </button>
         </div>
 
-        <!-- Form Đăng Nhập -->
         <form id="login-form" class="auth-form" onsubmit="handleLogin(event)">
             <div class="input-group">
                 <label for="login-username">Tên đăng nhập (Email)</label>
@@ -92,7 +89,6 @@
             </button>
         </form>
 
-        <!-- Form Đăng Ký -->
         <form id="register-form" class="auth-form hidden" onsubmit="handleRegister(event)">
             <div class="input-group">
                 <label for="reg-username">Tên đăng nhập mới</label>
@@ -123,7 +119,6 @@
         <div id="auth-message" class="alert-message hidden"></div>
     </div>
 
-    <!-- KHUNG CHỨA TOAST THÔNG BÁO -->
     <div id="toast-container"></div>
 
     <script src="js/auth.js"></script>

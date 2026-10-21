@@ -7,7 +7,6 @@ import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 
-/** SMTP client dùng nội bộ để chuyển thư qua SMTP server của ứng dụng. */
 public class SMTPClient {
     private static final String SMTP_HOST = "127.0.0.1";
     private static final int SMTP_PORT = 2525;
@@ -44,7 +43,6 @@ public class SMTPClient {
             out.println("Subject: " + cleanHeader(subject));
             out.println("Date: " + java.time.ZonedDateTime.now());
             out.println();
-            // SMTP yêu cầu escape dòng chỉ có dấu chấm để không kết thúc DATA sớm.
             for (String line : body.replace("\r\n", "\n").replace('\r', '\n').split("\n", -1)) {
                 out.println(line.startsWith(".") ? "." + line : line);
             }

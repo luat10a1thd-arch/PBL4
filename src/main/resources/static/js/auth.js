@@ -1,8 +1,3 @@
-// ==========================================
-// THƯ VIỆN TIỆN ÍCH (UTILITIES)
-// ==========================================
-
-// Hàm hiển thị Toast Notification chuyên nghiệp
 function showToast(message, type = 'success') {
     const container = document.getElementById('toast-container');
     if (!container) return;
@@ -27,13 +22,11 @@ function showToast(message, type = 'success') {
     }, 3000);
 }
 
-// Anti-XSS HTML Escape
 function escapeHtml(text) {
     if (!text) return '';
     return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-// Chuyển đổi giữa Form Đăng nhập và Form Đăng ký
 function switchTab(tab) {
     const loginForm = document.getElementById('login-form');
     const registerForm = document.getElementById('register-form');
@@ -55,9 +48,7 @@ function switchTab(tab) {
     }
 }
 
-// ==========================================
-// XỬ LÝ ĐĂNG NHẬP (LOGIN)
-// ==========================================
+
 async function handleLogin(event) {
     event.preventDefault();
     const usernameInput = document.getElementById('login-username');
@@ -68,7 +59,6 @@ async function handleLogin(event) {
     const username = usernameInput.value.trim();
     const password = passwordInput.value;
 
-    // 1. Kiểm tra định dạng tài khoản phải có đuôi @pbl4.com
     if (!username.toLowerCase().endsWith('@pbl4.com')) {
         showToast('Tài khoản phải có định dạng @pbl4.com!', 'error');
         return;
@@ -83,14 +73,12 @@ async function handleLogin(event) {
 
         const data = await response.json();
         if (data.success) {
-            // Lưu thông tin người dùng và Session Token vào LocalStorage
             localStorage.setItem('currentUser', data.username);
             localStorage.setItem('authToken', data.token);
             localStorage.setItem('userRole', data.role || 'USER');
 
             showToast('Đăng nhập thành công!', 'success');
 
-            // Chuyển hướng giao diện tùy thuộc vào Role (ADMIN / USER)
             setTimeout(() => {
                 if (data.role === 'ADMIN') {
                     window.location.href = '/admin.html';
@@ -108,9 +96,6 @@ async function handleLogin(event) {
     }
 }
 
-// ==========================================
-// XỬ LÝ ĐĂNG KÝ (REGISTER)
-// ==========================================
 async function handleRegister(event) {
     event.preventDefault();
     const usernameInput = document.getElementById('reg-username');
@@ -123,25 +108,21 @@ async function handleRegister(event) {
     const password = passwordInput.value;
     const confirm = confirmInput.value;
 
-    // 1. Kiểm tra đuôi email phải là @pbl4.com
     if (!username.toLowerCase().endsWith('@pbl4.com')) {
         showToast('Tên đăng nhập phải có đuôi @pbl4.com!', 'error');
         return;
     }
 
-    // 2. Chặn đăng ký tài khoản admin@pbl4.com hoặc tài khoản bắt đầu bằng admin
     if (username.toLowerCase().startsWith('admin')) {
         showToast('Không được phép đăng ký tài khoản Admin!', 'error');
         return;
     }
 
-    // 3. Kiểm tra độ dài mật khẩu (>= 8 và <= 32)
     if (password.length < 8 || password.length > 32) {
         showToast('Mật khẩu phải từ 8 đến 32 ký tự!', 'error');
         return;
     }
 
-    // 4. Kiểm tra mật khẩu phải có cả chữ cái, chữ số và ký tự đặc biệt
     const hasLetter = /[a-zA-Z]/.test(password);
     const hasDigit = /[0-9]/.test(password);
     const hasSpecial = /[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?]/.test(password);
@@ -151,7 +132,7 @@ async function handleRegister(event) {
         return;
     }
 
-    // 5. Kiểm tra xác nhận mật khẩu
+
     if (password !== confirm) {
         showToast('Mật khẩu xác nhận không khớp!', 'error');
         return;

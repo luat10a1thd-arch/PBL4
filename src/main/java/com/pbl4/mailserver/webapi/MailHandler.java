@@ -261,7 +261,11 @@ public class MailHandler implements HttpHandler {
         for (String pair : body.split("&")) {
             int separator = pair.indexOf('=');
             if (separator > 0 && pair.substring(0, separator).equalsIgnoreCase(paramName)) {
-                return java.net.URLDecoder.decode(pair.substring(separator + 1), StandardCharsets.UTF_8);
+                String val = pair.substring(separator + 1);
+                if ("body".equalsIgnoreCase(paramName)) {
+                    val = val.replace("+", "%2B");
+                }
+                return java.net.URLDecoder.decode(val, StandardCharsets.UTF_8);
             }
         }
         return null;

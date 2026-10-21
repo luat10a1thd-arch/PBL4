@@ -450,6 +450,49 @@ async function selectEmail(mail, element) {
     }
 }
 
+function downloadAttachment(fileName, rawBase64) {
+    try {
+        if (!rawBase64) {
+            showToast('Nội dung file đính kèm rỗng!', 'error');
+            return;
+        }
+
+        let cleanBase64 = rawBase64.trim();
+        let mimeType = 'application/octet-stream';
+
+        if (cleanBase64.includes(';base64,')) {
+            const parts = cleanBase64.split(';base64,');
+            mimeType = parts[0].replace(/^data:/, '');
+            cleanBase64 = parts[1] || '';
+        } else if (cleanBase64.startsWith('data:')) {
+            cleanBase64 = cleanBase64.replace(/^data:[^;]+;base64,/, '');
+        }
+
+        cleanBase64 = cleanBase64.replace(/ /g, '+');
+        cleanBase64 = cleanBase64.replace(/[^A-Za-z0-9+/=]/g, '');
+
+        const byteCharacters = atob(cleanBase64);
+        const byteNumbers = new Array(byteCharacters.length);
+        for (let i = 0; i < byteCharacters.length; i++) {
+            byteNumbers[i] = byteCharacters.charCodeAt(i);
+        }
+        const byteArray = new Uint8Array(byteNumbers);
+        const blob = new Blob([byteArray], { type: mimeType });
+
+        const blobUrl = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = blobUrl;
+        link.download = fileName;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
+    } catch (e) {
+        console.error('Lỗi giải mã attachment:', e);
+        showToast('Lỗi giải mã file đính kèm!', 'error');
+    }
+}
+
 function renderEmailDetail(mail) {
     document.getElementById('no-email-selected').classList.add('hidden');
     document.getElementById('email-detail').classList.remove('hidden');
@@ -507,16 +550,12 @@ function renderEmailDetail(mail) {
             attachBox.appendChild(nameDiv);
 
             if (base64Data.length > 0) {
-                if (!base64Data.startsWith('data:')) {
-                    base64Data = 'data:application/octet-stream;base64,' + base64Data;
-                }
-                const downloadLink = document.createElement('a');
-                downloadLink.href = base64Data;
-                downloadLink.download = fileName;
-                downloadLink.className = 'btn btn-outline';
-                downloadLink.style.cssText = 'font-size: 11px; padding: 3px 8px; text-decoration: none; color: #2563eb; display: inline-flex; align-items: center; gap: 4px;';
-                downloadLink.innerHTML = '<i class="fa-solid fa-download"></i> Tải về';
-                attachBox.appendChild(downloadLink);
+                const downloadBtn = document.createElement('button');
+                downloadBtn.className = 'btn btn-outline';
+                downloadBtn.style.cssText = 'font-size: 11px; padding: 3px 8px; color: #2563eb; cursor: pointer; display: inline-flex; align-items: center; gap: 4px; border-radius: 4px;';
+                downloadBtn.innerHTML = '<i class="fa-solid fa-download"></i> Tải về';
+                downloadBtn.onclick = () => downloadAttachment(fileName, base64Data);
+                attachBox.appendChild(downloadBtn);
             } else {
                 const errorSpan = document.createElement('span');
                 errorSpan.style.cssText = 'font-size: 11px; color: #ef4444;';

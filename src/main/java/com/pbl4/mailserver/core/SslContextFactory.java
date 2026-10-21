@@ -4,7 +4,6 @@ import com.pbl4.mailserver.config.ServerConfig;
 
 import javax.net.ssl.KeyManagerFactory;
 import javax.net.ssl.SSLContext;
-import javax.net.ssl.SSLServerSocketFactory;
 import java.io.File;
 import java.io.FileInputStream;
 import java.nio.charset.StandardCharsets;
@@ -14,7 +13,7 @@ import java.security.KeyStore;
 
 public class SslContextFactory {
 
-    public static SSLServerSocketFactory createSSLServerSocketFactory() {
+    public static SSLContext createSSLContext() {
         try {
             File file = new File(ServerConfig.KEYSTORE_PATH);
             if (!file.exists()) {
@@ -32,9 +31,9 @@ public class SslContextFactory {
             SSLContext sslContext = SSLContext.getInstance("TLS");
             sslContext.init(kmf.getKeyManagers(), null, null);
 
-            return sslContext.getServerSocketFactory();
+            return sslContext;
         } catch (Exception e) {
-            System.err.println("[SSL FACTORY] CẢNH BÁO: Lỗi khởi tạo SSLContext (Server sẽ chạy Plaintext): " + e.getMessage());
+            System.err.println("[SSL FACTORY] Error creating SSLContext: " + e.getMessage());
             return null;
         }
     }
@@ -71,13 +70,11 @@ public class SslContextFactory {
             String output = new String(p.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
             int exitCode = p.waitFor();
 
-            if (exitCode == 0 && Files.exists(Paths.get(ServerConfig.KEYSTORE_PATH))) {
-                System.out.println("[SSL FACTORY] Đã tự động sinh file keystore.jks thành công!");
-            } else {
-                System.err.println("[SSL FACTORY] Lỗi keytool (Exit Code " + exitCode + "): " + output);
+            if (exitCode != 0 || !Files.exists(Paths.get(ServerConfig.KEYSTORE_PATH))) {
+                System.err.println("[SSL FACTORY] Keytool error (Exit Code " + exitCode + "): " + output);
             }
         } catch (Exception e) {
-            System.err.println("[SSL FACTORY] Không thể tự sinh keystore qua keytool: " + e.getMessage());
+            System.err.println("[SSL FACTORY] Failed to generate keystore: " + e.getMessage());
         }
     }
 }

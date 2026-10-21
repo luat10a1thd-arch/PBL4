@@ -19,9 +19,19 @@ public class LoginThrottle {
 
     private static final ConcurrentHashMap<String, AttemptInfo> attempts = new ConcurrentHashMap<>();
 
-    public static boolean isThrottled(String clientIp) {
-        if (clientIp == null || clientIp.trim().isEmpty()) return false;
-        String key = clientIp.trim();
+    private static String buildKey(String clientIp, String username) {
+        String ip = (clientIp != null) ? clientIp.trim() : "";
+        String user = (username != null) ? username.trim().toLowerCase() : "";
+        if (!ip.isEmpty() && !user.isEmpty()) {
+            return ip + "|" + user;
+        }
+        return !ip.isEmpty() ? ip : user;
+    }
+
+    public static boolean isThrottled(String clientIp, String username) {
+        String key = buildKey(clientIp, username);
+        if (key.isEmpty()) return false;
+
         AttemptInfo info = attempts.get(key);
         if (info == null) return false;
 
@@ -38,11 +48,15 @@ public class LoginThrottle {
         return false;
     }
 
-    public static void recordFailedAttempt(String clientIp) {
-        if (clientIp == null || clientIp.trim().isEmpty()) return;
-        String key = clientIp.trim();
-        long now = System.currentTimeMillis();
+    public static boolean isThrottled(String identity) {
+        return isThrottled(identity, null);
+    }
 
+    public static void recordFailedAttempt(String clientIp, String username) {
+        String key = buildKey(clientIp, username);
+        if (key.isEmpty()) return;
+
+        long now = System.currentTimeMillis();
         attempts.compute(key, (k, info) -> {
             if (info == null || (info.lockUntil > 0 && info.lockUntil <= now)) {
                 return new AttemptInfo(1, 0);
@@ -53,8 +67,18 @@ public class LoginThrottle {
         });
     }
 
-    public static void resetAttempts(String clientIp) {
-        if (clientIp == null) return;
-        attempts.remove(clientIp.trim());
+    public static void recordFailedAttempt(String identity) {
+        recordFailedAttempt(identity, null);
+    }
+
+    public static void resetAttempts(String clientIp, String username) {
+        String key = buildKey(clientIp, username);
+        if (!key.isEmpty()) {
+            attempts.remove(key);
+        }
+    }
+
+    public static void resetAttempts(String identity) {
+        resetAttempts(identity, null);
     }
 }

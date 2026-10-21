@@ -1,5 +1,6 @@
 package com.pbl4.mailserver.webapi;
 
+import com.pbl4.mailserver.config.ServerConfig;
 import com.pbl4.mailserver.core.MailService;
 import com.pbl4.mailserver.core.MailStorageEngine;
 import com.sun.net.httpserver.HttpExchange;
@@ -47,6 +48,8 @@ public class MailHandler implements HttpHandler {
             handleGetSent(exchange, authedUser);
         } else if ("GET".equalsIgnoreCase(method) && path.endsWith("/detail")) {
             handleGetMailDetail(exchange, authedUser);
+        } else if ("GET".equalsIgnoreCase(method) && path.endsWith("/storage-usage")) {
+            handleGetStorageUsage(exchange, authedUser);
         } else if (("POST".equalsIgnoreCase(method) || "DELETE".equalsIgnoreCase(method)) && path.endsWith("/delete")) {
             handleDeleteMail(exchange, authedUser);
         } else {
@@ -71,12 +74,12 @@ public class MailHandler implements HttpHandler {
 
     private void handleGetInbox(HttpExchange exchange, String username) throws IOException {
         List<MailStorageEngine.StoredMail> mails = MailStorageEngine.listMails(username);
-        sendResponse(exchange, 200, convertMailsToJson(mails));
+        sendResponse(exchange, 200, convertMailsToJson(mails, exchange.getRequestURI().getQuery()));
     }
 
     private void handleGetSent(HttpExchange exchange, String username) throws IOException {
         List<MailStorageEngine.StoredMail> mails = MailStorageEngine.listMails(username + "_sent");
-        sendResponse(exchange, 200, convertMailsToJson(mails));
+        sendResponse(exchange, 200, convertMailsToJson(mails, exchange.getRequestURI().getQuery()));
     }
 
     private void handleGetMailDetail(HttpExchange exchange, String username) throws IOException {
@@ -110,6 +113,22 @@ public class MailHandler implements HttpHandler {
         sendResponse(exchange, 200, convertSingleMailToJson(mail));
     }
 
+    private void handleGetStorageUsage(HttpExchange exchange, String username) throws IOException {
+        long inboxBytes = MailStorageEngine.getMailboxSizeInBytes(username);
+        long sentBytes = MailStorageEngine.getMailboxSizeInBytes(username + "_sent");
+        long totalUsedBytes = inboxBytes + sentBytes;
+
+        long quotaMb = ServerConfig.MAX_MAILBOX_QUOTA_MB;
+        long quotaBytes = quotaMb * 1024L * 1024L;
+        double usedMb = totalUsedBytes / (1024.0 * 1024.0);
+
+        String json = String.format(
+            "{\"success\": true, \"usedBytes\": %d, \"usedMb\": %.2f, \"quotaMb\": %d, \"quotaBytes\": %d}",
+            totalUsedBytes, usedMb, quotaMb, quotaBytes
+        );
+        sendResponse(exchange, 200, json);
+    }
+
     private void handleDeleteMail(HttpExchange exchange, String username) throws IOException {
         String body = readBody(exchange);
         String fileId = getParamValue(body, "id");
@@ -126,57 +145,75 @@ public class MailHandler implements HttpHandler {
         sendResponse(exchange, 200, "{\"success\": true, \"message\": \"Đã xóa thư thành công!\"}");
     }
 
-    private String convertMailsToJson(List<MailStorageEngine.StoredMail> mails) {
+    private String convertMailsToJson(List<MailStorageEngine.StoredMail> mails, String query) {
         if (mails == null || mails.isEmpty()) return "[]";
 
+        int page = 1;
+        int limit = 50;
+        if (query != null) {
+            for (String param : query.split("&")) {
+                String[] pair = param.split("=");
+                if (pair.length > 1) {
+                    try {
+                        if ("page".equalsIgnoreCase(pair[0])) page = Math.max(1, Integer.parseInt(pair[1]));
+                        if ("limit".equalsIgnoreCase(pair[0])) limit = Math.max(1, Integer.parseInt(pair[1]));
+                    } catch (NumberFormatException ignored) {}
+                }
+            }
+        }
+
+        int start = (page - 1) * limit;
+        if (start >= mails.size()) return "[]";
+        int end = Math.min(start + limit, mails.size());
+
         StringBuilder sb = new StringBuilder("[");
-        for (int i = 0; i < mails.size(); i++) {
+        for (int i = start; i < end; i++) {
             MailStorageEngine.StoredMail storedMail = mails.get(i);
             if (storedMail.content == null) continue;
 
-            String[] lines = storedMail.content.split("\n");
-            String from = "", to = "", subject = "", date = "";
-            StringBuilder bodyBuilder = new StringBuilder();
-            boolean isBody = false;
-
-            for (String line : lines) {
-                if (isBody) {
-                    bodyBuilder.append(line).append('\n');
-                } else if (line.isEmpty()) {
-                    isBody = true;
-                } else if (from.isEmpty() && line.startsWith("From: ")) {
-                    from = line.substring(6).trim();
-                } else if (to.isEmpty() && line.startsWith("To: ")) {
-                    to = line.substring(4).trim();
-                } else if (subject.isEmpty() && line.startsWith("Subject: ")) {
-                    subject = line.substring(9).trim();
-                } else if (date.isEmpty() && line.startsWith("Date: ")) {
-                    date = line.substring(6).trim();
-                }
-            }
-
-            if (bodyBuilder.length() > 0 && bodyBuilder.charAt(bodyBuilder.length() - 1) == '\n') {
-                bodyBuilder.setLength(bodyBuilder.length() - 1);
-            }
+            ParsedMail parsed = parseRawEmail(storedMail.content);
 
             sb.append("{")
               .append("\"id\":\"").append(escapeJson(storedMail.id)).append("\",")
-              .append("\"sender\":\"").append(escapeJson(from)).append("\",")
-              .append("\"recipient\":\"").append(escapeJson(to)).append("\",")
-              .append("\"subject\":\"").append(escapeJson(subject)).append("\",")
-              .append("\"timestamp\":\"").append(escapeJson(date)).append("\",")
-              .append("\"body\":\"").append(escapeJson(bodyBuilder.toString())).append("\"")
+              .append("\"sender\":\"").append(escapeJson(parsed.from)).append("\",")
+              .append("\"recipient\":\"").append(escapeJson(parsed.to)).append("\",")
+              .append("\"subject\":\"").append(escapeJson(parsed.subject)).append("\",")
+              .append("\"timestamp\":\"").append(escapeJson(parsed.date)).append("\",")
+              .append("\"body\":\"").append(escapeJson(parsed.body)).append("\"")
               .append("}");
 
-            if (i < mails.size() - 1) sb.append(",");
+            if (i < end - 1) sb.append(",");
         }
         sb.append("]");
         return sb.toString();
     }
 
     private String convertSingleMailToJson(MailStorageEngine.StoredMail storedMail) {
-        String[] lines = storedMail.content.split("\n");
-        String from = "", to = "", subject = "", date = "";
+        ParsedMail parsed = parseRawEmail(storedMail.content);
+
+        return "{"
+          + "\"id\":\"" + escapeJson(storedMail.id) + "\","
+          + "\"sender\":\"" + escapeJson(parsed.from) + "\","
+          + "\"recipient\":\"" + escapeJson(parsed.to) + "\","
+          + "\"subject\":\"" + escapeJson(parsed.subject) + "\","
+          + "\"timestamp\":\"" + escapeJson(parsed.date) + "\","
+          + "\"body\":\"" + escapeJson(parsed.body) + "\""
+          + "}";
+    }
+
+    private static class ParsedMail {
+        String from = "";
+        String to = "";
+        String subject = "";
+        String date = "";
+        String body = "";
+    }
+
+    private ParsedMail parseRawEmail(String rawContent) {
+        ParsedMail mail = new ParsedMail();
+        if (rawContent == null) return mail;
+
+        String[] lines = rawContent.split("\r?\n");
         StringBuilder bodyBuilder = new StringBuilder();
         boolean isBody = false;
 
@@ -185,14 +222,17 @@ public class MailHandler implements HttpHandler {
                 bodyBuilder.append(line).append('\n');
             } else if (line.isEmpty()) {
                 isBody = true;
-            } else if (from.isEmpty() && line.startsWith("From: ")) {
-                from = line.substring(6).trim();
-            } else if (to.isEmpty() && line.startsWith("To: ")) {
-                to = line.substring(4).trim();
-            } else if (subject.isEmpty() && line.startsWith("Subject: ")) {
-                subject = line.substring(9).trim();
-            } else if (date.isEmpty() && line.startsWith("Date: ")) {
-                date = line.substring(6).trim();
+            } else {
+                String lower = line.toLowerCase();
+                if (mail.from.isEmpty() && lower.startsWith("from:")) {
+                    mail.from = line.substring(5).trim();
+                } else if (mail.to.isEmpty() && lower.startsWith("to:")) {
+                    mail.to = line.substring(3).trim();
+                } else if (mail.subject.isEmpty() && lower.startsWith("subject:")) {
+                    mail.subject = line.substring(8).trim();
+                } else if (mail.date.isEmpty() && lower.startsWith("date:")) {
+                    mail.date = line.substring(5).trim();
+                }
             }
         }
 
@@ -200,14 +240,8 @@ public class MailHandler implements HttpHandler {
             bodyBuilder.setLength(bodyBuilder.length() - 1);
         }
 
-        return "{"
-          + "\"id\":\"" + escapeJson(storedMail.id) + "\","
-          + "\"sender\":\"" + escapeJson(from) + "\","
-          + "\"recipient\":\"" + escapeJson(to) + "\","
-          + "\"subject\":\"" + escapeJson(subject) + "\","
-          + "\"timestamp\":\"" + escapeJson(date) + "\","
-          + "\"body\":\"" + escapeJson(bodyBuilder.toString()) + "\""
-          + "}";
+        mail.body = bodyBuilder.toString();
+        return mail;
     }
 
     private String escapeJson(String input) {

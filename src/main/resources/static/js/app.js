@@ -2,6 +2,7 @@ let selectedFiles = [];
 let activeMailbox = 'inbox';
 let currentSelectedMail = null;
 let confirmCallback = null;
+let loadedMailsCache = [];
 
 document.addEventListener('DOMContentLoaded', () => {
     const currentUser = localStorage.getItem('currentUser');
@@ -18,6 +19,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     loadInbox();
+    updateStorageUsage();
 });
 
 function showToast(message, type = 'success') {
@@ -216,6 +218,7 @@ async function handleSendMail(event) {
             closeComposeModal();
             showToast(data.message || 'Gửi thư thành công!', 'success');
             refreshMails();
+            updateStorageUsage();
         } else {
             showToast(data.message || 'Gửi thư thất bại!', 'error');
         }
@@ -247,7 +250,8 @@ async function loadInbox(event) {
         }
 
         const mails = await response.json();
-        renderEmailList(mails);
+        loadedMailsCache = mails || [];
+        renderEmailList(loadedMailsCache);
     } catch (err) {
         console.error('Không thể tải hộp thư đến');
     }
@@ -276,7 +280,8 @@ async function loadSentMail(event) {
         }
 
         const mails = await response.json();
-        renderEmailList(mails);
+        loadedMailsCache = mails || [];
+        renderEmailList(loadedMailsCache);
     } catch (err) {
         console.error('Không thể tải thư đã gửi');
     }
@@ -320,6 +325,66 @@ function renderEmailList(mails) {
     });
 }
 
+function filterMails() {
+    const searchInput = document.getElementById('mail-search-input');
+    if (!searchInput) return;
+
+    const keyword = searchInput.value.trim().toLowerCase();
+    if (!keyword) {
+        renderEmailList(loadedMailsCache);
+        return;
+    }
+
+    const filtered = loadedMailsCache.filter(mail => {
+        const sender = (mail.sender || '').toLowerCase();
+        const recipient = (mail.recipient || '').toLowerCase();
+        const subject = (mail.subject || '').toLowerCase();
+        const body = (mail.body || '').toLowerCase();
+
+        return sender.includes(keyword) ||
+               recipient.includes(keyword) ||
+               subject.includes(keyword) ||
+               body.includes(keyword);
+    });
+
+    renderEmailList(filtered);
+}
+
+async function updateStorageUsage() {
+    const token = localStorage.getItem('authToken');
+    if (!token) return;
+
+    try {
+        const response = await fetch('/api/mails/storage-usage', {
+            method: 'GET',
+            headers: {
+                'Authorization': 'Bearer ' + token
+            }
+        });
+
+        if (response.ok) {
+            const data = await response.json();
+            if (data.success) {
+                const usedMb = parseFloat(data.usedMb).toFixed(2);
+                const quotaMb = data.quotaMb;
+                const percent = Math.min(100, Math.max(0, (data.usedBytes / data.quotaBytes) * 100)).toFixed(1);
+
+                const storageText = document.getElementById('storage-text');
+                const storageProgress = document.getElementById('storage-progress');
+
+                if (storageText) {
+                    storageText.textContent = `${usedMb} MB / ${quotaMb} MB`;
+                }
+                if (storageProgress) {
+                    storageProgress.style.width = `${percent}%`;
+                }
+            }
+        }
+    } catch (err) {
+        console.error('Không thể cập nhật dung lượng hòm thư:', err);
+    }
+}
+
 function handleDeleteMail(mailId, event) {
     if (event) event.stopPropagation();
 
@@ -341,6 +406,7 @@ function handleDeleteMail(mailId, event) {
             if (data.success) {
                 showToast('Đã xóa thư thành công!', 'success');
                 refreshMails();
+                updateStorageUsage();
             } else {
                 showToast(data.message || 'Xóa thư thất bại!', 'error');
             }
@@ -420,13 +486,11 @@ function renderEmailDetail(mail) {
         const attachContainer = document.createElement('div');
         attachContainer.style.marginTop = '8px';
 
-        const DATA_URL_REGEX = /^data:[a-z0-9.+-]+\/[a-z0-9.+-]+;base64,[A-Za-z0-9+/=]+$/i;
-
         for (let i = 1; i < parts.length; i++) {
             const attachParts = parts[i].split(']');
             const fileName = attachParts[0];
 
-            const base64Data = (attachParts[1] || '')
+            let base64Data = (attachParts[1] || '')
                 .replace('[/ATTACHMENT]', '')
                 .trim();
 
@@ -442,7 +506,10 @@ function renderEmailDetail(mail) {
             nameDiv.appendChild(nameSpan);
             attachBox.appendChild(nameDiv);
 
-            if (DATA_URL_REGEX.test(base64Data)) {
+            if (base64Data.length > 0) {
+                if (!base64Data.startsWith('data:')) {
+                    base64Data = 'data:application/octet-stream;base64,' + base64Data;
+                }
                 const downloadLink = document.createElement('a');
                 downloadLink.href = base64Data;
                 downloadLink.download = fileName;
@@ -491,11 +558,15 @@ function updateActiveNav(activeId, title) {
 }
 
 function refreshMails() {
+    const searchInput = document.getElementById('mail-search-input');
+    if (searchInput) searchInput.value = '';
+
     if (activeMailbox === 'sent') {
         loadSentMail();
     } else {
         loadInbox();
     }
+    updateStorageUsage();
 }
 
 function formatMailDate(value) {

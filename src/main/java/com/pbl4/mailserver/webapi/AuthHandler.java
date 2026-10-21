@@ -1,5 +1,6 @@
 package com.pbl4.mailserver.webapi;
 
+import com.pbl4.mailserver.config.ServerConfig;
 import com.pbl4.mailserver.core.LoginThrottle;
 import com.pbl4.mailserver.core.MailStorageEngine;
 import com.pbl4.mailserver.core.SecurityUtils;
@@ -19,7 +20,6 @@ import java.util.regex.Pattern;
 public class AuthHandler implements HttpHandler {
 
     private static final String ADMIN_EMAIL = "admin@pbl4.com";
-    private static final String ADMIN_DEFAULT_PASS = System.getenv().getOrDefault("PBL4_ADMIN_PASSWORD", "@Luat0105");
     private static final Pattern SAFE_EMAIL_PATTERN = Pattern.compile("^[a-z0-9][a-z0-9._-]{2,31}@pbl4[.]com$");
     private static final String DUMMY_HASH = SecurityUtils.hashPassword("DummyPassword123!");
 
@@ -35,13 +35,13 @@ public class AuthHandler implements HttpHandler {
             }
 
             if (!UserStore.exists(ADMIN_EMAIL)) {
-                String passwordHash = SecurityUtils.hashPassword(ADMIN_DEFAULT_PASS);
+                String passwordHash = SecurityUtils.hashPassword(ServerConfig.ADMIN_DEFAULT_PASS);
                 UserStore.addUserIfAbsent(ADMIN_EMAIL, passwordHash);
                 MailStorageEngine.initMailbox(ADMIN_EMAIL);
-                System.out.println("[AUTH] Đã tự động khởi tạo tài khoản Admin: " + ADMIN_EMAIL);
+                System.out.println("[AUTH] Admin account initialized: " + ADMIN_EMAIL);
             }
         } catch (Exception e) {
-            System.err.println("[AUTH] Lỗi khi tạo tài khoản Admin mặc định: " + e.getMessage());
+            System.err.println("[AUTH] Error initializing Admin account: " + e.getMessage());
         }
     }
 
@@ -160,7 +160,9 @@ public class AuthHandler implements HttpHandler {
     }
 
     private void handleLogin(HttpExchange exchange, String username, String password) throws IOException {
-        if (LoginThrottle.isThrottled(username)) {
+        String clientIp = exchange.getRemoteAddress().getAddress().getHostAddress();
+
+        if (LoginThrottle.isThrottled(clientIp, username)) {
             sendResponse(exchange, 429, "{\"success\": false, \"message\": \"Tài khoản tạm thời bị khóa do thử sai mật khẩu quá nhiều lần. Vui lòng thử lại sau 15 phút!\"}");
             return;
         }
@@ -170,7 +172,7 @@ public class AuthHandler implements HttpHandler {
 
         if (!userExists) {
             SecurityUtils.checkPassword(password, DUMMY_HASH);
-            LoginThrottle.recordFailedAttempt(username);
+            LoginThrottle.recordFailedAttempt(clientIp, username);
             sendResponse(exchange, 401, "{\"success\": false, \"message\": \"Sai tài khoản hoặc mật khẩu!\"}");
             return;
         }
@@ -182,7 +184,7 @@ public class AuthHandler implements HttpHandler {
 
         boolean isValid = SecurityUtils.checkPassword(password, storedHash);
         if (isValid) {
-            LoginThrottle.resetAttempts(username);
+            LoginThrottle.resetAttempts(clientIp, username);
             String token = SessionManager.createSession(username, password);
             String role = ADMIN_EMAIL.equalsIgnoreCase(username) ? "ADMIN" : "USER";
 
@@ -192,7 +194,7 @@ public class AuthHandler implements HttpHandler {
                 "\"token\": \"" + token + "\", " +
                 "\"role\": \"" + role + "\"}");
         } else {
-            LoginThrottle.recordFailedAttempt(username);
+            LoginThrottle.recordFailedAttempt(clientIp, username);
             sendResponse(exchange, 401, "{\"success\": false, \"message\": \"Sai tài khoản hoặc mật khẩu!\"}");
         }
     }

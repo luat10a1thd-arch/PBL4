@@ -7,7 +7,7 @@ import com.pbl4.mailserver.core.SecurityUtils;
 import com.pbl4.mailserver.core.SslContextFactory;
 import com.pbl4.mailserver.core.UserStore;
 
-import javax.net.ssl.SSLServerSocketFactory;
+import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLSocket;
 import javax.net.ssl.SSLSocketFactory;
 import java.io.BufferedReader;
@@ -102,14 +102,16 @@ public class SmtpHandler implements Runnable {
                         sendResponse(out, "454 TLS already active");
                         continue;
                     }
-                    SSLServerSocketFactory sslFactory = SslContextFactory.createSSLServerSocketFactory();
-                    if (sslFactory == null) {
+
+                    SSLContext sslContext = SslContextFactory.createSSLContext();
+                    if (sslContext == null) {
                         sendResponse(out, "454 TLS not available on server");
                         continue;
                     }
+
                     sendResponse(out, "220 2.0.0 Ready to start TLS");
 
-                    SSLSocketFactory sf = (SSLSocketFactory) SSLSocketFactory.getDefault();
+                    SSLSocketFactory sf = sslContext.getSocketFactory();
                     SSLSocket sslSocket = (SSLSocket) sf.createSocket(
                             clientSocket,
                             clientSocket.getInetAddress().getHostAddress(),
@@ -122,37 +124,88 @@ public class SmtpHandler implements Runnable {
                     clientSocket = sslSocket;
                     in = new BufferedReader(new InputStreamReader(clientSocket.getInputStream(), StandardCharsets.UTF_8));
                     out = new PrintWriter(new OutputStreamWriter(clientSocket.getOutputStream(), StandardCharsets.UTF_8), true);
+                    
                     isTlsActive = true;
+                    mailFrom = "";
+                    recipients.clear();
+                    isAuthenticated = false;
+                    authenticatedUser = null;
                 }
                 else if (upperLine.startsWith("AUTH LOGIN")) {
                     sendResponse(out, "334 VXNlcm5hbWU6");
                     String encodedUser = in.readLine();
                     if (encodedUser == null) break;
-                    String decodedUser = new String(Base64.getDecoder().decode(encodedUser.trim()), StandardCharsets.UTF_8);
                     
-                    sendResponse(out, "334 UGFzc3dvcmQ6");
-                    String encodedPass = in.readLine();
-                    if (encodedPass == null) break;
-                    String decodedPass = new String(Base64.getDecoder().decode(encodedPass.trim()), StandardCharsets.UTF_8);
-
-                    if (LoginThrottle.isThrottled(clientIp)) {
-                        sendResponse(out, "454 4.7.0 Too many failed attempts, try again later");
+                    String decodedUser;
+                    try {
+                        decodedUser = new String(Base64.getDecoder().decode(encodedUser.trim()), StandardCharsets.UTF_8);
+                    } catch (IllegalArgumentException e) {
+                        sendResponse(out, "501 5.5.4 Cannot decode Base64 username");
                         continue;
                     }
 
-                    String storedHash = UserStore.findHash(decodedUser);
-                    boolean isLocked = "LOCKED".equalsIgnoreCase(UserStore.getStatus(decodedUser));
+                    sendResponse(out, "334 UGFzc3dvcmQ6");
+                    String encodedPass = in.readLine();
+                    if (encodedPass == null) break;
+                    
+                    String decodedPass;
+                    try {
+                        decodedPass = new String(Base64.getDecoder().decode(encodedPass.trim()), StandardCharsets.UTF_8);
+                    } catch (IllegalArgumentException e) {
+                        sendResponse(out, "501 5.5.4 Cannot decode Base64 password");
+                        continue;
+                    }
 
-                    if (storedHash != null && !isLocked && SecurityUtils.checkPassword(decodedPass, storedHash)) {
-                        LoginThrottle.resetAttempts(clientIp);
+                    String authResult = authenticateUser(clientIp, decodedUser, decodedPass);
+                    if (authResult != null) {
                         isAuthenticated = true;
-                        authenticatedUser = UserStore.canonical(decodedUser);
+                        authenticatedUser = authResult;
                         sendResponse(out, "235 2.7.0 Authentication successful");
                     } else {
-                        LoginThrottle.recordFailedAttempt(clientIp);
                         sendResponse(out, "535 5.7.8 Authentication credentials invalid");
                     }
-                } 
+                }
+                else if (upperLine.startsWith("AUTH PLAIN")) {
+                    String initialResponse = "";
+                    if (line.length() > 10) {
+                        initialResponse = line.substring(10).trim();
+                    }
+
+                    if (initialResponse.isEmpty()) {
+                        sendResponse(out, "334 ");
+                        initialResponse = in.readLine();
+                        if (initialResponse == null) break;
+                        initialResponse = initialResponse.trim();
+                    }
+
+                    try {
+                        byte[] decoded = Base64.getDecoder().decode(initialResponse);
+                        String plainStr = new String(decoded, StandardCharsets.UTF_8);
+                        String[] parts = plainStr.split("\0", -1);
+
+                        String user = "";
+                        String pass = "";
+
+                        if (parts.length >= 3) {
+                            user = parts[1];
+                            pass = parts[2];
+                        } else if (parts.length == 2) {
+                            user = parts[0];
+                            pass = parts[1];
+                        }
+
+                        String authResult = authenticateUser(clientIp, user, pass);
+                        if (authResult != null) {
+                            isAuthenticated = true;
+                            authenticatedUser = authResult;
+                            sendResponse(out, "235 2.7.0 Authentication successful");
+                        } else {
+                            sendResponse(out, "535 5.7.8 Authentication credentials invalid");
+                        }
+                    } catch (IllegalArgumentException e) {
+                        sendResponse(out, "501 5.5.4 Invalid Base64 encoding for AUTH PLAIN");
+                    }
+                }
                 else if (upperLine.startsWith("MAIL FROM:")) {
                     if (!isAuthenticated) {
                         sendResponse(out, "530 5.7.0 Authentication required");
@@ -231,13 +284,30 @@ public class SmtpHandler implements Runnable {
                 }
             }
         } catch (SocketTimeoutException e) {
-            System.err.println("[SMTP] Ngắt kết nối do quá thời gian chờ (Timeout): " + clientSocket.getInetAddress());
+            System.err.println("[SMTP] Timeout: " + clientSocket.getInetAddress());
         } catch (Exception e) {
             e.printStackTrace();
         } finally {
             try {
                 clientSocket.close();
             } catch (Exception ignored) {}
+        }
+    }
+
+    private String authenticateUser(String clientIp, String username, String password) {
+        if (LoginThrottle.isThrottled(clientIp, username)) {
+            return null;
+        }
+
+        String storedHash = UserStore.findHash(username);
+        boolean isLocked = "LOCKED".equalsIgnoreCase(UserStore.getStatus(username));
+
+        if (storedHash != null && !isLocked && SecurityUtils.checkPassword(password, storedHash)) {
+            LoginThrottle.resetAttempts(clientIp, username);
+            return UserStore.canonical(username);
+        } else {
+            LoginThrottle.recordFailedAttempt(clientIp, username);
+            return null;
         }
     }
 

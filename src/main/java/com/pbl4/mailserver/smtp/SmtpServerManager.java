@@ -1,9 +1,7 @@
 package com.pbl4.mailserver.smtp;
 
 import com.pbl4.mailserver.config.ServerConfig;
-import com.pbl4.mailserver.core.SslContextFactory;
 
-import javax.net.ssl.SSLServerSocketFactory;
 import java.io.IOException;
 import java.net.ServerSocket;
 import java.net.Socket;
@@ -20,16 +18,9 @@ public class SmtpServerManager {
 
     public static void startServer() {
         new Thread(() -> {
-            SSLServerSocketFactory sslFactory = SslContextFactory.createSSLServerSocketFactory();
-
             try {
-                if (sslFactory != null) {
-                    serverSocket = sslFactory.createServerSocket(SMTP_PORT);
-                    System.out.println("=== SMTP Server (SSL/TLS Thread Pool) đang chạy tại cổng: " + SMTP_PORT + " ===");
-                } else {
-                    serverSocket = new ServerSocket(SMTP_PORT);
-                    System.out.println("=== SMTP Server (Thread Pool) đang chạy tại cổng: " + SMTP_PORT + " ===");
-                }
+                serverSocket = new ServerSocket(SMTP_PORT);
+                System.out.println("=== SMTP Server running on port: " + SMTP_PORT + " ===");
 
                 while (isRunning && !serverSocket.isClosed()) {
                     try {
@@ -37,11 +28,10 @@ public class SmtpServerManager {
                         threadPool.execute(new SmtpHandler(clientSocket));
                     } catch (IOException e) {
                         if (!isRunning || serverSocket.isClosed()) break;
-                        System.err.println("[SMTP] Lỗi chấp nhận kết nối client: " + e.getMessage());
                     }
                 }
             } catch (IOException e) {
-                System.err.println("Lỗi khởi chạy SMTP Server: " + e.getMessage());
+                System.err.println("SMTP Server error: " + e.getMessage());
             } finally {
                 stopServer();
             }

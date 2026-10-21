@@ -1,5 +1,7 @@
 package com.pbl4.mailserver.core;
 
+import com.pbl4.mailserver.config.ServerConfig;
+
 import java.io.File;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -37,7 +39,7 @@ public class UserStore {
         if (!exists("admin@pbl4.com")) {
             byte[] salt = SecurityUtils.generateSalt();
             String saltBase64 = Base64.getEncoder().encodeToString(salt);
-            String hash = SecurityUtils.hashPassword("@Luat0105");
+            String hash = SecurityUtils.hashPassword(ServerConfig.ADMIN_DEFAULT_PASS);
             addUser("admin@pbl4.com", hash, saltBase64, "ACTIVE", "ADMIN");
         }
     }
@@ -89,14 +91,14 @@ public class UserStore {
             }
 
             if (parsedCount == 0 && file.length() > 0) {
-                throw new IllegalStateException("Cảnh báo: File users.json có dữ liệu nhưng không thể parse tài khoản nào!");
+                throw new IllegalStateException("Error parsing users.json data");
             }
 
             if (dirty) {
                 saveUsersToFile();
             }
         } catch (Exception e) {
-            System.err.println("[USERSTORE] Lỗi khi đọc file users.json: " + e.getMessage());
+            System.err.println("[USERSTORE] Error loading users.json: " + e.getMessage());
         }
     }
 
@@ -143,7 +145,7 @@ public class UserStore {
             }
             setFilePermissions(target, false);
         } catch (Exception e) {
-            System.err.println("[USERSTORE] Lỗi khi lưu file users.json: " + e.getMessage());
+            System.err.println("[USERSTORE] Error saving users.json: " + e.getMessage());
         }
     }
 

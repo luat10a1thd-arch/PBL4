@@ -57,12 +57,44 @@ public class MailService {
         String rawEmail = "From: " + canonicalSender + "\n" +
                          "To: " + fullToHeader + "\n" +
                          "Subject: " + safeSubject + "\n" +
-                         "Date: " + dateStr + "\n\n" +
+                         "Date: " + dateStr + "\n" +
+                         "MIME-Version: 1.0\n" +
+                         "Content-Type: text/plain; charset=UTF-8\n\n" +
                          body;
+
+        return deliverRaw(canonicalSender, validRecipients, rawEmail);
+    }
+
+    public static DeliveryResult deliverRaw(String sender, Set<String> recipients, String rawMessage) {
+        if (sender == null || recipients == null || recipients.isEmpty() || rawMessage == null) {
+            return new DeliveryResult(false, 0, 0, "Thiếu thông tin gửi thư thô!");
+        }
+
+        String canonicalSender = UserStore.canonical(sender);
+        if (canonicalSender == null) {
+            canonicalSender = sender.toLowerCase(Locale.ROOT);
+        }
+
+        Set<String> validRecipients = new LinkedHashSet<>();
+        int failCount = 0;
+
+        for (String rcpt : recipients) {
+            if (rcpt == null || rcpt.trim().isEmpty()) continue;
+            String canonicalRcpt = UserStore.canonical(rcpt.trim());
+            if (canonicalRcpt != null && UserStore.exists(canonicalRcpt)) {
+                validRecipients.add(canonicalRcpt);
+            } else {
+                failCount++;
+            }
+        }
+
+        if (validRecipients.isEmpty()) {
+            return new DeliveryResult(false, 0, failCount, "Gửi thư thất bại cho toàn bộ người nhận!");
+        }
 
         int successCount = 0;
         for (String canonicalTo : validRecipients) {
-            boolean savedRecipient = MailStorageEngine.saveEmail(canonicalTo, rawEmail);
+            boolean savedRecipient = MailStorageEngine.saveEmail(canonicalTo, rawMessage);
             if (savedRecipient) {
                 successCount++;
             } else {
@@ -71,7 +103,7 @@ public class MailService {
         }
 
         if (successCount > 0) {
-            boolean savedSent = MailStorageEngine.saveEmail(canonicalSender + "_sent", rawEmail);
+            boolean savedSent = MailStorageEngine.saveEmail(canonicalSender + "_sent", rawMessage);
             if (!savedSent) {
                 System.err.println("[MAIL SERVICE] Không thể lưu bản sao _sent cho người gửi: " + canonicalSender);
             }
@@ -80,38 +112,8 @@ public class MailService {
             if (failCount > 0) msg += " (" + failCount + " người nhận thất bại)";
             return new DeliveryResult(true, successCount, failCount, msg);
         } else {
-            return new DeliveryResult(false, 0, failCount, "Gửi thư thất bại cho toàn bộ người nhận!");
+            return new DeliveryResult(false, 0, failCount, "Gửi thư thất bại (Người nhận có thể đã vượt quá Quota dung lượng)!");
         }
-    }
-
-    public static DeliveryResult deliverRaw(String sender, Set<String> recipients, String rawMessage) {
-        if (sender == null || recipients == null || recipients.isEmpty() || rawMessage == null) {
-            return new DeliveryResult(false, 0, 0, "Thiếu thông tin gửi thư thô!");
-        }
-
-        String extractedSubject = "No Subject";
-        String[] lines = rawMessage.split("\n");
-        StringBuilder bodyBuilder = new StringBuilder();
-        boolean inHeaders = true;
-
-        for (String line : lines) {
-            if (inHeaders) {
-                if (line.trim().isEmpty()) {
-                    inHeaders = false;
-                    continue;
-                }
-                if (line.toLowerCase().startsWith("subject:")) {
-                    extractedSubject = line.substring(8).trim();
-                }
-            } else {
-                bodyBuilder.append(line).append("\n");
-            }
-        }
-
-        String body = bodyBuilder.length() > 0 ? bodyBuilder.toString() : rawMessage;
-        String recipientsRaw = String.join(",", recipients);
-
-        return deliver(sender, recipientsRaw, extractedSubject, body);
     }
 
     public static List<String> listInbox(String username) {

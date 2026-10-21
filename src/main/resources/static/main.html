@@ -4,11 +4,9 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>DUT Mail Client</title>
-    <!-- FontAwesome Icon CDN -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <link rel="stylesheet" href="css/style.css">
     <style>
-        /* CSS cho Toast Notification Thông báo */
         #toast-container {
             position: fixed;
             top: 20px;
@@ -53,7 +51,6 @@
     </style>
 </head>
 <body class="app-body">
-    <!-- Header Trên Cùng -->
     <header class="app-header">
         <div class="logo-area">
             <i class="fa-solid fa-paper-plane logo-icon"></i>
@@ -68,9 +65,7 @@
         </div>
     </header>
 
-    <!-- Khung Bố Cục Chính 3 Cột -->
     <div class="app-container">
-        <!-- Cột 1: Navigation Sidebar -->
         <aside class="sidebar">
             <button class="btn btn-compose" onclick="openComposeModal()">
                 <i class="fa-solid fa-pen-to-square"></i> Soạn thư mới
@@ -84,9 +79,18 @@
                     <i class="fa-solid fa-paper-plane"></i> Thư đã gửi
                 </a>
             </nav>
+
+            <div class="storage-widget">
+                <div class="storage-info">
+                    <span>Dung lượng Hộp thư</span>
+                    <span id="storage-text">0 MB / 100 MB</span>
+                </div>
+                <div class="storage-bar">
+                    <div id="storage-progress" class="storage-progress" style="width: 0%;"></div>
+                </div>
+            </div>
         </aside>
 
-        <!-- Cột 2: Danh Sách Email -->
         <section class="email-list-panel">
             <div class="panel-header">
                 <h3 id="box-title">Hộp thư đến</h3>
@@ -94,6 +98,12 @@
                     <i class="fa-solid fa-rotate-right"></i>
                 </button>
             </div>
+            
+            <div class="search-box-wrapper">
+                <i class="fa-solid fa-magnifying-glass search-icon"></i>
+                <input type="text" id="mail-search-input" placeholder="Tìm kiếm theo người gửi, tiêu đề..." onkeyup="filterMails()">
+            </div>
+
             <div id="email-list" class="email-list">
                 <div class="email-item unread" onclick="selectEmail(1, this)">
                     <div class="email-sender">admin@pbl4.com</div>
@@ -103,7 +113,6 @@
             </div>
         </section>
 
-        <!-- Cột 3: Chi Tiết Thư Chọn Xem -->
         <main class="email-detail-panel">
             <div id="no-email-selected" class="empty-state">
                 <i class="fa-regular fa-envelope-open empty-icon"></i>
@@ -123,11 +132,15 @@
                 <div id="detail-body" class="detail-body">
                     Nội dung chi tiết của thư sau khi giải mã AES-256 sẽ hiển thị tại đây.
                 </div>
+                
+                <div id="detail-attachments" class="attachments-area hidden">
+                    <h4><i class="fa-solid fa-paperclip"></i> Tệp đính kèm</h4>
+                    <div id="attachment-list" class="attachment-grid"></div>
+                </div>
             </div>
         </main>
     </div>
 
-    <!-- MODAL SOẠN THƯ (Popup) -->
     <div id="compose-modal" class="compose-modal hidden">
         <div class="compose-header">
             <span><i class="fa-solid fa-envelope-circle-check"></i> Thư mới</span>
@@ -161,10 +174,8 @@
         </form>
     </div>
 
-    <!-- KHUNG CHỨA TOAST THÔNG BÁO -->
     <div id="toast-container"></div>
 
-    <!-- CUSTOM CONFIRM MODAL (HỘP THOẠI XÁC NHẬN MỚI) -->
     <div id="confirm-modal" class="confirm-modal-overlay hidden">
         <div class="confirm-modal-box">
             <i class="fa-solid fa-trash-can confirm-icon"></i>

@@ -1,5 +1,6 @@
 package com.pbl4.mailserver.webapi;
 
+import com.pbl4.mailserver.config.ServerConfig;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
@@ -8,10 +9,11 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
+import java.util.concurrent.Executors;
 
 public class ApiServer {
 
-    private static final int PORT = 8080;
+    private static final int PORT = ServerConfig.HTTP_PORT;
 
     public static void startServer() {
         try {
@@ -22,12 +24,12 @@ public class ApiServer {
             server.createContext("/api/mails", new CorsHandlerWrapper(new MailHandler()));
             server.createContext("/api/admin", new CorsHandlerWrapper(new AdminHandler()));
 
-            server.setExecutor(null);
+            server.setExecutor(Executors.newFixedThreadPool(ServerConfig.THREAD_POOL_SIZE));
             server.start();
-            System.out.println("=== Web API Server đang chạy tại cổng: http://localhost:" + PORT + " ===");
+            System.out.println("=== Web API Server running at: http://localhost:" + PORT + " ===");
 
         } catch (IOException e) {
-            System.err.println("Lỗi khi khởi chạy Web Server: " + e.getMessage());
+            System.err.println("Error starting Web Server: " + e.getMessage());
         }
     }
 

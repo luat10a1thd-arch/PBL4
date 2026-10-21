@@ -23,7 +23,17 @@ public class ServerConfig {
     public static volatile long MAX_MAILBOX_QUOTA_MB = loadQuotaConfig();
 
     public static final String KEYSTORE_PASS = System.getenv().getOrDefault("PBL4_KEYSTORE_PASS", "pbl4secretpass");
-    public static final String SECRET_KEY = System.getenv().getOrDefault("PBL4_SECRET_KEY", "dev-only-fallback-key-DO-NOT-USE-IN-PRODUCTION");
+    public static final String SECRET_KEY = getSecretKeyEnv();
+    public static final String ADMIN_DEFAULT_PASS = System.getenv().getOrDefault("PBL4_ADMIN_PASSWORD", "@Luat0105");
+
+    private static String getSecretKeyEnv() {
+        String key = System.getenv("PBL4_SECRET_KEY");
+        if (key == null || key.trim().isEmpty()) {
+            System.err.println("[WARNING] PBL4_SECRET_KEY is not set. Using fallback development key!");
+            return "dev-only-fallback-key-DO-NOT-USE-IN-PRODUCTION";
+        }
+        return key.trim();
+    }
 
     private static synchronized long loadQuotaConfig() {
         File file = new File(CONFIG_FILE_PATH);

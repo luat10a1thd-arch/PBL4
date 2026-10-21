@@ -6,7 +6,7 @@ import com.pbl4.mailserver.core.SecurityUtils;
 import com.pbl4.mailserver.core.SslContextFactory;
 import com.pbl4.mailserver.core.UserStore;
 
-import javax.net.ssl.SSLServerSocketFactory;
+import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLSocket;
 import javax.net.ssl.SSLSocketFactory;
 import java.io.BufferedReader;
@@ -62,14 +62,16 @@ public class Pop3Handler implements Runnable {
                         out.println("-ERR TLS already active");
                         continue;
                     }
-                    SSLServerSocketFactory sslFactory = SslContextFactory.createSSLServerSocketFactory();
-                    if (sslFactory == null) {
+
+                    SSLContext sslContext = SslContextFactory.createSSLContext();
+                    if (sslContext == null) {
                         out.println("-ERR STLS not available");
                         continue;
                     }
+
                     out.println("+OK Begin TLS negotiation now");
 
-                    SSLSocketFactory sf = (SSLSocketFactory) SSLSocketFactory.getDefault();
+                    SSLSocketFactory sf = sslContext.getSocketFactory();
                     SSLSocket sslSocket = (SSLSocket) sf.createSocket(
                             clientSocket,
                             clientSocket.getInetAddress().getHostAddress(),
@@ -82,7 +84,19 @@ public class Pop3Handler implements Runnable {
                     clientSocket = sslSocket;
                     in = new BufferedReader(new InputStreamReader(clientSocket.getInputStream(), StandardCharsets.UTF_8));
                     out = new PrintWriter(new OutputStreamWriter(clientSocket.getOutputStream(), StandardCharsets.UTF_8), true);
+                    
                     isTlsActive = true;
+                    pendingUser = null;
+                }
+                else if ("CAPA".equals(command)) {
+                    out.println("+OK Capability list follows");
+                    out.println("USER");
+                    out.println("UIDL");
+                    out.println("TOP");
+                    if (!isTlsActive) {
+                        out.println("STLS");
+                    }
+                    out.println(".");
                 }
                 else if ("USER".equals(command)) {
                     if (isAuthenticated) {
@@ -107,7 +121,7 @@ public class Pop3Handler implements Runnable {
                             ? pendingUser.substring(0, pendingUser.length() - 5)
                             : pendingUser;
 
-                    if (LoginThrottle.isThrottled(clientIp)) {
+                    if (LoginThrottle.isThrottled(clientIp, authCheckUser)) {
                         out.println("-ERR Too many failed attempts, try again later");
                         continue;
                     }
@@ -116,7 +130,7 @@ public class Pop3Handler implements Runnable {
                     boolean isLocked = "LOCKED".equalsIgnoreCase(UserStore.getStatus(authCheckUser));
 
                     if (storedHash != null && !isLocked && SecurityUtils.checkPassword(argument, storedHash)) {
-                        LoginThrottle.resetAttempts(clientIp);
+                        LoginThrottle.resetAttempts(clientIp, authCheckUser);
                         isAuthenticated = true;
                         
                         String canonicalUser = UserStore.canonical(authCheckUser);
@@ -127,7 +141,7 @@ public class Pop3Handler implements Runnable {
                         deletedIndices.clear();
                         out.println("+OK Logged in successfully");
                     } else {
-                        LoginThrottle.recordFailedAttempt(clientIp);
+                        LoginThrottle.recordFailedAttempt(clientIp, authCheckUser);
                         out.println("-ERR Invalid username or password");
                     }
                 } 
@@ -204,6 +218,51 @@ public class Pop3Handler implements Runnable {
                         out.println(".");
                     }
                 }
+                else if ("TOP".equals(command)) {
+                    if (!isAuthenticated) {
+                        out.println("-ERR Please authenticate first");
+                        continue;
+                    }
+                    String[] parts = argument.split("\\s+");
+                    if (parts.length < 2) {
+                        out.println("-ERR Usage: TOP msg_num lines");
+                        continue;
+                    }
+                    try {
+                        int idx = Integer.parseInt(parts[0]) - 1;
+                        int linesToReturn = Integer.parseInt(parts[1]);
+
+                        if (idx >= 0 && idx < emails.size() && !deletedIndices.contains(idx + 1)) {
+                            String mailContent = emails.get(idx).content;
+                            if (mailContent == null) {
+                                out.println("-ERR Message decryption failed");
+                                continue;
+                            }
+                            out.println("+OK Top lines follow");
+                            String[] lines = mailContent.split("\r?\n");
+                            boolean inBody = false;
+                            int bodyLineCount = 0;
+
+                            for (String l : lines) {
+                                if (!inBody) {
+                                    out.println(l.startsWith(".") ? "." + l : l);
+                                    if (l.trim().isEmpty()) {
+                                        inBody = true;
+                                    }
+                                } else {
+                                    if (bodyLineCount >= linesToReturn) break;
+                                    out.println(l.startsWith(".") ? "." + l : l);
+                                    bodyLineCount++;
+                                }
+                            }
+                            out.println(".");
+                        } else {
+                            out.println("-ERR Message not found");
+                        }
+                    } catch (NumberFormatException e) {
+                        out.println("-ERR Invalid parameters");
+                    }
+                }
                 else if ("RETR".equals(command)) {
                     if (!isAuthenticated) {
                         out.println("-ERR Please authenticate first");
@@ -278,7 +337,7 @@ public class Pop3Handler implements Runnable {
                 }
             }
         } catch (SocketTimeoutException e) {
-            System.err.println("[POP3] Ngắt kết nối do quá thời gian chờ (Timeout): " + clientSocket.getInetAddress());
+            System.err.println("[POP3] Timeout: " + clientSocket.getInetAddress());
         } catch (Exception e) {
             e.printStackTrace();
         } finally {

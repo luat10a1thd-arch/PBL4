@@ -460,23 +460,17 @@ function downloadAttachment(fileName, rawBase64) {
         let cleanBase64 = rawBase64.trim();
         let mimeType = 'application/octet-stream';
 
-        if (cleanBase64.includes(';base64,')) {
-            const parts = cleanBase64.split(';base64,');
-            mimeType = parts[0].replace(/^data:/, '');
-            cleanBase64 = parts[1] || '';
-        } else if (cleanBase64.startsWith('data:')) {
-            cleanBase64 = cleanBase64.replace(/^data:[^;]+;base64,/, '');
+        const prefixMatch = cleanBase64.match(/^data:([^;]+);base64,/);
+        if (prefixMatch) {
+            if (prefixMatch[1]) mimeType = prefixMatch[1];
+            cleanBase64 = cleanBase64.slice(prefixMatch[0].length);
         }
 
-        cleanBase64 = cleanBase64.replace(/ /g, '+');
+        cleanBase64 = cleanBase64.replace(/\s/g, '');
         cleanBase64 = cleanBase64.replace(/[^A-Za-z0-9+/=]/g, '');
 
         const byteCharacters = atob(cleanBase64);
-        const byteNumbers = new Array(byteCharacters.length);
-        for (let i = 0; i < byteCharacters.length; i++) {
-            byteNumbers[i] = byteCharacters.charCodeAt(i);
-        }
-        const byteArray = new Uint8Array(byteNumbers);
+        const byteArray = Uint8Array.from(byteCharacters, c => c.charCodeAt(0));
         const blob = new Blob([byteArray], { type: mimeType });
 
         const blobUrl = URL.createObjectURL(blob);
@@ -510,8 +504,19 @@ function renderEmailDetail(mail) {
     let bodyText = mail.body || '';
 
     if (bodyText.includes('[ATTACHMENT:')) {
-        const parts = bodyText.split('[ATTACHMENT:');
-        const textContent = parts[0];
+        const firstAttachIndex = bodyText.indexOf('[ATTACHMENT:');
+        const textContent = bodyText.slice(0, firstAttachIndex);
+
+        const attachRegex = /\[ATTACHMENT:([^\]\r\n]+)\](?:data:[^;]+;base64,)?([A-Za-z0-9+/=\s]+)\[\/ATTACHMENT\]/g;
+        const attachments = [];
+        let match;
+
+        while ((match = attachRegex.exec(bodyText)) !== null) {
+            attachments.push({
+                fileName: match[1],
+                base64Data: match[2].trim()
+            });
+        }
 
         const textDiv = document.createElement('div');
         textDiv.style.whiteSpace = 'pre-wrap';
@@ -520,7 +525,7 @@ function renderEmailDetail(mail) {
 
         const attachSection = document.createElement('div');
         attachSection.style.cssText = 'margin-top: 25px; border-top: 1px dashed #cbd5e1; padding-top: 15px;';
-        
+
         const attachTitle = document.createElement('strong');
         attachTitle.style.cssText = 'color: #475569; font-size: 13px;';
         attachTitle.textContent = '📎 Danh sách file đính kèm:';
@@ -529,32 +534,25 @@ function renderEmailDetail(mail) {
         const attachContainer = document.createElement('div');
         attachContainer.style.marginTop = '8px';
 
-        for (let i = 1; i < parts.length; i++) {
-            const attachParts = parts[i].split(']');
-            const fileName = attachParts[0];
-
-            let base64Data = (attachParts[1] || '')
-                .replace('[/ATTACHMENT]', '')
-                .trim();
-
+        for (const att of attachments) {
             const attachBox = document.createElement('div');
             attachBox.style.cssText = 'margin-top: 10px; padding: 10px 14px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; display: inline-block; margin-right: 10px;';
 
             const nameDiv = document.createElement('div');
             nameDiv.style.cssText = 'font-weight: 600; color: #334155; font-size: 13px; margin-bottom: 4px;';
             nameDiv.innerHTML = '<i class="fa-solid fa-paperclip"></i> ';
-            
+
             const nameSpan = document.createElement('span');
-            nameSpan.textContent = fileName;
+            nameSpan.textContent = att.fileName;
             nameDiv.appendChild(nameSpan);
             attachBox.appendChild(nameDiv);
 
-            if (base64Data.length > 0) {
+            if (att.base64Data.length > 0) {
                 const downloadBtn = document.createElement('button');
                 downloadBtn.className = 'btn btn-outline';
                 downloadBtn.style.cssText = 'font-size: 11px; padding: 3px 8px; color: #2563eb; cursor: pointer; display: inline-flex; align-items: center; gap: 4px; border-radius: 4px;';
                 downloadBtn.innerHTML = '<i class="fa-solid fa-download"></i> Tải về';
-                downloadBtn.onclick = () => downloadAttachment(fileName, base64Data);
+                downloadBtn.onclick = () => downloadAttachment(att.fileName, att.base64Data);
                 attachBox.appendChild(downloadBtn);
             } else {
                 const errorSpan = document.createElement('span');

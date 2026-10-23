@@ -1,5 +1,7 @@
 package com.pbl4.mailserver.core;
 
+import com.pbl4.mailserver.config.ServerConfig;
+
 import java.text.SimpleDateFormat;
 import java.util.*;
 
@@ -27,23 +29,16 @@ public class MailService {
         String safeSubject = subject.replace('\r', ' ').replace('\n', ' ').trim();
         String[] recipientsArr = recipientsRaw.trim().split("[\\s,;]+");
         
-        Set<String> validRecipients = new LinkedHashSet<>();
-        int failCount = 0;
-
+        Set<String> allRecipients = new LinkedHashSet<>();
         for (String to : recipientsArr) {
             to = to.trim();
-            if (to.isEmpty()) continue;
-
-            String canonicalTo = UserStore.canonical(to);
-            if (canonicalTo != null && UserStore.exists(canonicalTo)) {
-                validRecipients.add(canonicalTo);
-            } else {
-                failCount++;
+            if (!to.isEmpty()) {
+                allRecipients.add(to);
             }
         }
 
-        if (validRecipients.isEmpty()) {
-            return new DeliveryResult(false, 0, failCount, "Gửi thư thất bại cho toàn bộ người nhận!");
+        if (allRecipients.isEmpty()) {
+            return new DeliveryResult(false, 0, 0, "Địa chỉ người nhận trống!");
         }
 
         String canonicalSender = UserStore.canonical(sender);
@@ -52,7 +47,7 @@ public class MailService {
         }
 
         String dateStr = new SimpleDateFormat("EEE, dd MMM yyyy HH:mm:ss Z", Locale.ENGLISH).format(new Date());
-        String fullToHeader = String.join(", ", validRecipients);
+        String fullToHeader = String.join(", ", allRecipients);
 
         String rawEmail = "From: " + canonicalSender + "\n" +
                          "To: " + fullToHeader + "\n" +
@@ -62,7 +57,7 @@ public class MailService {
                          "Content-Type: text/plain; charset=UTF-8\n\n" +
                          body;
 
-        return deliverRaw(canonicalSender, validRecipients, rawEmail);
+        return deliverRaw(canonicalSender, allRecipients, rawEmail);
     }
 
     public static DeliveryResult deliverRaw(String sender, Set<String> recipients, String rawMessage) {
@@ -75,45 +70,65 @@ public class MailService {
             canonicalSender = sender.toLowerCase(Locale.ROOT);
         }
 
-        Set<String> validRecipients = new LinkedHashSet<>();
+        Set<String> localRecipients = new LinkedHashSet<>();
+        Set<String> externalRecipients = new LinkedHashSet<>();
         int failCount = 0;
 
         for (String rcpt : recipients) {
             if (rcpt == null || rcpt.trim().isEmpty()) continue;
-            String canonicalRcpt = UserStore.canonical(rcpt.trim());
-            if (canonicalRcpt != null && UserStore.exists(canonicalRcpt)) {
-                validRecipients.add(canonicalRcpt);
+            String cleanRcpt = rcpt.trim().toLowerCase(Locale.ROOT);
+
+            if (isLocalDomain(cleanRcpt)) {
+                String canonicalRcpt = UserStore.canonical(cleanRcpt);
+                if (canonicalRcpt != null && UserStore.exists(canonicalRcpt)) {
+                    localRecipients.add(canonicalRcpt);
+                } else {
+                    failCount++;
+                }
             } else {
-                failCount++;
+                externalRecipients.add(cleanRcpt);
             }
         }
 
-        if (validRecipients.isEmpty()) {
-            return new DeliveryResult(false, 0, failCount, "Gửi thư thất bại cho toàn bộ người nhận!");
-        }
+        int successTotal = 0;
+        int failTotal = failCount;
+        List<String> messages = new ArrayList<>();
 
-        int successCount = 0;
-        for (String canonicalTo : validRecipients) {
-            boolean savedRecipient = MailStorageEngine.saveEmail(canonicalTo, rawMessage);
-            if (savedRecipient) {
-                successCount++;
-            } else {
-                failCount++;
+        if (!localRecipients.isEmpty()) {
+            int localSuccess = 0;
+            for (String canonicalTo : localRecipients) {
+                boolean savedRecipient = MailStorageEngine.saveEmail(canonicalTo, rawMessage);
+                if (savedRecipient) {
+                    localSuccess++;
+                } else {
+                    failTotal++;
+                }
+            }
+            if (localSuccess > 0) {
+                successTotal += localSuccess;
+                messages.add("Đã lưu nội bộ cho " + localSuccess + " người nhận");
             }
         }
 
-        if (successCount > 0) {
-            boolean savedSent = MailStorageEngine.saveEmail(canonicalSender + "_sent", rawMessage);
-            if (!savedSent) {
-                System.err.println("[MAIL SERVICE] Không thể lưu bản sao _sent cho người gửi: " + canonicalSender);
-            }
+        if (!externalRecipients.isEmpty()) {
+            DeliveryResult extResult = OutboundMailService.send(canonicalSender, externalRecipients, rawMessage);
+            successTotal += extResult.successCount;
+            failTotal += extResult.failCount;
+            messages.add(extResult.message);
+        }
 
-            String msg = "Đã gửi thư thành công tới " + successCount + " người nhận!";
-            if (failCount > 0) msg += " (" + failCount + " người nhận thất bại)";
-            return new DeliveryResult(true, successCount, failCount, msg);
+        if (successTotal > 0) {
+            MailStorageEngine.saveEmail(canonicalSender + "_sent", rawMessage);
+            return new DeliveryResult(true, successTotal, failTotal, String.join(" | ", messages));
         } else {
-            return new DeliveryResult(false, 0, failCount, "Gửi thư thất bại (Người nhận có thể đã vượt quá Quota dung lượng)!");
+            return new DeliveryResult(false, 0, failTotal, messages.isEmpty() ? "Gửi thư thất bại!" : String.join(" | ", messages));
         }
+    }
+
+    private static boolean isLocalDomain(String email) {
+        if (!email.contains("@")) return true;
+        String domain = email.substring(email.indexOf('@') + 1).trim();
+        return domain.equalsIgnoreCase(ServerConfig.MAIL_DOMAIN) || domain.equalsIgnoreCase("localhost");
     }
 
     public static List<String> listInbox(String username) {

@@ -19,6 +19,7 @@ import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.LinkedHashSet;
+import java.util.Locale;
 import java.util.Set;
 
 public class SmtpHandler implements Runnable {
@@ -67,7 +68,7 @@ public class SmtpHandler implements Runnable {
                             if (result.success) {
                                 sendResponse(out, "250 OK: Message accepted for delivery");
                             } else {
-                                sendResponse(out, "451 Requested action aborted: local error");
+                                sendResponse(out, "451 Requested action aborted: " + result.message);
                             }
                         }
                         recipients.clear();
@@ -233,12 +234,22 @@ public class SmtpHandler implements Runnable {
                         continue;
                     }
 
-                    String candidate = parseAddress(line);
-                    String canonicalRecipient = UserStore.canonical(candidate);
-                    if (candidate.isEmpty() || canonicalRecipient == null || !UserStore.exists(canonicalRecipient)) {
-                        sendResponse(out, "550 5.1.1 No such user here");
+                    String candidate = parseAddress(line).toLowerCase(Locale.ROOT);
+                    if (candidate.isEmpty()) {
+                        sendResponse(out, "501 5.1.3 Bad recipient address format");
+                        continue;
+                    }
+
+                    if (isLocalDomain(candidate)) {
+                        String canonicalRecipient = UserStore.canonical(candidate);
+                        if (canonicalRecipient == null || !UserStore.exists(canonicalRecipient)) {
+                            sendResponse(out, "550 5.1.1 No such local user");
+                        } else {
+                            recipients.add(canonicalRecipient);
+                            sendResponse(out, "250 OK");
+                        }
                     } else {
-                        recipients.add(canonicalRecipient);
+                        recipients.add(candidate);
                         sendResponse(out, "250 OK");
                     }
                 } 
@@ -292,6 +303,12 @@ public class SmtpHandler implements Runnable {
                 clientSocket.close();
             } catch (Exception ignored) {}
         }
+    }
+
+    private boolean isLocalDomain(String email) {
+        if (!email.contains("@")) return true;
+        String domain = email.substring(email.indexOf('@') + 1).trim();
+        return domain.equalsIgnoreCase(ServerConfig.MAIL_DOMAIN) || domain.equalsIgnoreCase("localhost");
     }
 
     private String authenticateUser(String clientIp, String username, String password) {

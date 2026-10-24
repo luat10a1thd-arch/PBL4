@@ -3,7 +3,12 @@ package com.pbl4.mailserver.core;
 import com.pbl4.mailserver.config.ServerConfig;
 
 import java.text.SimpleDateFormat;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Date;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Locale;
+import java.util.Set;
 
 public class MailService {
 
@@ -110,9 +115,6 @@ public class MailService {
             }
         }
 
-        // Lưu bản sao thư đã gửi đồng bộ ngay lập tức
-        MailStorageEngine.saveEmail(canonicalSender + "_sent", rawMessage);
-
         if (!externalRecipients.isEmpty()) {
             boolean enqueued = OutboundQueue.enqueue(canonicalSender, externalRecipients, rawMessage);
             if (enqueued) {
@@ -125,6 +127,7 @@ public class MailService {
         }
 
         if (successTotal > 0) {
+            MailStorageEngine.saveEmail(canonicalSender + "_sent", rawMessage);
             return new DeliveryResult(true, successTotal, failTotal, String.join(" | ", messages));
         } else {
             return new DeliveryResult(false, 0, failTotal, messages.isEmpty() ? "Gửi thư thất bại!" : String.join(" | ", messages));

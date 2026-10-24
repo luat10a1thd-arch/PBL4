@@ -4,6 +4,13 @@ let currentSelectedMail = null;
 let confirmCallback = null;
 let loadedMailsCache = [];
 
+let currentPage = 1;
+const PAGE_LIMIT = 30;
+let totalMailCount = 0;
+let currentRequestId = 0;
+
+let sseSource = null;
+
 document.addEventListener('DOMContentLoaded', () => {
     const currentUser = localStorage.getItem('currentUser');
     const token = localStorage.getItem('authToken');
@@ -20,7 +27,52 @@ document.addEventListener('DOMContentLoaded', () => {
 
     loadInbox();
     updateStorageUsage();
+    
+    // KÍCH HOẠT LẮNG NGHE REALTIME SSE KHI VỪA VÀO TRANG
+    startRealtimeListener();
 });
+
+function startRealtimeListener() {
+    stopRealtimeListener();
+
+    const token = localStorage.getItem('authToken');
+    if (!token) return;
+
+    // Khởi tạo kết nối SSE tới Server
+    sseSource = new EventSource(`/api/mails/stream?token=${encodeURIComponent(token)}`);
+
+    // Lắng nghe sự kiện thông điệp chung
+    sseSource.onmessage = (event) => {
+        if (activeMailbox === 'inbox') {
+            refreshMails();
+        }
+    };
+
+    // Lắng nghe sự kiện 'new_mail' cụ thể từ SseManager trên Java Server
+    sseSource.addEventListener('new_mail', (event) => {
+        try {
+            const data = JSON.parse(event.data);
+            showToast(`Bạn có email mới từ: ${escapeHtml(data.sender || 'Người gửi')}`, 'success');
+        } catch (e) {
+            showToast('Bạn có email mới!', 'success');
+        }
+
+        if (activeMailbox === 'inbox') {
+            refreshMails();
+        }
+    });
+
+    sseSource.onerror = () => {
+        // Trình duyệt tự động Reconnect khi gián đoạn mạng
+    };
+}
+
+function stopRealtimeListener() {
+    if (sseSource) {
+        sseSource.close();
+        sseSource = null;
+    }
+}
 
 function showToast(message, type = 'success') {
     const container = document.getElementById('toast-container');
@@ -234,27 +286,11 @@ async function loadInbox(event) {
     updateActiveNav('nav-inbox', 'Hộp thư đến');
     resetEmailDetail();
 
-    const token = localStorage.getItem('authToken');
+    currentPage = 1;
+    loadedMailsCache = [];
+    currentRequestId++;
 
-    try {
-        const response = await fetch('/api/mails/inbox', {
-            method: 'GET',
-            headers: {
-                'Authorization': 'Bearer ' + token
-            }
-        });
-
-        if (response.status === 401) {
-            logout();
-            return;
-        }
-
-        const mails = await response.json();
-        loadedMailsCache = mails || [];
-        renderEmailList(loadedMailsCache);
-    } catch (err) {
-        console.error('Không thể tải hộp thư đến');
-    }
+    await fetchMailsPaged(currentRequestId, false);
 }
 
 async function loadSentMail(event) {
@@ -264,10 +300,19 @@ async function loadSentMail(event) {
     updateActiveNav('nav-sent', 'Thư đã gửi');
     resetEmailDetail();
 
+    currentPage = 1;
+    loadedMailsCache = [];
+    currentRequestId++;
+
+    await fetchMailsPaged(currentRequestId, false);
+}
+
+async function fetchMailsPaged(requestId, isAppend = false) {
     const token = localStorage.getItem('authToken');
+    const endpoint = activeMailbox === 'sent' ? '/api/mails/sent' : '/api/mails/inbox';
 
     try {
-        const response = await fetch('/api/mails/sent', {
+        const response = await fetch(`${endpoint}?page=${currentPage}&limit=${PAGE_LIMIT}`, {
             method: 'GET',
             headers: {
                 'Authorization': 'Bearer ' + token
@@ -279,12 +324,41 @@ async function loadSentMail(event) {
             return;
         }
 
+        if (requestId !== currentRequestId) {
+            return;
+        }
+
+        const totalHeader = response.headers.get('X-Total-Count');
+        if (totalHeader !== null) {
+            totalMailCount = IntegerParseSafe(totalHeader);
+        }
+
         const mails = await response.json();
-        loadedMailsCache = mails || [];
+        const newMails = mails || [];
+
+        if (isAppend) {
+            loadedMailsCache = loadedMailsCache.concat(newMails);
+        } else {
+            loadedMailsCache = newMails;
+        }
+
         renderEmailList(loadedMailsCache);
     } catch (err) {
-        console.error('Không thể tải thư đã gửi');
+        console.error('Không thể tải danh sách thư:', err);
     }
+}
+
+function IntegerParseSafe(str) {
+    try {
+        return parseInt(str, 10) || 0;
+    } catch (e) {
+        return 0;
+    }
+}
+
+async function loadMoreMails() {
+    currentPage++;
+    await fetchMailsPaged(currentRequestId, true);
 }
 
 function renderEmailList(mails) {
@@ -300,9 +374,7 @@ function renderEmailList(mails) {
         return;
     }
 
-    const sortedMails = [...mails].reverse();
-
-    sortedMails.forEach(mail => {
+    mails.forEach(mail => {
         const item = document.createElement('div');
 
         item.className = 'email-item';
@@ -323,6 +395,21 @@ function renderEmailList(mails) {
 
         emailListDiv.appendChild(item);
     });
+
+    const remaining = totalMailCount - loadedMailsCache.length;
+    if (remaining > 0) {
+        const loadMoreBtnWrapper = document.createElement('div');
+        loadMoreBtnWrapper.style.cssText = 'padding: 15px; text-align: center;';
+
+        const loadMoreBtn = document.createElement('button');
+        loadMoreBtn.className = 'btn btn-outline';
+        loadMoreBtn.style.cssText = 'width: 100%; font-size: 13px; cursor: pointer;';
+        loadMoreBtn.innerHTML = `<i class="fa-solid fa-angles-down"></i> Tải thêm (${remaining} thư còn lại)`;
+        loadMoreBtn.onclick = () => loadMoreMails();
+
+        loadMoreBtnWrapper.appendChild(loadMoreBtn);
+        emailListDiv.appendChild(loadMoreBtnWrapper);
+    }
 }
 
 function filterMails() {
@@ -339,12 +426,10 @@ function filterMails() {
         const sender = (mail.sender || '').toLowerCase();
         const recipient = (mail.recipient || '').toLowerCase();
         const subject = (mail.subject || '').toLowerCase();
-        const body = (mail.body || '').toLowerCase();
 
         return sender.includes(keyword) ||
                recipient.includes(keyword) ||
-               subject.includes(keyword) ||
-               body.includes(keyword);
+               subject.includes(keyword);
     });
 
     renderEmailList(filtered);
@@ -641,6 +726,7 @@ function formatMailDate(value) {
 }
 
 async function logout() {
+    stopRealtimeListener();
     const token = localStorage.getItem('authToken');
 
     try {

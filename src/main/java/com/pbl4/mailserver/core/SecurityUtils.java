@@ -11,12 +11,16 @@ import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
 import java.security.spec.KeySpec;
 import java.util.Base64;
+import java.util.concurrent.ConcurrentHashMap;
 
 public class SecurityUtils {
 
     private static final String ALGORITHM = "AES/CBC/PKCS5Padding";
     private static final int KEY_SIZE = 256;
     private static final int ITERATION_COUNT = 65536;
+
+    // Cache kết quả sinh khóa deriveKey để tăng tốc độ giải mã/mã hóa lên nhiều lần
+    private static final ConcurrentHashMap<String, SecretKey> derivedKeyCache = new ConcurrentHashMap<>();
 
     public static String hashPassword(String plainPassword) {
         return BCrypt.hashpw(plainPassword, BCrypt.gensalt(10));
@@ -36,9 +40,18 @@ public class SecurityUtils {
     }
 
     public static SecretKey deriveKey(String secretKey, byte[] salt) throws Exception {
+        String cacheKey = secretKey + "|" + Base64.getEncoder().encodeToString(salt);
+        SecretKey cached = derivedKeyCache.get(cacheKey);
+        if (cached != null) {
+            return cached;
+        }
+
         SecretKeyFactory factory = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256");
         KeySpec spec = new PBEKeySpec(secretKey.toCharArray(), salt, ITERATION_COUNT, KEY_SIZE);
-        return new SecretKeySpec(factory.generateSecret(spec).getEncoded(), "AES");
+        SecretKey generatedKey = new SecretKeySpec(factory.generateSecret(spec).getEncoded(), "AES");
+
+        derivedKeyCache.put(cacheKey, generatedKey);
+        return generatedKey;
     }
 
     public static String encrypt(String plainText, String secretKey, byte[] userSalt) throws Exception {

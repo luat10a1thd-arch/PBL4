@@ -28,7 +28,7 @@ public class MailService {
 
         String safeSubject = subject.replace('\r', ' ').replace('\n', ' ').trim();
         String[] recipientsArr = recipientsRaw.trim().split("[\\s,;]+");
-        
+
         Set<String> allRecipients = new LinkedHashSet<>();
         for (String to : recipientsArr) {
             to = to.trim();
@@ -110,15 +110,21 @@ public class MailService {
             }
         }
 
+        // Lưu bản sao thư đã gửi đồng bộ ngay lập tức
+        MailStorageEngine.saveEmail(canonicalSender + "_sent", rawMessage);
+
         if (!externalRecipients.isEmpty()) {
-            DeliveryResult extResult = OutboundMailService.send(canonicalSender, externalRecipients, rawMessage);
-            successTotal += extResult.successCount;
-            failTotal += extResult.failCount;
-            messages.add(extResult.message);
+            boolean enqueued = OutboundQueue.enqueue(canonicalSender, externalRecipients, rawMessage);
+            if (enqueued) {
+                successTotal += externalRecipients.size();
+                messages.add("Thư gửi ra ngoài đã được xếp hàng (" + externalRecipients.size() + " người nhận)");
+            } else {
+                failTotal += externalRecipients.size();
+                messages.add("Hàng đợi gửi thư ra ngoài đã đầy, vui lòng thử lại sau!");
+            }
         }
 
         if (successTotal > 0) {
-            MailStorageEngine.saveEmail(canonicalSender + "_sent", rawMessage);
             return new DeliveryResult(true, successTotal, failTotal, String.join(" | ", messages));
         } else {
             return new DeliveryResult(false, 0, failTotal, messages.isEmpty() ? "Gửi thư thất bại!" : String.join(" | ", messages));

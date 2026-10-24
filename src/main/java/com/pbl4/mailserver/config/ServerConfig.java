@@ -32,11 +32,25 @@ public class ServerConfig {
     public static final String OUTBOUND_SMTP_USER = System.getenv().getOrDefault("PBL4_OUTBOUND_SMTP_USER", "");
     public static final String OUTBOUND_SMTP_PASS = System.getenv().getOrDefault("PBL4_OUTBOUND_SMTP_PASS", "");
     public static final String MAIL_DOMAIN = System.getenv().getOrDefault("PBL4_MAIL_DOMAIN", "pbl4.com");
+    public static final boolean OUTBOUND_TRUST_ALL = Boolean.parseBoolean(System.getenv().getOrDefault("PBL4_OUTBOUND_TRUST_ALL", "false"));
+
+    public static final int HTTP_WORKER_THREADS = getHttpThreadsConfig();
+
+    private static int getHttpThreadsConfig() {
+        String env = System.getenv("PBL4_HTTP_THREADS");
+        if (env != null) {
+            try {
+                int val = Integer.parseInt(env.trim());
+                if (val >= 1 && val <= 1024) return val;
+            } catch (NumberFormatException ignored) {}
+        }
+        return Math.max(16, Runtime.getRuntime().availableProcessors() * 4);
+    }
 
     private static String getSecretKeyEnv() {
         String key = System.getenv("PBL4_SECRET_KEY");
         if (key == null || key.trim().isEmpty()) {
-            System.err.println("[WARNING] PBL4_SECRET_KEY is not set. Using fallback development key!");
+            System.err.println("[WARNING] PBL4_SECRET_KEY chưa được thiết lập. Dùng khóa mặc định phát triển!");
             return "dev-only-fallback-key-DO-NOT-USE-IN-PRODUCTION";
         }
         return key.trim();

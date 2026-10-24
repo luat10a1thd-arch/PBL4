@@ -1,8 +1,9 @@
 package com.pbl4.mailserver.core;
 
 import com.pbl4.mailserver.config.ServerConfig;
-
+import java.io.IOException;
 import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLParameters;
 import javax.net.ssl.SSLSocket;
 import javax.net.ssl.SSLSocketFactory;
 import javax.net.ssl.TrustManager;
@@ -11,6 +12,7 @@ import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.io.OutputStreamWriter;
 import java.io.PrintWriter;
+import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.security.cert.X509Certificate;
@@ -19,10 +21,14 @@ import java.util.Base64;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
-public class OutboundMailService {
+public class OutboundMailService implements OutboundSender {
+
+    private static final OutboundMailService INSTANCE = new OutboundMailService();
+
+    public static OutboundMailService getInstance() {
+        return INSTANCE;
+    }
 
     private static class Attachment {
         String fileName;
@@ -34,7 +40,8 @@ public class OutboundMailService {
         }
     }
 
-    public static MailService.DeliveryResult send(String sender, Set<String> externalRecipients, String rawEmailContent) {
+    @Override
+    public MailService.DeliveryResult send(String sender, Set<String> externalRecipients, String rawEmailContent) {
         if (!ServerConfig.OUTBOUND_ENABLED) {
             return new MailService.DeliveryResult(false, 0, externalRecipients.size(), "Chức năng gửi thư ra Internet chưa được bật!");
         }
@@ -49,9 +56,13 @@ public class OutboundMailService {
         int successCount = 0;
         int failCount = 0;
 
+        long sessionStartTime = System.currentTimeMillis();
+        final long OVERALL_TIMEOUT_MS = 60000; // Hạn giờ tổng cho cả phiên gửi thư
+
         try {
-            socket = new Socket(ServerConfig.OUTBOUND_SMTP_HOST, ServerConfig.OUTBOUND_SMTP_PORT);
-            socket.setSoTimeout(15000);
+            socket = new Socket();
+            socket.connect(new InetSocketAddress(ServerConfig.OUTBOUND_SMTP_HOST, ServerConfig.OUTBOUND_SMTP_PORT), 5000); // 5s connect timeout
+            socket.setSoTimeout(15000); // 15s read timeout
 
             in = new BufferedReader(new InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8));
             out = new PrintWriter(new OutputStreamWriter(socket.getOutputStream(), StandardCharsets.UTF_8), true);
@@ -69,15 +80,27 @@ public class OutboundMailService {
                 return new MailService.DeliveryResult(false, 0, externalRecipients.size(), "SMTP Relay không hỗ trợ STARTTLS!");
             }
 
-            SSLContext sslContext = SSLContext.getInstance("TLS");
-            sslContext.init(null, new TrustManager[]{new X509TrustManager() {
-                public X509Certificate[] getAcceptedIssuers() { return null; }
-                public void checkClientTrusted(X509Certificate[] certs, String authType) {}
-                public void checkServerTrusted(X509Certificate[] certs, String authType) {}
-            }}, new java.security.SecureRandom());
+            SSLContext sslContext;
+            if (ServerConfig.OUTBOUND_TRUST_ALL) {
+                sslContext = SSLContext.getInstance("TLS");
+                sslContext.init(null, new TrustManager[]{new X509TrustManager() {
+                    public X509Certificate[] getAcceptedIssuers() { return null; }
+                    public void checkClientTrusted(X509Certificate[] certs, String authType) {}
+                    public void checkServerTrusted(X509Certificate[] certs, String authType) {}
+                }}, new java.security.SecureRandom());
+            } else {
+                sslContext = SSLContext.getDefault();
+            }
 
             SSLSocketFactory sf = sslContext.getSocketFactory();
             SSLSocket sslSocket = (SSLSocket) sf.createSocket(socket, ServerConfig.OUTBOUND_SMTP_HOST, ServerConfig.OUTBOUND_SMTP_PORT, true);
+
+            if (!ServerConfig.OUTBOUND_TRUST_ALL) {
+                SSLParameters sslParams = sslSocket.getSSLParameters();
+                sslParams.setEndpointIdentificationAlgorithm("HTTPS"); // Bật kiểm tra hostname chứng chỉ SSL
+                sslSocket.setSSLParameters(sslParams);
+            }
+
             sslSocket.startHandshake();
 
             in = new BufferedReader(new InputStreamReader(sslSocket.getInputStream(), StandardCharsets.UTF_8));
@@ -109,6 +132,9 @@ public class OutboundMailService {
 
             Set<String> acceptedRcpts = new java.util.LinkedHashSet<>();
             for (String rcpt : externalRecipients) {
+                if (System.currentTimeMillis() - sessionStartTime > OVERALL_TIMEOUT_MS) {
+                    throw new IOException("Quá hạn thời gian tổng phiên gửi thư ra ngoài");
+                }
                 sendCommand(out, "RCPT TO:<" + rcpt + ">");
                 String resp = in.readLine();
                 if (resp != null && resp.startsWith("250")) {
@@ -131,59 +157,82 @@ public class OutboundMailService {
             String safeSubject = extractSubject(rawEmailContent);
             String fullBody = extractBody(rawEmailContent);
 
+            // Phân tách tệp đính kèm không sử dụng Regex để tối ưu hiệu năng bộ nhớ
             String textPart = fullBody;
             List<Attachment> attachments = new ArrayList<>();
 
-            if (fullBody.contains("[ATTACHMENT:")) {
-                int firstAttachIdx = fullBody.indexOf("[ATTACHMENT:");
-                textPart = fullBody.substring(0, firstAttachIdx).trim();
+            int attachIdx = fullBody.indexOf("[ATTACHMENT:");
+            if (attachIdx != -1) {
+                textPart = fullBody.substring(0, attachIdx).trim();
 
-                Pattern attachPattern = Pattern.compile("\\[ATTACHMENT:([^\\]\\r\\n]+)\\](?:data:[^;]+;base64,)?([A-Za-z0-9+/=\\s]+)\\[/ATTACHMENT\\]");
-                Matcher matcher = attachPattern.matcher(fullBody);
+                int curr = attachIdx;
+                while (curr != -1) {
+                    int nameEnd = fullBody.indexOf("]", curr);
+                    int endTag = fullBody.indexOf("[/ATTACHMENT]", curr);
 
-                while (matcher.find()) {
-                    String fileName = matcher.group(1).trim();
-                    String b64Data = matcher.group(2).replaceAll("\\s+", "");
-                    attachments.add(new Attachment(fileName, b64Data));
+                    if (nameEnd != -1 && endTag != -1 && nameEnd < endTag) {
+                        String fileName = fullBody.substring(curr + 12, nameEnd).trim();
+                        String dataPart = fullBody.substring(nameEnd + 1, endTag).trim();
+
+                        if (dataPart.startsWith("data:")) {
+                            int comma = dataPart.indexOf(",");
+                            if (comma != -1) {
+                                dataPart = dataPart.substring(comma + 1).trim();
+                            }
+                        }
+
+                        StringBuilder cleanB64 = new StringBuilder();
+                        for (int k = 0; k < dataPart.length(); k++) {
+                            char c = dataPart.charAt(k);
+                            if (!Character.isWhitespace(c)) {
+                                cleanB64.append(c);
+                            }
+                        }
+
+                        attachments.add(new Attachment(fileName, cleanB64.toString()));
+                        curr = fullBody.indexOf("[ATTACHMENT:", endTag);
+                    } else {
+                        break;
+                    }
                 }
             }
 
-            StringBuilder mimeMsg = new StringBuilder();
-            mimeMsg.append("From: ").append(outboundSender).append("\r\n");
-            mimeMsg.append("To: ").append(String.join(", ", acceptedRcpts)).append("\r\n");
-            mimeMsg.append("Subject: ").append(safeSubject).append("\r\n");
-            mimeMsg.append("MIME-Version: 1.0\r\n");
+            // Gửi từng phần trực tiếp ra Stream (Streaming)
+            out.print("From: " + outboundSender + "\r\n");
+            out.print("To: " + String.join(", ", acceptedRcpts) + "\r\n");
+            out.print("Subject: " + safeSubject + "\r\n");
+            out.print("MIME-Version: 1.0\r\n");
 
             if (attachments.isEmpty()) {
-                mimeMsg.append("Content-Type: text/plain; charset=UTF-8\r\n\r\n");
-                mimeMsg.append(textPart);
+                out.print("Content-Type: text/plain; charset=UTF-8\r\n\r\n");
+                streamTextWithDotStuffing(out, textPart);
             } else {
                 String boundary = "----=_Part_" + System.currentTimeMillis() + "_" + UUID.randomUUID().toString().substring(0, 8);
-                mimeMsg.append("Content-Type: multipart/mixed; boundary=\"").append(boundary).append("\"\r\n\r\n");
+                out.print("Content-Type: multipart/mixed; boundary=\"" + boundary + "\"\r\n\r\n");
 
-                mimeMsg.append("--").append(boundary).append("\r\n");
-                mimeMsg.append("Content-Type: text/plain; charset=UTF-8\r\n");
-                mimeMsg.append("Content-Transfer-Encoding: 8bit\r\n\r\n");
-                mimeMsg.append(textPart).append("\r\n\r\n");
+                out.print("--" + boundary + "\r\n");
+                out.print("Content-Type: text/plain; charset=UTF-8\r\n");
+                out.print("Content-Transfer-Encoding: 8bit\r\n\r\n");
+                streamTextWithDotStuffing(out, textPart);
+                out.print("\r\n\r\n");
 
                 for (Attachment att : attachments) {
-                    mimeMsg.append("--").append(boundary).append("\r\n");
-                    mimeMsg.append("Content-Type: application/octet-stream; name=\"").append(att.fileName).append("\"\r\n");
-                    mimeMsg.append("Content-Transfer-Encoding: base64\r\n");
-                    mimeMsg.append("Content-Disposition: attachment; filename=\"").append(att.fileName).append("\"\r\n\r\n");
+                    out.print("--" + boundary + "\r\n");
+                    out.print("Content-Type: application/octet-stream; name=\"" + att.fileName + "\"\r\n");
+                    out.print("Content-Transfer-Encoding: base64\r\n");
+                    out.print("Content-Disposition: attachment; filename=\"" + att.fileName + "\"\r\n\r\n");
 
-                    String cleanB64 = att.base64Data;
-                    for (int i = 0; i < cleanB64.length(); i += 76) {
-                        int end = Math.min(i + 76, cleanB64.length());
-                        mimeMsg.append(cleanB64.substring(i, end)).append("\r\n");
+                    String b64 = att.base64Data;
+                    for (int i = 0; i < b64.length(); i += 76) {
+                        int end = Math.min(i + 76, b64.length());
+                        out.print(b64.substring(i, end) + "\r\n");
                     }
-                    mimeMsg.append("\r\n");
+                    out.print("\r\n");
                 }
 
-                mimeMsg.append("--").append(boundary).append("--");
+                out.print("--" + boundary + "--");
             }
 
-            out.print(mimeMsg.toString());
             out.print("\r\n.\r\n");
             out.flush();
 
@@ -205,6 +254,22 @@ public class OutboundMailService {
             return new MailService.DeliveryResult(false, 0, externalRecipients.size(), "Lỗi kết nối Outbound: " + e.getMessage());
         } finally {
             try { if (socket != null) socket.close(); } catch (Exception ignored) {}
+        }
+    }
+
+    private static void streamTextWithDotStuffing(PrintWriter out, String text) {
+        if (text == null) return;
+        String[] lines = text.replace("\r\n", "\n").replace('\r', '\n').split("\n", -1);
+        for (int i = 0; i < lines.length; i++) {
+            String line = lines[i];
+            if (line.startsWith(".")) {
+                out.print("." + line);
+            } else {
+                out.print(line);
+            }
+            if (i < lines.length - 1) {
+                out.print("\r\n");
+            }
         }
     }
 

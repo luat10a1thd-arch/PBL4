@@ -25,12 +25,16 @@ public class UserStore {
 
     private static final String USERS_FILE_PATH = "data/users.json";
     private static final ConcurrentHashMap<String, User> userMap = new ConcurrentHashMap<>();
-    private static boolean isLoaded = false;
+    private static volatile boolean isLoaded = false;
 
-    private static synchronized void ensureLoaded() {
+    private static void ensureLoaded() {
         if (!isLoaded) {
-            loadUsersFromFile();
-            isLoaded = true;
+            synchronized (UserStore.class) {
+                if (!isLoaded) {
+                    loadUsersFromFile();
+                    isLoaded = true;
+                }
+            }
         }
     }
 
@@ -47,7 +51,7 @@ public class UserStore {
     public static String canonical(String name) {
         if (name == null || name.trim().isEmpty()) return null;
         ensureLoaded();
-        
+
         String cleanName = name.trim();
         boolean isSent = cleanName.endsWith("_sent");
         if (isSent) {
@@ -91,14 +95,14 @@ public class UserStore {
             }
 
             if (parsedCount == 0 && file.length() > 0) {
-                throw new IllegalStateException("Error parsing users.json data");
+                throw new IllegalStateException("Lỗi khi đọc dữ liệu users.json");
             }
 
             if (dirty) {
                 saveUsersToFile();
             }
         } catch (Exception e) {
-            System.err.println("[USERSTORE] Error loading users.json: " + e.getMessage());
+            System.err.println("[USERSTORE] Lỗi nạp dữ liệu users.json: " + e.getMessage());
         }
     }
 
@@ -137,7 +141,7 @@ public class UserStore {
 
             Files.write(tmp, sb.toString().getBytes(StandardCharsets.UTF_8));
             setFilePermissions(tmp, false);
-            
+
             try {
                 Files.move(tmp, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
             } catch (IOException e) {
@@ -145,14 +149,14 @@ public class UserStore {
             }
             setFilePermissions(target, false);
         } catch (Exception e) {
-            System.err.println("[USERSTORE] Error saving users.json: " + e.getMessage());
+            System.err.println("[USERSTORE] Lỗi ghi dữ liệu users.json: " + e.getMessage());
         }
     }
 
     private static void setFilePermissions(Path path, boolean isDir) {
         try {
             if (FileSystems.getDefault().supportedFileAttributeViews().contains("posix")) {
-                Set<PosixFilePermission> perms = isDir 
+                Set<PosixFilePermission> perms = isDir
                     ? PosixFilePermissions.fromString("rwx------")
                     : PosixFilePermissions.fromString("rw-------");
                 Files.setPosixFilePermissions(path, perms);
@@ -196,7 +200,7 @@ public class UserStore {
         byte[] saltBytes = SecurityUtils.generateSalt();
         String saltBase64 = Base64.getEncoder().encodeToString(saltBytes);
         String role = "admin@pbl4.com".equalsIgnoreCase(username) ? "ADMIN" : "USER";
-        
+
         User user = new User(username.trim(), passwordHash, saltBase64, "ACTIVE", role);
         userMap.put(key, user);
         saveUsersToFile();
@@ -207,7 +211,7 @@ public class UserStore {
         byte[] saltBytes = SecurityUtils.generateSalt();
         String saltBase64 = Base64.getEncoder().encodeToString(saltBytes);
         String role = "admin@pbl4.com".equalsIgnoreCase(username) ? "ADMIN" : "USER";
-        
+
         addUser(username, passwordHash, saltBase64, "ACTIVE", role);
     }
 
@@ -252,7 +256,7 @@ public class UserStore {
             u.setUsername(extractField(objStr, "username"));
             u.setPasswordHash(extractField(objStr, "passwordHash"));
             u.setSalt(extractField(objStr, "salt"));
-            
+
             String status = extractField(objStr, "status");
             u.setStatus(status != null ? status : "ACTIVE");
 

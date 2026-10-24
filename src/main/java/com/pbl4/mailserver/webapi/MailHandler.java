@@ -27,6 +27,16 @@ public class MailHandler implements HttpHandler {
             return;
         }
 
+        String path = exchange.getRequestURI().getPath();
+        String method = exchange.getRequestMethod();
+
+        // 1. DÀNH RIÊNG CHO LUỒNG SSE REALTIME (Không dùng Auth Header thông thường)
+        if ("GET".equalsIgnoreCase(method) && path.endsWith("/stream")) {
+            handleSseStream(exchange);
+            return;
+        }
+
+        // 2. XÁC THỰC USER CHO CÁC API THÔNG THƯỜNG
         String authHeader = exchange.getRequestHeaders().getFirst("Authorization");
         String token = (authHeader != null && authHeader.startsWith("Bearer "))
                 ? authHeader.substring(7) : null;
@@ -36,9 +46,6 @@ public class MailHandler implements HttpHandler {
             sendResponse(exchange, 401, "{\"success\": false, \"message\": \"Chưa đăng nhập hoặc phiên hết hạn!\"}");
             return;
         }
-
-        String path = exchange.getRequestURI().getPath();
-        String method = exchange.getRequestMethod();
 
         if ("POST".equalsIgnoreCase(method) && path.endsWith("/send")) {
             handleSendMail(exchange, authedUser);
@@ -57,6 +64,45 @@ public class MailHandler implements HttpHandler {
         }
     }
 
+    private void handleSseStream(HttpExchange exchange) throws IOException {
+        String query = exchange.getRequestURI().getQuery();
+        String token = null;
+
+        if (query != null) {
+            for (String param : query.split("&")) {
+                String[] pair = param.split("=");
+                if (pair.length > 1 && "token".equalsIgnoreCase(pair[0])) {
+                    token = java.net.URLDecoder.decode(pair[1], StandardCharsets.UTF_8);
+                }
+            }
+        }
+
+        String username = SessionManager.validate(token);
+        if (username == null) {
+            sendResponse(exchange, 401, "{\"success\": false, \"message\": \"Token không hợp lệ!\"}");
+            return;
+        }
+
+        exchange.getResponseHeaders().set("Content-Type", "text/event-stream; charset=UTF-8");
+        exchange.getResponseHeaders().set("Cache-Control", "no-cache");
+        exchange.getResponseHeaders().set("Connection", "keep-alive");
+        exchange.getResponseHeaders().set("Access-Control-Allow-Origin", "*");
+
+        exchange.sendResponseHeaders(200, 0); // Giữ luồng Chunked
+        OutputStream os = exchange.getResponseBody();
+
+        // Đăng ký client với SseManager (Lưu cả Username đầy đủ và Username sạch)
+        SseManager.register(username, exchange, os);
+        if (username.contains("@")) {
+            SseManager.register(username.split("@")[0], exchange, os);
+        }
+
+        try {
+            os.write(": connected\n\n".getBytes(StandardCharsets.UTF_8));
+            os.flush();
+        } catch (Exception ignored) {}
+    }
+
     private void handleSendMail(HttpExchange exchange, String from) throws IOException {
         String body = readBody(exchange);
         String rawTo = getParamValue(body, "to");
@@ -73,13 +119,45 @@ public class MailHandler implements HttpHandler {
     }
 
     private void handleGetInbox(HttpExchange exchange, String username) throws IOException {
-        List<MailStorageEngine.StoredMail> mails = MailStorageEngine.listMails(username);
-        sendResponse(exchange, 200, convertMailsToJson(mails, exchange.getRequestURI().getQuery()));
+        handleGetMailBoxPaged(exchange, username);
     }
 
     private void handleGetSent(HttpExchange exchange, String username) throws IOException {
-        List<MailStorageEngine.StoredMail> mails = MailStorageEngine.listMails(username + "_sent");
-        sendResponse(exchange, 200, convertMailsToJson(mails, exchange.getRequestURI().getQuery()));
+        handleGetMailBoxPaged(exchange, username + "_sent");
+    }
+
+    private void handleGetMailBoxPaged(HttpExchange exchange, String targetMailbox) throws IOException {
+        String query = exchange.getRequestURI().getQuery();
+        int page = 1;
+        int limit = 30;
+
+        if (query != null) {
+            for (String param : query.split("&")) {
+                String[] pair = param.split("=");
+                if (pair.length > 1) {
+                    try {
+                        if ("page".equalsIgnoreCase(pair[0])) {
+                            page = Integer.parseInt(pair[1]);
+                        }
+                        if ("limit".equalsIgnoreCase(pair[0])) {
+                            limit = Integer.parseInt(pair[1]);
+                        }
+                    } catch (NumberFormatException ignored) {}
+                }
+            }
+        }
+
+        if (page < 1) page = 1;
+        if (limit < 1) limit = 30;
+        if (limit > 100) limit = 100;
+
+        MailStorageEngine.MailPage mailPage = MailStorageEngine.listMailSummaries(targetMailbox, page, limit);
+
+        exchange.getResponseHeaders().set("X-Total-Count", String.valueOf(mailPage.total));
+        exchange.getResponseHeaders().set("Access-Control-Expose-Headers", "X-Total-Count");
+
+        String jsonArray = convertSummariesToJson(mailPage.mails);
+        sendResponse(exchange, 200, jsonArray);
     }
 
     private void handleGetMailDetail(HttpExchange exchange, String username) throws IOException {
@@ -145,44 +223,21 @@ public class MailHandler implements HttpHandler {
         sendResponse(exchange, 200, "{\"success\": true, \"message\": \"Đã xóa thư thành công!\"}");
     }
 
-    private String convertMailsToJson(List<MailStorageEngine.StoredMail> mails, String query) {
-        if (mails == null || mails.isEmpty()) return "[]";
-
-        int page = 1;
-        int limit = 50;
-        if (query != null) {
-            for (String param : query.split("&")) {
-                String[] pair = param.split("=");
-                if (pair.length > 1) {
-                    try {
-                        if ("page".equalsIgnoreCase(pair[0])) page = Math.max(1, Integer.parseInt(pair[1]));
-                        if ("limit".equalsIgnoreCase(pair[0])) limit = Math.max(1, Integer.parseInt(pair[1]));
-                    } catch (NumberFormatException ignored) {}
-                }
-            }
-        }
-
-        int start = (page - 1) * limit;
-        if (start >= mails.size()) return "[]";
-        int end = Math.min(start + limit, mails.size());
+    private String convertSummariesToJson(List<MailStorageEngine.MailSummary> summaries) {
+        if (summaries == null || summaries.isEmpty()) return "[]";
 
         StringBuilder sb = new StringBuilder("[");
-        for (int i = start; i < end; i++) {
-            MailStorageEngine.StoredMail storedMail = mails.get(i);
-            if (storedMail.content == null) continue;
-
-            ParsedMail parsed = parseRawEmail(storedMail.content);
-
+        for (int i = 0; i < summaries.size(); i++) {
+            MailStorageEngine.MailSummary summary = summaries.get(i);
             sb.append("{")
-              .append("\"id\":\"").append(escapeJson(storedMail.id)).append("\",")
-              .append("\"sender\":\"").append(escapeJson(parsed.from)).append("\",")
-              .append("\"recipient\":\"").append(escapeJson(parsed.to)).append("\",")
-              .append("\"subject\":\"").append(escapeJson(parsed.subject)).append("\",")
-              .append("\"timestamp\":\"").append(escapeJson(parsed.date)).append("\",")
-              .append("\"body\":\"").append(escapeJson(parsed.body)).append("\"")
+              .append("\"id\":\"").append(escapeJson(summary.id)).append("\",")
+              .append("\"sender\":\"").append(escapeJson(summary.sender)).append("\",")
+              .append("\"recipient\":\"").append(escapeJson(summary.recipient)).append("\",")
+              .append("\"subject\":\"").append(escapeJson(summary.subject)).append("\",")
+              .append("\"timestamp\":\"").append(escapeJson(summary.timestamp)).append("\"")
               .append("}");
 
-            if (i < end - 1) sb.append(",");
+            if (i < summaries.size() - 1) sb.append(",");
         }
         sb.append("]");
         return sb.toString();

@@ -8,10 +8,8 @@ import com.pbl4.mailserver.core.UserStore;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 
-import java.io.BufferedReader;
 import java.io.File;
 import java.io.IOException;
-import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.Locale;
@@ -47,9 +45,7 @@ public class AuthHandler implements HttpHandler {
 
     @Override
     public void handle(HttpExchange exchange) throws IOException {
-        exchange.getResponseHeaders().add("Access-Control-Allow-Origin", "*");
-        exchange.getResponseHeaders().add("Access-Control-Allow-Methods", "POST, OPTIONS");
-        exchange.getResponseHeaders().add("Access-Control-Allow-Headers", "Content-Type, Authorization");
+        // CORS do CorsHandlerWrapper đặt một lần duy nhất, không thêm header CORS ở đây
 
         if ("OPTIONS".equalsIgnoreCase(exchange.getRequestMethod())) {
             exchange.sendResponseHeaders(204, -1);
@@ -64,15 +60,17 @@ public class AuthHandler implements HttpHandler {
         }
 
         if ("POST".equalsIgnoreCase(exchange.getRequestMethod())) {
-            InputStreamReader isr = new InputStreamReader(exchange.getRequestBody(), StandardCharsets.UTF_8);
-            BufferedReader br = new BufferedReader(isr);
-            StringBuilder formData = new StringBuilder();
-            String line;
-            while ((line = br.readLine()) != null) {
-                formData.append(line);
+            boolean isRegister = path.endsWith("/register");
+            boolean isLogin = path.endsWith("/login");
+            if (!isRegister && !isLogin) {
+                sendResponse(exchange, 404, "{\"success\": false, \"message\": \"Endpoint không tồn tại!\"}");
+                return;
             }
 
-            String body = formData.toString();
+            // Giới hạn body 4KB + timeout đọc (vượt => 413/408)
+            String body = ApiServer.readBodyOrReply(exchange, ServerConfig.MAX_BODY_AUTH_BYTES, ServerConfig.BODY_READ_TOTAL_TIMEOUT_SMALL_MS);
+            if (body == null) return;
+
             String username = getParamValue(body, "username");
             String password = getParamValue(body, "password");
 
@@ -83,12 +81,10 @@ public class AuthHandler implements HttpHandler {
 
             username = username.trim().toLowerCase(Locale.ROOT);
 
-            if (path.endsWith("/register")) {
+            if (isRegister) {
                 handleRegister(exchange, username, password);
-            } else if (path.endsWith("/login")) {
-                handleLogin(exchange, username, password);
             } else {
-                sendResponse(exchange, 404, "{\"success\": false, \"message\": \"Endpoint không tồn tại!\"}");
+                handleLogin(exchange, username, password);
             }
         } else {
             sendResponse(exchange, 405, "{\"success\": false, \"message\": \"Phương thức không được hỗ trợ!\"}");
@@ -105,6 +101,14 @@ public class AuthHandler implements HttpHandler {
     }
 
     private void handleRegister(HttpExchange exchange, String username, String password) throws IOException {
+        // Giới hạn số lần đăng ký theo IP (chống spam tạo tài khoản; băm mật khẩu rất tốn CPU)
+        String clientIp = exchange.getRemoteAddress().getAddress().getHostAddress();
+        if (LoginThrottle.isRegisterThrottled(clientIp)) {
+            sendResponse(exchange, 429, "{\"success\": false, \"message\": \"Bạn đăng ký quá nhiều lần. Vui lòng thử lại sau 15 phút!\"}");
+            return;
+        }
+        LoginThrottle.recordRegistration(clientIp);
+
         if (!SAFE_EMAIL_PATTERN.matcher(username).matches()) {
             sendResponse(exchange, 400, "{\"success\": false, \"message\": \"Tên tài khoản chứa ký tự không hợp lệ hoặc sai định dạng @pbl4.com!\"}");
             return;
@@ -177,26 +181,29 @@ public class AuthHandler implements HttpHandler {
             return;
         }
 
+        // Kiểm tra mật khẩu TRƯỚC: chỉ người biết đúng mật khẩu mới được biết tài khoản đang bị khóa
+        boolean isValid = SecurityUtils.checkPassword(password, storedHash);
+        if (!isValid) {
+            LoginThrottle.recordFailedAttempt(clientIp, username);
+            sendResponse(exchange, 401, "{\"success\": false, \"message\": \"Sai tài khoản hoặc mật khẩu!\"}");
+            return;
+        }
+
+        LoginThrottle.resetAttempts(clientIp, username);
+
         if (checkIsLocked(username)) {
             sendResponse(exchange, 403, "{\"success\": false, \"message\": \"Tài khoản của bạn đã bị Admin khóa!\"}");
             return;
         }
 
-        boolean isValid = SecurityUtils.checkPassword(password, storedHash);
-        if (isValid) {
-            LoginThrottle.resetAttempts(clientIp, username);
-            String token = SessionManager.createSession(username, password);
-            String role = ADMIN_EMAIL.equalsIgnoreCase(username) ? "ADMIN" : "USER";
+        String token = SessionManager.createSession(username);
+        String role = ADMIN_EMAIL.equalsIgnoreCase(username) ? "ADMIN" : "USER";
 
-            sendResponse(exchange, 200,
-                "{\"success\": true, \"message\": \"Đăng nhập thành công!\", " +
-                "\"username\": \"" + username + "\", " +
-                "\"token\": \"" + token + "\", " +
-                "\"role\": \"" + role + "\"}");
-        } else {
-            LoginThrottle.recordFailedAttempt(clientIp, username);
-            sendResponse(exchange, 401, "{\"success\": false, \"message\": \"Sai tài khoản hoặc mật khẩu!\"}");
-        }
+        sendResponse(exchange, 200,
+            "{\"success\": true, \"message\": \"Đăng nhập thành công!\", " +
+            "\"username\": \"" + username + "\", " +
+            "\"token\": \"" + token + "\", " +
+            "\"role\": \"" + role + "\"}");
     }
 
     private boolean checkIsLocked(String username) {

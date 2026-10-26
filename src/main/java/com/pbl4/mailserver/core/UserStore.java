@@ -14,8 +14,10 @@ import java.nio.file.attribute.PosixFilePermission;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Matcher;
@@ -23,9 +25,13 @@ import java.util.regex.Pattern;
 
 public class UserStore {
 
-    private static final String USERS_FILE_PATH = "data/users.json";
+    private static final String DEFAULT_USERS_FILE_PATH = "data/users.json";
+    // Đường dẫn file người dùng (mặc định data/users.json; chỉ test mới đổi qua resetForTest)
+    private static volatile String usersFilePath = DEFAULT_USERS_FILE_PATH;
     private static final ConcurrentHashMap<String, User> userMap = new ConcurrentHashMap<>();
     private static volatile boolean isLoaded = false;
+    // false khi users.json đang hỏng và chưa khôi phục được: tuyệt đối không chép nó đè lên bản .bak
+    private static volatile boolean mainFileTrusted = true;
 
     private static void ensureLoaded() {
         if (!isLoaded) {
@@ -39,13 +45,25 @@ public class UserStore {
     }
 
     public static synchronized void initDefaultUsers() {
+        // Ném lỗi (dừng khởi động) nếu users.json hỏng và không có bản .bak đọc được
         ensureLoaded();
-        if (!exists("admin@pbl4.com")) {
+        // Chỉ tạo admin mặc định khi chưa có người dùng nào (file chưa tồn tại hoặc rỗng hợp lệ)
+        if (userMap.isEmpty()) {
             byte[] salt = SecurityUtils.generateSalt();
             String saltBase64 = Base64.getEncoder().encodeToString(salt);
             String hash = SecurityUtils.hashPassword(ServerConfig.ADMIN_DEFAULT_PASS);
             addUser("admin@pbl4.com", hash, saltBase64, "ACTIVE", "ADMIN");
+        } else if (!exists("admin@pbl4.com")) {
+            System.err.println("[USERSTORE] CẢNH BÁO: users.json đã có người dùng nhưng không có admin@pbl4.com, KHÔNG tự tạo lại admin mặc định.");
         }
+    }
+
+    // Chỉ dùng cho test: trỏ UserStore sang file khác (null = về mặc định) và buộc nạp lại từ file đó
+    static synchronized void resetForTest(String path) {
+        usersFilePath = (path != null) ? path : DEFAULT_USERS_FILE_PATH;
+        userMap.clear();
+        mainFileTrusted = true;
+        isLoaded = false;
     }
 
     public static String canonical(String name) {
@@ -66,50 +84,124 @@ public class UserStore {
     }
 
     private static synchronized void loadUsersFromFile() {
-        userMap.clear();
-        File file = new File(USERS_FILE_PATH);
+        File file = new File(usersFilePath);
+        File backup = new File(usersFilePath + ".bak");
+
         if (!file.exists()) {
+            // Lần chạy đầu tiên (chưa có file): để trống, initDefaultUsers sẽ tạo admin mặc định
+            userMap.clear();
+            mainFileTrusted = true;
+            if (backup.exists()) {
+                System.err.println("[USERSTORE] CẢNH BÁO: không thấy users.json nhưng còn users.json.bak. Nếu đây không phải lần chạy đầu, hãy khôi phục từ file .bak trước khi chạy tiếp.");
+            }
             return;
         }
 
+        Map<String, User> loaded;
+        boolean recoveredFromBackup = false;
         try {
-            byte[] bytes = Files.readAllBytes(file.toPath());
-            String json = new String(bytes, StandardCharsets.UTF_8).trim();
-            if (json.isEmpty()) return;
-
-            Matcher m = Pattern.compile("\\{[^{}]*\\}").matcher(json);
-            int parsedCount = 0;
-            boolean dirty = false;
-
-            while (m.find()) {
-                User user = parseUserObject(m.group());
-                if (user != null && user.getUsername() != null && !user.getUsername().trim().isEmpty()) {
-                    parsedCount++;
-                    if (user.getSalt() == null || user.getSalt().trim().isEmpty()) {
-                        byte[] newSalt = SecurityUtils.generateSalt();
-                        user.setSalt(Base64.getEncoder().encodeToString(newSalt));
-                        dirty = true;
-                    }
-                    userMap.put(user.getUsername().toLowerCase(Locale.ROOT).trim(), user);
-                }
+            loaded = parseUsersFile(file);
+        } catch (Exception primaryError) {
+            System.err.println("[USERSTORE] users.json bị lỗi: " + primaryError.getMessage());
+            mainFileTrusted = false;
+            if (!backup.exists()) {
+                throw new IllegalStateException("users.json bị hỏng và không có users.json.bak để khôi phục. "
+                        + "Dừng khởi động để không ghi đè dữ liệu người dùng: " + primaryError.getMessage(), primaryError);
             }
-
-            if (parsedCount == 0 && file.length() > 0) {
-                throw new IllegalStateException("Lỗi khi đọc dữ liệu users.json");
+            try {
+                loaded = parseUsersFile(backup);
+                recoveredFromBackup = true;
+                System.err.println("[USERSTORE] Đã khôi phục " + loaded.size() + " người dùng từ users.json.bak");
+            } catch (Exception backupError) {
+                throw new IllegalStateException("Cả users.json lẫn users.json.bak đều không đọc được. "
+                        + "Dừng khởi động để không ghi đè dữ liệu người dùng: " + backupError.getMessage(), primaryError);
             }
+        }
 
-            if (dirty) {
-                saveUsersToFile();
+        userMap.clear();
+        userMap.putAll(loaded);
+
+        if (recoveredFromBackup) {
+            restoreMainFileFromBackup(file, backup);
+        } else {
+            mainFileTrusted = true;
+        }
+
+        boolean dirty = false;
+        for (User user : userMap.values()) {
+            if (user.getSalt() == null || user.getSalt().trim().isEmpty()) {
+                byte[] newSalt = SecurityUtils.generateSalt();
+                user.setSalt(Base64.getEncoder().encodeToString(newSalt));
+                dirty = true;
             }
+        }
+
+        if (dirty) {
+            saveUsersToFile();
+        }
+    }
+
+    // Đọc và kiểm tra một file users.json; ném lỗi nếu không phải mảng JSON hoàn chỉnh hoặc có bản ghi hỏng.
+    // File rỗng (chỉ có khoảng trắng) được coi là hợp lệ và không có người dùng nào.
+    private static Map<String, User> parseUsersFile(File file) throws IOException {
+        String json = new String(Files.readAllBytes(file.toPath()), StandardCharsets.UTF_8);
+        if (json.startsWith("\uFEFF")) {
+            json = json.substring(1); // bỏ BOM (Notepad trên Windows hay thêm)
+        }
+        json = json.trim();
+
+        Map<String, User> result = new LinkedHashMap<>();
+        if (json.isEmpty()) return result;
+
+        if (!json.startsWith("[") || !json.endsWith("]")) {
+            throw new IllegalStateException("Nội dung " + file.getName() + " không phải mảng JSON hoàn chỉnh (có thể bị cắt dở)");
+        }
+
+        int openBraces = 0;
+        int closeBraces = 0;
+        for (int i = 0; i < json.length(); i++) {
+            char c = json.charAt(i);
+            if (c == '{') openBraces++;
+            else if (c == '}') closeBraces++;
+        }
+
+        Matcher m = Pattern.compile("\\{[^{}]*\\}").matcher(json);
+        int objects = 0;
+        while (m.find()) {
+            objects++;
+            User user = parseUserObject(m.group());
+            if (user == null || user.getUsername() == null || user.getUsername().trim().isEmpty()) {
+                throw new IllegalStateException("Bản ghi người dùng thứ " + objects + " trong " + file.getName() + " không hợp lệ");
+            }
+            result.put(user.getUsername().toLowerCase(Locale.ROOT).trim(), user);
+        }
+
+        // Số cặp ngoặc không khớp số bản ghi đọc được => file bị cắt dở/hỏng, không được nạp một phần
+        if (openBraces != closeBraces || openBraces != objects) {
+            throw new IllegalStateException("Cấu trúc " + file.getName() + " bị hỏng (ngoặc không khớp)");
+        }
+        return result;
+    }
+
+    // Giữ lại file hỏng (đổi tên .corrupt-<thời gian>) rồi chép .bak thành users.json. KHÔNG đụng tới .bak.
+    private static void restoreMainFileFromBackup(File main, File backup) {
+        try {
+            Path corrupt = Paths.get(usersFilePath + ".corrupt-" + System.currentTimeMillis());
+            Files.move(main.toPath(), corrupt, StandardCopyOption.REPLACE_EXISTING);
+            Files.copy(backup.toPath(), main.toPath(), StandardCopyOption.REPLACE_EXISTING);
+            setFilePermissions(main.toPath(), false);
+            mainFileTrusted = true;
+            System.err.println("[USERSTORE] File hỏng được giữ lại tại " + corrupt.getFileName());
         } catch (Exception e) {
-            System.err.println("[USERSTORE] Lỗi nạp dữ liệu users.json: " + e.getMessage());
+            // Vẫn dùng dữ liệu trong RAM; mainFileTrusted=false để lần ghi sau không chép file hỏng đè lên .bak
+            System.err.println("[USERSTORE] Không khôi phục được users.json từ .bak: " + e.getMessage());
         }
     }
 
     private static synchronized void saveUsersToFile() {
         try {
-            File dataDir = new File("data");
-            if (!dataDir.exists()) {
+            File dataDir = new File(usersFilePath).getAbsoluteFile().getParentFile();
+            if (dataDir != null && !dataDir.exists()) {
                 dataDir.mkdirs();
                 setFilePermissions(dataDir.toPath(), true);
             }
@@ -130,11 +222,11 @@ public class UserStore {
             }
             sb.append("]");
 
-            Path target = Paths.get(USERS_FILE_PATH);
-            Path backup = Paths.get(USERS_FILE_PATH + ".bak");
-            Path tmp = Paths.get(USERS_FILE_PATH + ".tmp");
+            Path target = Paths.get(usersFilePath);
+            Path backup = Paths.get(usersFilePath + ".bak");
+            Path tmp = Paths.get(usersFilePath + ".tmp");
 
-            if (Files.exists(target)) {
+            if (Files.exists(target) && mainFileTrusted) {
                 Files.copy(target, backup, StandardCopyOption.REPLACE_EXISTING);
                 setFilePermissions(backup, false);
             }
@@ -148,6 +240,7 @@ public class UserStore {
                 Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING);
             }
             setFilePermissions(target, false);
+            mainFileTrusted = true;
         } catch (Exception e) {
             System.err.println("[USERSTORE] Lỗi ghi dữ liệu users.json: " + e.getMessage());
         }
@@ -233,16 +326,31 @@ public class UserStore {
         return false;
     }
 
-    public static synchronized boolean deleteUser(String username) {
+    public static boolean deleteUser(String username) {
         if (username == null) return false;
-        ensureLoaded();
-        String key = username.toLowerCase(Locale.ROOT).trim();
-        if (userMap.containsKey(key)) {
-            userMap.remove(key);
+        String storedName;
+        synchronized (UserStore.class) {
+            ensureLoaded();
+            String key = username.toLowerCase(Locale.ROOT).trim();
+            User removed = userMap.remove(key);
+            if (removed == null) {
+                return false;
+            }
+            storedName = removed.getUsername();
             saveUsersToFile();
-            return true;
         }
-        return false;
+
+        // Dọn index/cache/lock của hòm thư trong RAM NGOÀI monitor của UserStore (tránh bế tắc với lock hòm thư).
+        // Nhờ vậy đăng ký lại cùng tên không bị dính quota/danh sách thư của người dùng cũ.
+        MailStorageEngine.evictUser(key(username));
+        if (storedName != null && !storedName.trim().equalsIgnoreCase(username.trim())) {
+            MailStorageEngine.evictUser(storedName);
+        }
+        return true;
+    }
+
+    private static String key(String username) {
+        return username.trim();
     }
 
     public static synchronized List<User> getAllUsers() {

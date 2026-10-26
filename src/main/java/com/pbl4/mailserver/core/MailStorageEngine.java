@@ -9,18 +9,30 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.AtomicMoveNotSupportedException;
+import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.file.SimpleFileVisitor;
+import java.nio.file.StandardCopyOption;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.Comparator;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 public class MailStorageEngine {
@@ -61,6 +73,247 @@ public class MailStorageEngine {
         }
     }
 
+    // ---- PHẦN 1 ----
+    // Thông tin gọn của một thư (không giữ nội dung trong RAM) phục vụ POP3 STAT/LIST/UIDL
+    public static final class MailMeta {
+        public final String id;
+        public final long sizeBytes;
+
+        public MailMeta(String id, long sizeBytes) {
+            this.id = id;
+            this.sizeBytes = sizeBytes;
+        }
+    }
+
+    // Kết quả lưu thư: cho phép tầng SMTP/Web phân biệt "vượt quota" với các lỗi khác
+    public enum SaveResult { OK, NO_USER, OVER_QUOTA, ERROR }
+
+    // Index trong RAM của MỘT hòm thư: tổng dung lượng + danh sách tên file .enc đã sắp xếp tăng dần.
+    // Nạp lười bằng đúng một lần quét; sau đó chỉ được cập nhật khi lưu/xóa thư qua engine này.
+    // Mọi thao tác đều synchronized trên chính index (đoạn găng rất ngắn, không làm I/O ngoài lần quét đầu).
+    private static final class MailboxIndex {
+        private final ArrayList<String> names = new ArrayList<>();
+        private final HashMap<String, Long> sizes = new HashMap<>();
+        private final AtomicLong totalBytes = new AtomicLong();
+        private boolean loaded = false;
+
+        synchronized void ensureLoaded(Path dir) {
+            if (loaded) return;
+            names.clear();
+            sizes.clear();
+            long sum = 0;
+            File[] files = dir.toFile().listFiles((d, name) -> name.endsWith(".enc"));
+            if (files != null) {
+                for (File f : files) {
+                    long len = f.length();
+                    names.add(f.getName());
+                    sizes.put(f.getName(), len);
+                    sum += len;
+                }
+                Collections.sort(names);
+            }
+            totalBytes.set(sum);
+            loaded = true;
+        }
+
+        synchronized void reload(Path dir) {
+            loaded = false;
+            ensureLoaded(dir);
+        }
+
+        // Chưa nạp thì bỏ qua: lần quét đầu tiên sẽ thấy file mới trên đĩa
+        synchronized void add(String name, long size) {
+            if (!loaded) return;
+            Long old = sizes.put(name, size);
+            if (old == null) {
+                int n = names.size();
+                if (n == 0 || names.get(n - 1).compareTo(name) < 0) {
+                    names.add(name); // trường hợp thường gặp: tên mới luôn lớn nhất (timestamp tăng dần)
+                } else {
+                    int pos = Collections.binarySearch(names, name);
+                    names.add(pos >= 0 ? pos : -pos - 1, name);
+                }
+                totalBytes.addAndGet(size);
+            } else {
+                totalBytes.addAndGet(size - old);
+            }
+        }
+
+        synchronized void remove(String name) {
+            if (!loaded) return;
+            Long old = sizes.remove(name);
+            if (old != null) {
+                int pos = Collections.binarySearch(names, name);
+                if (pos >= 0) names.remove(pos);
+                totalBytes.addAndGet(-old);
+            }
+        }
+
+        synchronized boolean isEmpty() {
+            return names.isEmpty() && totalBytes.get() == 0;
+        }
+
+        synchronized int size() {
+            return names.size();
+        }
+
+        long totalBytes() {
+            return totalBytes.get();
+        }
+
+        synchronized List<String> snapshotAscending() {
+            return new ArrayList<>(names);
+        }
+
+        // Cắt một trang theo thứ tự GIẢM DẦN (mới nhất trước), total lấy cùng lúc để nhất quán
+        synchronized PageSlice sliceDescending(long start, int limit) {
+            int total = names.size();
+            List<String> out = new ArrayList<>();
+            if (start >= 0 && start < total) {
+                long end = Math.min(start + limit, (long) total);
+                for (long i = start; i < end; i++) {
+                    out.add(names.get(total - 1 - (int) i));
+                }
+            }
+            return new PageSlice(out, total);
+        }
+    }
+
+    private static final class PageSlice {
+        final List<String> names;
+        final int total;
+
+        PageSlice(List<String> names, int total) {
+            this.names = names;
+            this.total = total;
+        }
+    }
+
+    // LRU cache có giới hạn, khóa dạng "hòm thư|tên file". File .enc bất biến nên giá trị không bao giờ cũ.
+    private static final class LruCache<V> {
+        private final LinkedHashMap<String, V> map;
+
+        LruCache(int maxEntries) {
+            final int max = Math.max(16, maxEntries);
+            this.map = new LinkedHashMap<String, V>(256, 0.75f, true) {
+                @Override
+                protected boolean removeEldestEntry(Map.Entry<String, V> eldest) {
+                    return size() > max;
+                }
+            };
+        }
+
+        synchronized V get(String key) {
+            return map.get(key);
+        }
+
+        synchronized void put(String key, V value) {
+            map.put(key, value);
+        }
+
+        synchronized void remove(String key) {
+            map.remove(key);
+        }
+
+        synchronized void removeByPrefixIgnoreCase(String prefix) {
+            map.keySet().removeIf(k -> k.regionMatches(true, 0, prefix, 0, prefix.length()));
+        }
+
+        synchronized void clear() {
+            map.clear();
+        }
+    }
+
+    private static final ConcurrentHashMap<String, MailboxIndex> indexes = new ConcurrentHashMap<>();
+    private static final LruCache<MailSummary> SUMMARY_CACHE = new LruCache<>(ServerConfig.MAIL_SUMMARY_CACHE_MAX_ENTRIES);
+    private static final LruCache<Long> META_CACHE = new LruCache<>(ServerConfig.MAIL_META_CACHE_MAX_ENTRIES);
+    // Monitor theo người dùng để kiểm tra quota (inbox + sent) nguyên tử giữa hai hòm thư có hai lock khác nhau
+    private static final ConcurrentHashMap<String, Object> quotaMonitors = new ConcurrentHashMap<>();
+
+    // Chỉ dùng cho test: đổi thư mục gốc dữ liệu (mặc định lấy từ ServerConfig.BASE_DATA_DIR)
+    private static volatile Path baseDirOverride = null;
+
+    static void setBaseDirForTest(Path dir) {
+        baseDirOverride = dir;
+        indexes.clear();
+        SUMMARY_CACHE.clear();
+        META_CACHE.clear();
+        quotaMonitors.clear();
+    }
+
+    static boolean isWriteLockHeldByCurrentThread(String mailbox) {
+        return getLockForUser(mailbox).isWriteLockedByCurrentThread();
+    }
+
+    private static Path baseDir() {
+        Path override = baseDirOverride;
+        return (override != null ? override : Paths.get(ServerConfig.BASE_DATA_DIR)).toAbsolutePath().normalize();
+    }
+
+    private static String cacheKey(String mailbox, String fileName) {
+        return mailbox.trim() + "|" + fileName;
+    }
+
+    private static MailboxIndex loadedIndex(String mailbox) {
+        Path dir = mailboxDir(mailbox);
+        MailboxIndex idx = indexes.computeIfAbsent(mailbox.trim(), k -> new MailboxIndex());
+        idx.ensureLoaded(dir);
+        return idx;
+    }
+
+    // Quên toàn bộ index/cache của một hòm thư (gọi khi đang giữ write-lock của hòm thư đó)
+    private static void forgetMailbox(String mailbox) {
+        String key = mailbox.trim();
+        indexes.remove(key);
+        SUMMARY_CACHE.removeByPrefixIgnoreCase(key + "|");
+        META_CACHE.removeByPrefixIgnoreCase(key + "|");
+    }
+
+    private static Object quotaMonitor(String cleanUser) {
+        return quotaMonitors.computeIfAbsent(cleanUser.trim().toLowerCase(Locale.ROOT), k -> new Object());
+    }
+
+    // Quota tính theo inbox + sent cộng lại (khớp /storage-usage), cùng thước đo: kích thước file .enc
+    private static long usedBytesOfUser(String cleanUser) {
+        return loadedIndex(cleanUser).totalBytes() + loadedIndex(cleanUser + "_sent").totalBytes();
+    }
+
+    private static long maxQuotaBytes() {
+        try {
+            return Math.multiplyExact(ServerConfig.MAX_MAILBOX_QUOTA_MB, 1024L * 1024L);
+        } catch (ArithmeticException e) {
+            return Long.MAX_VALUE;
+        }
+    }
+
+    // Kích thước file .enc dự kiến: "Base64(iv 16B)" + ":" + "Base64(AES-CBC PKCS5)" (đúng với định dạng của SecurityUtils.encrypt)
+    private static long estimateEncryptedSize(long plainBytes) {
+        long cipherBytes = (plainBytes / 16 + 1) * 16;
+        return 24 + 1 + ((cipherBytes + 2) / 3) * 4;
+    }
+
+    // Số byte UTF-8 của chuỗi mà không phải cấp phát mảng byte (khớp String.getBytes(UTF_8))
+    private static long utf8Length(String s) {
+        long n = 0;
+        int len = s.length();
+        for (int i = 0; i < len; i++) {
+            char c = s.charAt(i);
+            if (c < 0x80) {
+                n += 1;
+            } else if (c < 0x800) {
+                n += 2;
+            } else if (Character.isHighSurrogate(c) && i + 1 < len && Character.isLowSurrogate(s.charAt(i + 1))) {
+                n += 4;
+                i++;
+            } else if (Character.isSurrogate(c)) {
+                n += 1; // surrogate lẻ được mã hóa thành '?'
+            } else {
+                n += 3;
+            }
+        }
+        return n;
+    }
+
     private static final ConcurrentHashMap<String, ReentrantReadWriteLock> userLocks = new ConcurrentHashMap<>();
 
     private static ReentrantReadWriteLock getLockForUser(String username) {
@@ -71,7 +324,7 @@ public class MailStorageEngine {
         if (username == null || username.trim().isEmpty()) {
             throw new IllegalArgumentException("Tên hòm thư không được để trống");
         }
-        Path base = Paths.get(ServerConfig.BASE_DATA_DIR).toAbsolutePath().normalize();
+        Path base = baseDir();
         Path dir = base.resolve(username.trim()).normalize();
         if (!dir.startsWith(base) || dir.equals(base)) {
             throw new IllegalArgumentException("Đường dẫn hòm thư không hợp lệ");
@@ -80,12 +333,18 @@ public class MailStorageEngine {
     }
 
     public static void initMailbox(String username) {
+        Path dirPath = mailboxDir(username);
+        // Đường nhanh: thư mục đã có thì không cần khóa (trước đây mỗi lần liệt kê đều giành write-lock)
+        if (Files.isDirectory(dirPath)) return;
+
         ReentrantReadWriteLock lock = getLockForUser(username);
         lock.writeLock().lock();
         try {
-            File dir = mailboxDir(username).toFile();
+            File dir = dirPath.toFile();
             if (!dir.exists()) {
                 dir.mkdirs();
+                // Thư mục vừa được tạo mới (đăng ký lại / bị xóa ngoài engine): bỏ index cũ nếu còn sót
+                forgetMailbox(username);
             }
         } finally {
             lock.writeLock().unlock();
@@ -110,128 +369,196 @@ public class MailStorageEngine {
         return Base64.getDecoder().decode(base64Salt);
     }
 
+    // Lấy từ bộ đếm trong RAM (O(1)); chỉ quét đĩa lần đầu tiên của mỗi hòm thư
     public static long getMailboxSizeInBytes(String username) {
-        ReentrantReadWriteLock lock = getLockForUser(username);
-        lock.readLock().lock();
-        try {
-            File folder = mailboxDir(username).toFile();
-            if (!folder.exists() || !folder.isDirectory()) return 0;
-
-            long totalSize = 0;
-            File[] files = folder.listFiles((dir, name) -> name.endsWith(".enc"));
-            if (files != null) {
-                for (File file : files) {
-                    totalSize += file.length();
+        Path dir = mailboxDir(username);
+        if (!Files.isDirectory(dir)) {
+            // Thư mục không còn: nếu index cũ vẫn còn dữ liệu thì dọn dưới write-lock
+            MailboxIndex stale = indexes.get(username.trim());
+            if (stale != null && !stale.isEmpty()) {
+                ReentrantReadWriteLock lock = getLockForUser(username);
+                lock.writeLock().lock();
+                try {
+                    if (!Files.isDirectory(dir)) forgetMailbox(username);
+                } finally {
+                    lock.writeLock().unlock();
                 }
             }
-            return totalSize;
-        } finally {
-            lock.readLock().unlock();
+            return 0;
         }
+        return loadedIndex(username).totalBytes();
     }
 
     public static boolean saveEmail(String recipient, String rawEmailContent) {
+        return saveEmailResult(recipient, rawEmailContent) == SaveResult.OK;
+    }
+
+    public static SaveResult saveEmailResult(String recipient, String rawEmailContent) {
+        if (recipient == null || rawEmailContent == null) {
+            return SaveResult.ERROR;
+        }
         String cleanRecipient = getCleanUsername(recipient);
 
         if (!UserStore.exists(cleanRecipient)) {
             System.err.println("[MAIL STORAGE] Người nhận không tồn tại: " + cleanRecipient);
-            return false;
+            return SaveResult.NO_USER;
         }
 
-        initMailbox(recipient);
-
-        ReentrantReadWriteLock lock = getLockForUser(recipient);
-        lock.writeLock().lock();
-
         try {
-            long currentSizeBytes = getMailboxSizeInBytes(recipient);
-            long incomingSizeBytes = rawEmailContent.getBytes(StandardCharsets.UTF_8).length;
+            initMailbox(recipient);
 
-            long maxSizeBytes;
-            try {
-                maxSizeBytes = Math.multiplyExact(ServerConfig.MAX_MAILBOX_QUOTA_MB, 1024L * 1024L);
-            } catch (ArithmeticException e) {
-                maxSizeBytes = Long.MAX_VALUE;
-            }
+            long maxSizeBytes = maxQuotaBytes();
 
-            if (currentSizeBytes + incomingSizeBytes > maxSizeBytes) {
+            // Kiểm tra nhanh quota bằng ước lượng kích thước sau mã hóa, TRƯỚC khi tốn CPU mã hóa và giữ lock
+            long estimatedBytes = estimateEncryptedSize(utf8Length(rawEmailContent));
+            if (usedBytesOfUser(cleanRecipient) + estimatedBytes > maxSizeBytes) {
                 System.err.println("[MAIL STORAGE] Hòm thư " + recipient + " vượt Quota");
-                return false;
+                return SaveResult.OVER_QUOTA;
             }
 
+            // Mã hóa NGOÀI write-lock để không chặn các thao tác khác của cùng hòm thư
             byte[] saltBytes = getUserSaltOrThrow(recipient);
             String encryptedContent = SecurityUtils.encrypt(rawEmailContent, ServerConfig.SECRET_KEY, saltBytes);
+            byte[] encryptedBytes = encryptedContent.getBytes(StandardCharsets.UTF_8);
             String fileName = "msg_" + System.currentTimeMillis() + "_" + UUID.randomUUID() + ".enc";
-            Path filePath = mailboxDir(recipient).resolve(fileName);
 
-            // 1. Ghi file mã hóa xuống đĩa
-            Files.write(filePath, encryptedContent.getBytes(StandardCharsets.UTF_8));
+            // Hòm thư kết thúc bằng "_sent" (bản sao thư đã gửi) thì KHÔNG bắn SSE
+            boolean isSentBox = recipient.endsWith("_sent");
+            String summaryJson = null;
+            if (!isSentBox) {
+                String senderFromRaw = parseFromFromRaw(rawEmailContent);
+                summaryJson = String.format(
+                    "{\"id\":\"%s\",\"sender\":\"%s\",\"recipient\":\"%s\",\"subject\":\"%s\",\"timestamp\":\"%s\"}",
+                    escapeJson(fileName),
+                    escapeJson(senderFromRaw.isEmpty() ? cleanRecipient : senderFromRaw),
+                    escapeJson(recipient),
+                    escapeJson(parseSubjectFromRaw(rawEmailContent)),
+                    escapeJson(parseDateFromRaw(rawEmailContent))
+                );
+            }
 
-            // 2. KÍCH HOẠT REALTIME EVENT: Bắn thông báo tới đúng Clean Username (ví dụ: kiet1)
-            String cleanRecipientUser = getCleanUsername(recipient);
-            String senderFromRaw = parseFromFromRaw(rawEmailContent);
+            ReentrantReadWriteLock lock = getLockForUser(recipient);
+            lock.writeLock().lock();
+            try {
+                // Kiểm tra lại dưới lock: tài khoản có thể vừa bị xóa (tránh tạo lại thư mục/index cho user đã xóa)
+                if (!UserStore.exists(cleanRecipient)) {
+                    return SaveResult.NO_USER;
+                }
 
-            String summaryJson = String.format(
-                "{\"id\":\"%s\",\"sender\":\"%s\",\"recipient\":\"%s\",\"subject\":\"%s\",\"timestamp\":\"%s\"}",
-                escapeJson(fileName),
-                escapeJson(senderFromRaw.isEmpty() ? cleanRecipientUser : senderFromRaw),
-                escapeJson(recipient),
-                escapeJson(parseSubjectFromRaw(rawEmailContent)),
-                escapeJson(parseDateFromRaw(rawEmailContent))
-            );
+                synchronized (quotaMonitor(cleanRecipient)) {
+                    long incomingBytes = encryptedBytes.length;
+                    if (usedBytesOfUser(cleanRecipient) + incomingBytes > maxSizeBytes) {
+                        System.err.println("[MAIL STORAGE] Hòm thư " + recipient + " vượt Quota");
+                        return SaveResult.OVER_QUOTA;
+                    }
 
-            // GỬI THÔNG BÁO CHO CẢ CLEAN USER (VD: kiet1) VÀ FULL EMAIL (VD: kiet1@pbl4.com) ĐỂ ĐẢM BẢO
-            com.pbl4.mailserver.webapi.SseManager.notifyUser(cleanRecipientUser, summaryJson);
-            com.pbl4.mailserver.webapi.SseManager.notifyUser(recipient, summaryJson);
+                    Path dir = mailboxDir(recipient);
+                    Path filePath = dir.resolve(fileName);
+                    Path tmpPath = dir.resolve(fileName + ".tmp");
 
-            return true;
+                    // 1. Ghi file mã hóa xuống đĩa (ghi file tạm rồi đổi tên để không ai thấy file ghi dở)
+                    try {
+                        Files.write(tmpPath, encryptedBytes);
+                        try {
+                            Files.move(tmpPath, filePath, StandardCopyOption.ATOMIC_MOVE);
+                        } catch (AtomicMoveNotSupportedException e) {
+                            Files.move(tmpPath, filePath, StandardCopyOption.REPLACE_EXISTING);
+                        }
+                    } catch (IOException e) {
+                        try { Files.deleteIfExists(tmpPath); } catch (IOException ignored) {}
+                        throw e;
+                    }
+
+                    // 2. Cập nhật index/bộ đếm trong RAM
+                    loadedIndex(recipient).add(fileName, incomingBytes);
+                }
+            } finally {
+                lock.writeLock().unlock();
+            }
+
+            // 3. KÍCH HOẠT REALTIME EVENT: ngoài write-lock, chỉ MỘT lần, chỉ cho hòm thư nhận (không phải _sent)
+            if (summaryJson != null) {
+                try {
+                    com.pbl4.mailserver.webapi.SseManager.notifyUser(cleanRecipient, summaryJson);
+                } catch (Exception e) {
+                    System.err.println("[MAIL STORAGE] Lỗi khi bắn SSE: " + e.getMessage());
+                }
+            }
+
+            return SaveResult.OK;
         } catch (Exception e) {
             System.err.println("[MAIL STORAGE] Lỗi khi lưu thư: " + e.getMessage());
-            return false;
-        } finally {
-            lock.writeLock().unlock();
+            return SaveResult.ERROR;
         }
     }
 
-    // Tối ưu hóa: Phân trang danh sách tóm tắt thư, giải mã chỉ phần header (~12KB CBC)
+    // Tối ưu hóa: Phân trang danh sách tóm tắt thư dựa trên index trong RAM, giải mã chỉ phần header (~12KB CBC)
     public static MailPage listMailSummaries(String username, int page, int limit) {
         initMailbox(username);
         ReentrantReadWriteLock lock = getLockForUser(username);
         lock.readLock().lock();
 
         try {
-            File folder = mailboxDir(username).toFile();
-            File[] files = folder.listFiles((dir, name) -> name.endsWith(".enc"));
+            Path dir = mailboxDir(username);
+            long start = ((long) page - 1) * limit;
+            SecretKey derivedKey = null;
 
-            if (files == null || files.length == 0) {
-                return new MailPage(new ArrayList<>(), 0);
-            }
+            for (int attempt = 0; attempt < 2; attempt++) {
+                boolean lastTry = (attempt == 1);
+                MailboxIndex idx = loadedIndex(username);
 
-            // Sắp xếp GIẢM DẦN theo tên file (thư mới nhất đứng trước)
-            Arrays.sort(files, Comparator.comparing(File::getName).reversed());
-
-            int total = files.length;
-            int start = (page - 1) * limit;
-            if (start >= total) {
-                return new MailPage(new ArrayList<>(), total);
-            }
-            int end = Math.min(start + limit, total);
-
-            byte[] saltBytes = getUserSaltOrThrow(username);
-            SecretKey derivedKey = SecurityUtils.deriveKey(ServerConfig.SECRET_KEY, saltBytes);
-
-            List<MailSummary> summaries = new ArrayList<>();
-            for (int i = start; i < end; i++) {
-                File file = files[i];
-                String headerStr = readAndDecryptHeaderPartial(file, derivedKey);
-                if (headerStr != null) {
-                    summaries.add(parseHeaderToSummary(file.getName(), headerStr));
-                } else {
-                    summaries.add(new MailSummary(file.getName(), "", "", "", ""));
+                if (page < 1 || limit < 1) {
+                    return new MailPage(new ArrayList<>(), idx.size());
                 }
+
+                PageSlice slice = idx.sliceDescending(start, limit);
+                if (slice.names.isEmpty()) {
+                    return new MailPage(new ArrayList<>(), slice.total);
+                }
+
+                if (derivedKey == null) {
+                    byte[] saltBytes = getUserSaltOrThrow(username);
+                    derivedKey = SecurityUtils.deriveKey(ServerConfig.SECRET_KEY, saltBytes);
+                }
+
+                List<MailSummary> summaries = new ArrayList<>();
+                boolean drift = false;
+                for (String name : slice.names) {
+                    Path filePath = dir.resolve(name);
+                    if (!Files.exists(filePath)) {
+                        // Index lệch với đĩa (file bị xóa ngoài engine): làm mới index rồi thử lại
+                        drift = true;
+                        if (!lastTry) break;
+                        continue;
+                    }
+
+                    String key = cacheKey(username, name);
+                    MailSummary cached = SUMMARY_CACHE.get(key);
+                    if (cached != null) {
+                        summaries.add(cached);
+                        continue;
+                    }
+
+                    String headerStr = readAndDecryptHeaderPartial(filePath.toFile(), derivedKey);
+                    if (headerStr != null) {
+                        MailSummary summary = parseHeaderToSummary(name, headerStr);
+                        SUMMARY_CACHE.put(key, summary);
+                        summaries.add(summary);
+                    } else if (!Files.exists(filePath)) {
+                        drift = true;
+                        if (!lastTry) break;
+                    } else {
+                        summaries.add(new MailSummary(name, "", "", "", ""));
+                    }
+                }
+
+                if (!drift || lastTry) {
+                    return new MailPage(summaries, slice.total);
+                }
+                idx.reload(dir);
             }
 
-            return new MailPage(summaries, total);
+            return new MailPage(new ArrayList<>(), 0);
         } catch (Exception e) {
             System.err.println("[MAIL STORAGE] Lỗi khi tạo danh sách tóm tắt thư: " + e.getMessage());
             return new MailPage(new ArrayList<>(), 0);
@@ -366,6 +693,76 @@ public class MailStorageEngine {
         return mails;
     }
 
+    // Danh sách thư CŨ -> MỚI (thứ tự POP3) chỉ gồm id + kích thước, KHÔNG giữ nội dung thư trong RAM.
+    // sizeBytes = số byte UTF-8 của nội dung đã giải mã, tính một lần rồi cache theo tên file (file .enc bất biến).
+    // Không giữ read-lock cả phiên: chỉ khóa khi liệt kê tên file và khi đọc từng file.
+    public static List<MailMeta> listMailMetas(String mailbox) {
+        List<MailMeta> result = new ArrayList<>();
+        try {
+            initMailbox(mailbox);
+            Path dir = mailboxDir(mailbox);
+            ReentrantReadWriteLock lock = getLockForUser(mailbox);
+
+            List<String> names;
+            lock.readLock().lock();
+            try {
+                names = loadedIndex(mailbox).snapshotAscending();
+            } finally {
+                lock.readLock().unlock();
+            }
+
+            SecretKey derivedKey = null;
+            boolean drift = false;
+
+            for (String name : names) {
+                String key = cacheKey(mailbox, name);
+                Long cachedSize = META_CACHE.get(key);
+                if (cachedSize != null) {
+                    result.add(new MailMeta(name, cachedSize));
+                    continue;
+                }
+
+                // Chưa có trong cache: đọc file này dưới read-lock ngắn, giải mã NGOÀI lock
+                byte[] bytes;
+                lock.readLock().lock();
+                try {
+                    bytes = Files.readAllBytes(dir.resolve(name));
+                } catch (NoSuchFileException e) {
+                    drift = true; // file đã bị xóa giữa chừng (hoặc index lệch): bỏ qua, làm mới index sau
+                    continue;
+                } catch (IOException e) {
+                    result.add(new MailMeta(name, 0));
+                    continue;
+                } finally {
+                    lock.readLock().unlock();
+                }
+
+                if (derivedKey == null) {
+                    byte[] saltBytes = getUserSaltOrThrow(mailbox);
+                    derivedKey = SecurityUtils.deriveKey(ServerConfig.SECRET_KEY, saltBytes);
+                }
+
+                String content = SecurityUtils.decryptWithKey(new String(bytes, StandardCharsets.UTF_8), derivedKey);
+                if (content == null) {
+                    // Giống listMails/POP3 cũ: thư giải mã lỗi tính kích thước 0 (không cache để còn thử lại)
+                    result.add(new MailMeta(name, 0));
+                    continue;
+                }
+                long size = utf8Length(content); // lấy độ dài rồi bỏ nội dung
+                META_CACHE.put(key, size);
+                result.add(new MailMeta(name, size));
+            }
+
+            if (drift) {
+                loadedIndex(mailbox).reload(dir);
+            }
+        } catch (Exception e) {
+            System.err.println("[MAIL STORAGE] Lỗi khi đọc danh sách thư (meta): " + e.getMessage());
+            return new ArrayList<>();
+        }
+        return result;
+    }
+
     public static StoredMail getSingleMail(String username, String fileId) {
         if (fileId == null || fileId.contains("/") || fileId.contains("\\") || fileId.contains("..")) {
             return null;
@@ -423,6 +820,14 @@ public class MailStorageEngine {
                     } catch (IOException e) {
                         System.err.println("[MAIL STORAGE] Lỗi khi xóa file " + fileId + ": " + e.getMessage());
                     }
+                    // Cập nhật index/cache theo trạng thái thực tế trên đĩa (xóa lỗi thì file vẫn còn trong index)
+                    if (!Files.exists(filePath)) {
+                        MailboxIndex idx = indexes.get(username.trim()); // lấy SAU khi xóa file để không lệch với lần quét lười
+                        if (idx != null) idx.remove(fileId);
+                        String key = cacheKey(username, fileId);
+                        SUMMARY_CACHE.remove(key);
+                        META_CACHE.remove(key);
+                    }
                 }
             }
         } catch (Exception e) {
@@ -441,6 +846,79 @@ public class MailStorageEngine {
             }
         }
         deleteMailsByIds(username, idsToDelete);
+    }
+
+    // Xóa thư mục inbox và _sent của người dùng DƯỚI write-lock, đồng thời dọn index/cache/lock của người dùng đó
+    public static void deleteMailbox(String username) {
+        purgeUser(username, true);
+    }
+
+    // Chỉ dọn index/cache/lock trong RAM (không đụng tới file). UserStore.deleteUser gọi hàm này để
+    // tài khoản bị xóa rồi đăng ký lại cùng tên không bị dính quota/danh sách thư của người cũ.
+    public static void evictUser(String username) {
+        purgeUser(username, false);
+    }
+
+    private static void purgeUser(String username, boolean deleteFiles) {
+        if (username == null || username.trim().isEmpty()) return;
+        String base = getCleanUsername(username.trim());
+        if (base == null || base.isEmpty()) return;
+        String sent = base + "_sent";
+
+        ReentrantReadWriteLock lockInbox = getLockForUser(base);
+        ReentrantReadWriteLock lockSent = getLockForUser(sent);
+        // Luôn khóa theo thứ tự inbox -> sent; các hàm lưu/xóa chỉ giữ một lock nên không thể bế tắc
+        lockInbox.writeLock().lock();
+        lockSent.writeLock().lock();
+        try {
+            if (deleteFiles) {
+                try {
+                    deleteDirectoryQuietly(mailboxDir(base));
+                    deleteDirectoryQuietly(mailboxDir(sent));
+                } catch (Exception e) {
+                    System.err.println("[MAIL STORAGE] Lỗi khi xóa hòm thư " + base + ": " + e.getMessage());
+                }
+            }
+
+            // Dọn index + cache (không phân biệt hoa/thường vì khóa user trong UserStore là chữ thường)
+            indexes.keySet().removeIf(k -> k.equalsIgnoreCase(base) || k.equalsIgnoreCase(sent));
+            SUMMARY_CACHE.removeByPrefixIgnoreCase(base + "|");
+            SUMMARY_CACHE.removeByPrefixIgnoreCase(sent + "|");
+            META_CACHE.removeByPrefixIgnoreCase(base + "|");
+            META_CACHE.removeByPrefixIgnoreCase(sent + "|");
+            quotaMonitors.keySet().removeIf(k -> k.equalsIgnoreCase(base));
+        } finally {
+            // Bỏ lock khỏi map trước khi mở khóa: luồng đến sau sẽ dùng lock mới (user đã xóa nên không còn gì để tranh chấp)
+            userLocks.remove(base, lockInbox);
+            userLocks.remove(sent, lockSent);
+            lockSent.writeLock().unlock();
+            lockInbox.writeLock().unlock();
+        }
+    }
+
+    private static void deleteDirectoryQuietly(Path dir) {
+        if (!Files.exists(dir)) return;
+        try {
+            Files.walkFileTree(dir, new SimpleFileVisitor<Path>() {
+                @Override
+                public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
+                    try { Files.deleteIfExists(file); } catch (IOException e) {
+                        System.err.println("[MAIL STORAGE] Không xóa được " + file + ": " + e.getMessage());
+                    }
+                    return FileVisitResult.CONTINUE;
+                }
+
+                @Override
+                public FileVisitResult postVisitDirectory(Path d, IOException exc) {
+                    try { Files.deleteIfExists(d); } catch (IOException e) {
+                        System.err.println("[MAIL STORAGE] Không xóa được thư mục " + d + ": " + e.getMessage());
+                    }
+                    return FileVisitResult.CONTINUE;
+                }
+            });
+        } catch (IOException e) {
+            System.err.println("[MAIL STORAGE] Lỗi khi duyệt thư mục " + dir + ": " + e.getMessage());
+        }
     }
 
     public static long getTotalMailCount() {

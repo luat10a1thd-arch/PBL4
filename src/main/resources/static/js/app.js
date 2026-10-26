@@ -32,14 +32,41 @@ document.addEventListener('DOMContentLoaded', () => {
     startRealtimeListener();
 });
 
-function startRealtimeListener() {
+let sseReconnectTimer = null;
+let sseRetryDelay = 3000;
+let sseGeneration = 0; // chống chạy chồng khi start được gọi nhiều lần
+
+async function startRealtimeListener() {
     stopRealtimeListener();
 
     const token = localStorage.getItem('authToken');
     if (!token) return;
 
+    const generation = ++sseGeneration;
+
+    // Xin ticket dùng một lần (sống ~30s) để không đưa token phiên lên URL
+    let ticket = null;
+    try {
+        const res = await fetch('/api/mails/stream-ticket', {
+            method: 'POST',
+            headers: { 'Authorization': 'Bearer ' + token }
+        });
+        if (res.status === 401) return; // phiên hết hạn/bị khóa: không kết nối lại
+        if (!res.ok) throw new Error('ticket');
+        const data = await res.json();
+        ticket = data.ticket;
+    } catch (e) {
+        scheduleSseReconnect();
+        return;
+    }
+    if (!ticket || generation !== sseGeneration) return;
+
     // Khởi tạo kết nối SSE tới Server
-    sseSource = new EventSource(`/api/mails/stream?token=${encodeURIComponent(token)}`);
+    sseSource = new EventSource(`/api/mails/stream?ticket=${encodeURIComponent(ticket)}`);
+
+    sseSource.onopen = () => {
+        sseRetryDelay = 3000;
+    };
 
     // Lắng nghe sự kiện thông điệp chung
     sseSource.onmessage = (event) => {
@@ -62,12 +89,35 @@ function startRealtimeListener() {
         }
     });
 
+    // Server đóng kết nối này vì user mở quá nhiều tab: không kết nối lại để các tab không đá nhau
+    sseSource.addEventListener('evicted', () => {
+        sseGeneration++;
+        if (sseSource) { sseSource.close(); sseSource = null; }
+    });
+
+    // Ticket chỉ dùng một lần nên không để trình duyệt tự reconnect: đóng và xin ticket mới
     sseSource.onerror = () => {
-        // Trình duyệt tự động Reconnect khi gián đoạn mạng
+        if (sseSource) { sseSource.close(); sseSource = null; }
+        scheduleSseReconnect();
     };
 }
 
+function scheduleSseReconnect() {
+    if (sseReconnectTimer) return;
+    const delay = sseRetryDelay;
+    sseRetryDelay = Math.min(sseRetryDelay * 2, 60000); // backoff tối đa 60s
+    sseReconnectTimer = setTimeout(() => {
+        sseReconnectTimer = null;
+        startRealtimeListener();
+    }, delay + Math.floor(Math.random() * 1000));
+}
+
 function stopRealtimeListener() {
+    sseGeneration++;
+    if (sseReconnectTimer) {
+        clearTimeout(sseReconnectTimer);
+        sseReconnectTimer = null;
+    }
     if (sseSource) {
         sseSource.close();
         sseSource = null;

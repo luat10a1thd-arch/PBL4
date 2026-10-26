@@ -30,13 +30,11 @@ public class MailHandler implements HttpHandler {
         String path = exchange.getRequestURI().getPath();
         String method = exchange.getRequestMethod();
 
-        // 1. DÀNH RIÊNG CHO LUỒNG SSE REALTIME (Không dùng Auth Header thông thường)
         if ("GET".equalsIgnoreCase(method) && path.endsWith("/stream")) {
             handleSseStream(exchange);
             return;
         }
 
-        // 2. XÁC THỰC USER CHO CÁC API THÔNG THƯỜNG
         String authHeader = exchange.getRequestHeaders().getFirst("Authorization");
         String token = (authHeader != null && authHeader.startsWith("Bearer "))
                 ? authHeader.substring(7) : null;
@@ -88,10 +86,9 @@ public class MailHandler implements HttpHandler {
         exchange.getResponseHeaders().set("Connection", "keep-alive");
         exchange.getResponseHeaders().set("Access-Control-Allow-Origin", "*");
 
-        exchange.sendResponseHeaders(200, 0); // Giữ luồng Chunked
+        exchange.sendResponseHeaders(200, 0);
         OutputStream os = exchange.getResponseBody();
 
-        // Đăng ký client với SseManager (Lưu cả Username đầy đủ và Username sạch)
         SseManager.register(username, exchange, os);
         if (username.contains("@")) {
             SseManager.register(username.split("@")[0], exchange, os);
@@ -108,6 +105,21 @@ public class MailHandler implements HttpHandler {
         String rawTo = getParamValue(body, "to");
         String rawSubject = getParamValue(body, "subject");
         String content = getParamValue(body, "body");
+
+        String cleanUser = from.contains("@") ? from.split("@")[0] : from;
+        long inboxBytes = MailStorageEngine.getMailboxSizeInBytes(cleanUser);
+        long sentBytes = MailStorageEngine.getMailboxSizeInBytes(cleanUser + "_sent");
+        long totalUsedBytes = inboxBytes + sentBytes;
+        long quotaBytes = ServerConfig.MAX_MAILBOX_QUOTA_MB * 1024L * 1024L;
+
+        long incomingSizeBytes = (content != null ? content.getBytes(StandardCharsets.UTF_8).length : 0) + 512;
+
+        if (totalUsedBytes + incomingSizeBytes > quotaBytes) {
+            double usedMb = totalUsedBytes / (1024.0 * 1024.0);
+            String errMsg = String.format("Không thể gửi thư! Dung lượng hòm thư đã dùng %.2f MB / %d MB (bị vượt Quota khi lưu bản sao thư đã gửi).", usedMb, ServerConfig.MAX_MAILBOX_QUOTA_MB);
+            sendResponse(exchange, 400, "{\"success\": false, \"message\": \"" + escapeJson(errMsg) + "\"}");
+            return;
+        }
 
         MailService.DeliveryResult result = MailService.deliver(from, rawTo, rawSubject, content);
 

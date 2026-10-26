@@ -130,6 +130,25 @@ public class MailStorageEngine {
         }
     }
 
+    public static String findUserExceedingQuota(long newQuotaMb) {
+        List<User> users = UserStore.getAllUsers();
+        long newQuotaBytes = newQuotaMb * 1024L * 1024L;
+
+        for (User u : users) {
+            if (u == null || u.getUsername() == null) continue;
+            String username = u.getUsername().trim();
+            long inboxBytes = getMailboxSizeInBytes(username);
+            long sentBytes = getMailboxSizeInBytes(username + "_sent");
+            long totalUsedBytes = inboxBytes + sentBytes;
+
+            if (totalUsedBytes > newQuotaBytes) {
+                double usedMb = totalUsedBytes / (1024.0 * 1024.0);
+                return String.format("%s (đang dùng %.2f MB)", username, usedMb);
+            }
+        }
+        return null;
+    }
+
     public static boolean saveEmail(String recipient, String rawEmailContent) {
         String cleanRecipient = getCleanUsername(recipient);
 
@@ -144,7 +163,10 @@ public class MailStorageEngine {
         lock.writeLock().lock();
 
         try {
-            long currentSizeBytes = getMailboxSizeInBytes(recipient);
+            long inboxSizeBytes = getMailboxSizeInBytes(cleanRecipient);
+            long sentSizeBytes = getMailboxSizeInBytes(cleanRecipient + "_sent");
+            long totalUsedBytes = inboxSizeBytes + sentSizeBytes;
+
             long incomingSizeBytes = rawEmailContent.getBytes(StandardCharsets.UTF_8).length;
 
             long maxSizeBytes;
@@ -154,8 +176,8 @@ public class MailStorageEngine {
                 maxSizeBytes = Long.MAX_VALUE;
             }
 
-            if (currentSizeBytes + incomingSizeBytes > maxSizeBytes) {
-                System.err.println("[MAIL STORAGE] Hòm thư " + recipient + " vượt Quota");
+            if (totalUsedBytes + incomingSizeBytes > maxSizeBytes) {
+                System.err.println("[MAIL STORAGE] Hòm thư " + cleanRecipient + " vượt Quota khi lưu thư mới");
                 return false;
             }
 
@@ -164,10 +186,8 @@ public class MailStorageEngine {
             String fileName = "msg_" + System.currentTimeMillis() + "_" + UUID.randomUUID() + ".enc";
             Path filePath = mailboxDir(recipient).resolve(fileName);
 
-            // 1. Ghi file mã hóa xuống đĩa
             Files.write(filePath, encryptedContent.getBytes(StandardCharsets.UTF_8));
 
-            // 2. KÍCH HOẠT REALTIME EVENT: Bắn thông báo tới đúng Clean Username (ví dụ: kiet1)
             String cleanRecipientUser = getCleanUsername(recipient);
             String senderFromRaw = parseFromFromRaw(rawEmailContent);
 
@@ -180,7 +200,6 @@ public class MailStorageEngine {
                 escapeJson(parseDateFromRaw(rawEmailContent))
             );
 
-            // GỬI THÔNG BÁO CHO CẢ CLEAN USER (VD: kiet1) VÀ FULL EMAIL (VD: kiet1@pbl4.com) ĐỂ ĐẢM BẢO
             com.pbl4.mailserver.webapi.SseManager.notifyUser(cleanRecipientUser, summaryJson);
             com.pbl4.mailserver.webapi.SseManager.notifyUser(recipient, summaryJson);
 
@@ -193,7 +212,6 @@ public class MailStorageEngine {
         }
     }
 
-    // Tối ưu hóa: Phân trang danh sách tóm tắt thư, giải mã chỉ phần header (~12KB CBC)
     public static MailPage listMailSummaries(String username, int page, int limit) {
         initMailbox(username);
         ReentrantReadWriteLock lock = getLockForUser(username);
@@ -207,7 +225,6 @@ public class MailStorageEngine {
                 return new MailPage(new ArrayList<>(), 0);
             }
 
-            // Sắp xếp GIẢM DẦN theo tên file (thư mới nhất đứng trước)
             Arrays.sort(files, Comparator.comparing(File::getName).reversed());
 
             int total = files.length;
@@ -243,7 +260,7 @@ public class MailStorageEngine {
     private static String readAndDecryptHeaderPartial(File file, SecretKey derivedKey) {
         try {
             long fileLength = file.length();
-            final int HEADER_READ_LIMIT = 12288; // Đọc ~12KB đầu tiên
+            final int HEADER_READ_LIMIT = 12288;
 
             if (fileLength <= HEADER_READ_LIMIT) {
                 byte[] fullBytes = Files.readAllBytes(file.toPath());
@@ -268,13 +285,11 @@ public class MailStorageEngine {
 
             byte[] iv = Base64.getDecoder().decode(ivStr);
 
-            // Cắt chuỗi Base64 phần mã hóa để chiều dài chia hết cho 4
             int validB64Len = (cipherB64Partial.length() / 4) * 4;
             if (validB64Len == 0) return null;
 
             byte[] rawCipherPartial = Base64.getDecoder().decode(cipherB64Partial.substring(0, validB64Len));
 
-            // Cắt về bội số 16 byte cho khối mã hóa AES
             int validAesLen = (rawCipherPartial.length / 16) * 16;
             if (validAesLen == 0) return null;
 
@@ -284,12 +299,10 @@ public class MailStorageEngine {
             byte[] decryptedPartial = cipher.doFinal(rawCipherPartial, 0, validAesLen);
             String decryptedHeader = new String(decryptedPartial, StandardCharsets.UTF_8);
 
-            // Kiểm tra xem đã chứa dòng trống phân cách Header và Body hay chưa
             if (decryptedHeader.contains("\n\n") || decryptedHeader.contains("\r\n\r\n")) {
                 return decryptedHeader;
             }
 
-            // Nếu chưa tìm thấy dòng trống, giải mã cả file làm phương án dự phòng
             byte[] fullBytes = Files.readAllBytes(file.toPath());
             String encryptedData = new String(fullBytes, StandardCharsets.UTF_8);
             return SecurityUtils.decryptWithKey(encryptedData, derivedKey);
@@ -314,7 +327,7 @@ public class MailStorageEngine {
         if (rawContent != null) {
             String[] lines = rawContent.split("\r?\n");
             for (String line : lines) {
-                if (line.isEmpty()) break; // Kết thúc phần Header
+                if (line.isEmpty()) break;
                 String lower = line.toLowerCase();
                 if (from.isEmpty() && lower.startsWith("from:")) {
                     from = line.substring(5).trim();
@@ -330,7 +343,6 @@ public class MailStorageEngine {
         return new MailSummary(id, from, to, subject, date);
     }
 
-    // Giữ nguyên listMails cũ phục vụ giao thức POP3
     public static List<StoredMail> listMails(String username) {
         initMailbox(username);
         List<StoredMail> mails = new ArrayList<>();
@@ -448,7 +460,7 @@ public class MailStorageEngine {
         if (!baseDir.exists() || !baseDir.isDirectory()) return 0;
 
         long count = 0;
-        File[] userDirs = baseDir.listFiles((dir, name) -> new File(dir, name).isDirectory() && !name.endsWith("_sent"));
+        File[] userDirs = baseDir.listFiles((dir, name) -> new File(dir, name).isDirectory());
         if (userDirs != null) {
             for (File dir : userDirs) {
                 File[] encFiles = dir.listFiles((d, name) -> name.endsWith(".enc"));
@@ -479,7 +491,6 @@ public class MailStorageEngine {
         return totalBytes;
     }
 
-    // Các hàm helper hỗ trợ trích xuất thông tin Realtime SSE
     private static String parseFromFromRaw(String raw) {
         if (raw == null) return "";
         for (String line : raw.split("\r?\\n")) {

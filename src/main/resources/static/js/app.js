@@ -27,8 +27,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
     loadInbox();
     updateStorageUsage();
-    
-    // KÍCH HOẠT LẮNG NGHE REALTIME SSE KHI VỪA VÀO TRANG
     startRealtimeListener();
 });
 
@@ -38,17 +36,14 @@ function startRealtimeListener() {
     const token = localStorage.getItem('authToken');
     if (!token) return;
 
-    // Khởi tạo kết nối SSE tới Server
     sseSource = new EventSource(`/api/mails/stream?token=${encodeURIComponent(token)}`);
 
-    // Lắng nghe sự kiện thông điệp chung
     sseSource.onmessage = (event) => {
         if (activeMailbox === 'inbox') {
             refreshMails();
         }
     };
 
-    // Lắng nghe sự kiện 'new_mail' cụ thể từ SseManager trên Java Server
     sseSource.addEventListener('new_mail', (event) => {
         try {
             const data = JSON.parse(event.data);
@@ -62,9 +57,7 @@ function startRealtimeListener() {
         }
     });
 
-    sseSource.onerror = () => {
-        // Trình duyệt tự động Reconnect khi gián đoạn mạng
-    };
+    sseSource.onerror = () => {};
 }
 
 function stopRealtimeListener() {
@@ -81,9 +74,7 @@ function showToast(message, type = 'success') {
     const toast = document.createElement('div');
     toast.className = `toast ${type}`;
 
-    const iconClass = type === 'success'
-        ? 'fa-circle-check'
-        : 'fa-circle-exclamation';
+    const iconClass = type === 'success' ? 'fa-circle-check' : 'fa-circle-exclamation';
 
     toast.innerHTML = `
         <i class="fa-solid ${iconClass} toast-icon"></i>
@@ -91,7 +82,6 @@ function showToast(message, type = 'success') {
     `;
 
     container.appendChild(toast);
-
     setTimeout(() => toast.classList.add('show'), 10);
 
     setTimeout(() => {
@@ -155,7 +145,6 @@ function renderFilePreview() {
     if (!previewContainer) return;
 
     previewContainer.innerHTML = '';
-
     if (selectedFiles.length === 0) return;
 
     selectedFiles.forEach((file, index) => {
@@ -197,8 +186,7 @@ function formatFileSize(bytes) {
     const sizes = ['B', 'KB', 'MB', 'GB'];
     const i = Math.floor(Math.log(bytes) / Math.log(k));
 
-    return parseFloat((bytes / Math.pow(k, i)).toFixed(1))
-        + ' ' + sizes[i];
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
 }
 
 function convertFileToBase64(file) {
@@ -239,9 +227,7 @@ async function handleSendMail(event) {
 
             try {
                 const base64 = await convertFileToBase64(file);
-
-                attachmentData +=
-                    `\n[ATTACHMENT:${file.name}]${base64}[/ATTACHMENT]`;
+                attachmentData += `\n[ATTACHMENT:${file.name}]${base64}[/ATTACHMENT]`;
             } catch (err) {
                 showToast(`Lỗi đọc file: ${file.name}`, 'error');
                 return;
@@ -452,7 +438,8 @@ async function updateStorageUsage() {
             if (data.success) {
                 const usedMb = parseFloat(data.usedMb).toFixed(2);
                 const quotaMb = data.quotaMb;
-                const percent = Math.min(100, Math.max(0, (data.usedBytes / data.quotaBytes) * 100)).toFixed(1);
+                const percent = Math.min(100, Math.max(0, (data.usedBytes / data.quotaBytes) * 100));
+                const percentStr = percent.toFixed(1);
 
                 const storageText = document.getElementById('storage-text');
                 const storageProgress = document.getElementById('storage-progress');
@@ -461,7 +448,15 @@ async function updateStorageUsage() {
                     storageText.textContent = `${usedMb} MB / ${quotaMb} MB`;
                 }
                 if (storageProgress) {
-                    storageProgress.style.width = `${percent}%`;
+                    storageProgress.style.width = `${percentStr}%`;
+                    
+                    if (percent >= 90) {
+                        storageProgress.style.backgroundColor = '#ef4444';
+                    } else if (percent >= 75) {
+                        storageProgress.style.backgroundColor = '#f59e0b';
+                    } else {
+                        storageProgress.style.backgroundColor = '#6366f1';
+                    }
                 }
             }
         }

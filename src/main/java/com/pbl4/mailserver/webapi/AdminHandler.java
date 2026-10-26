@@ -134,6 +134,13 @@ public class AdminHandler implements HttpHandler {
                 return;
             }
 
+            String exceedingUser = MailStorageEngine.findUserExceedingQuota(newQuota);
+            if (exceedingUser != null) {
+                String errorMsg = String.format("Không thể đặt Quota là %d MB vì tài khoản %s đã vượt quá dung lượng này!", newQuota, exceedingUser);
+                sendResponse(exchange, 400, "{\"success\": false, \"message\": \"" + escapeJson(errorMsg) + "\"}");
+                return;
+            }
+
             ServerConfig.saveQuotaConfig(newQuota);
             appendLog("Cập nhật Quota mặc định cho Hòm thư: " + newQuota + " MB");
             sendResponse(exchange, 200, "{\"success\": true, \"message\": \"Đã cập nhật cấu hình Quota thành công: " + newQuota + " MB/hòm thư!\", \"quotaMb\": " + newQuota + "}");

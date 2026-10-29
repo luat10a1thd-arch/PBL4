@@ -5,7 +5,7 @@
   <groupId>com.pbl4</groupId>
   <artifactId>mailserver</artifactId>
   <version>1.0.0</version>
-  
+
   <properties>
     <maven.compiler.release>17</maven.compiler.release>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
@@ -16,6 +16,12 @@
         <groupId>org.mindrot</groupId>
         <artifactId>jbcrypt</artifactId>
         <version>0.4</version>
+    </dependency>
+
+    <dependency>
+        <groupId>dnsjava</groupId>
+        <artifactId>dnsjava</artifactId>
+        <version>3.6.3</version>
     </dependency>
 
     <dependency>
@@ -47,6 +53,52 @@
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-surefire-plugin</artifactId>
         <version>3.1.2</version>
+        <executions>
+          <!-- Test cũ và test của chat khác: bỏ qua mọi test gắn @Tag("e2e") -->
+          <execution>
+            <id>default-test</id>
+            <configuration>
+              <excludedGroups>e2e</excludedGroups>
+              <failIfNoSpecifiedTests>false</failIfNoSpecifiedTests>
+            </configuration>
+          </execution>
+          <!-- E2E: JVM riêng, có biến môi trường và thư mục làm việc riêng -->
+          <execution>
+            <id>e2e-test</id>
+            <phase>test</phase>
+            <goals>
+              <goal>test</goal>
+            </goals>
+            <configuration>
+              <groups>e2e</groups>
+              <failIfNoSpecifiedTests>false</failIfNoSpecifiedTests>
+              <workingDirectory>${project.build.directory}/e2e-data</workingDirectory>
+              <reportsDirectory>${project.build.directory}/surefire-reports-e2e</reportsDirectory>
+              <environmentVariables>
+                <PBL4_MAIL_DOMAIN>test.local</PBL4_MAIL_DOMAIN>
+                <PBL4_MAIL_HOSTNAME>mail.test.local</PBL4_MAIL_HOSTNAME>
+                <PBL4_MX_PORT>25251</PBL4_MX_PORT>
+                <PBL4_SUBMISSION_PORT>25250</PBL4_SUBMISSION_PORT>
+                <PBL4_SMTP_PORT>25249</PBL4_SMTP_PORT>
+                <PBL4_SMTPS_PORT>0</PBL4_SMTPS_PORT>
+                <PBL4_OUTBOUND_MODE>DIRECT</PBL4_OUTBOUND_MODE>
+                <PBL4_OUTBOUND_REMOTE_PORT>25252</PBL4_OUTBOUND_REMOTE_PORT>
+                <PBL4_OUTBOUND_TLS>OFF</PBL4_OUTBOUND_TLS>
+                <PBL4_SMTP_REQUIRE_TLS>false</PBL4_SMTP_REQUIRE_TLS>
+                <PBL4_PRODUCTION>false</PBL4_PRODUCTION>
+                <PBL4_DMARC_ENFORCE>true</PBL4_DMARC_ENFORCE>
+                <PBL4_SPF_MODE>MARK</PBL4_SPF_MODE>
+                <PBL4_DKIM_KEY_DIR>${project.build.directory}/e2e-data/data/dkim/</PBL4_DKIM_KEY_DIR>
+                <!-- thêm ngoài danh sách: tắt giới hạn theo IP, cố định khóa và mật khẩu -->
+                <PBL4_INBOUND_MAX_CONN_PER_IP>0</PBL4_INBOUND_MAX_CONN_PER_IP>
+                <PBL4_INBOUND_MSGS_PER_IP_PER_MIN>0</PBL4_INBOUND_MSGS_PER_IP_PER_MIN>
+                <PBL4_SMTP_MAX_CONN_PER_IP>0</PBL4_SMTP_MAX_CONN_PER_IP>
+                <PBL4_SECRET_KEY>e2e-test-secret-key</PBL4_SECRET_KEY>
+                <PBL4_ADMIN_PASSWORD>e2e-admin-pass</PBL4_ADMIN_PASSWORD>
+              </environmentVariables>
+            </configuration>
+          </execution>
+        </executions>
       </plugin>
 
       <plugin>

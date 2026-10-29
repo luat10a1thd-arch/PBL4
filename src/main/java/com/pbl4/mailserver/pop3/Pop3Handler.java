@@ -23,6 +23,10 @@ import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
+/**
+ * Một phiên POP3. Thư được xử lý theo BYTE (MailMeta.sizeBytes, StoredMail.rawBytes()):
+ * RETR/TOP gửi nguyên byte, chỉ chuẩn hóa LF trần -> CRLF khi gửi và dot-stuffing (xem {@link Pop3Wire}).
+ */
 public class Pop3Handler implements Runnable {
 
     private static final Logger LOG = Logger.getLogger(Pop3Handler.class.getName());
@@ -30,10 +34,81 @@ public class Pop3Handler implements Runnable {
     // Mọi dòng trả về POP3 phải kết thúc bằng CRLF tường minh (println dùng "\n" trên Linux)
     private static final byte[] CRLF = {'\r', '\n'};
 
+    /**
+     * Điểm tựa phía lưu trữ/xác thực. Mặc định chuyển tiếp sang UserStore, LoginThrottle, MailStorageEngine;
+     * test thay bằng bản giả (constructor package-private bên dưới).
+     */
+    interface Backend {
+        boolean isThrottled(String ip, String user);
+
+        void recordFailure(String ip, String user);
+
+        void resetFailures(String ip, String user);
+
+        /** Trả tên người dùng chuẩn hóa nếu đúng mật khẩu và tài khoản không bị khóa; ngược lại null. */
+        String authenticate(String user, String password);
+
+        List<MailStorageEngine.MailMeta> listMetas(String mailbox);
+
+        MailStorageEngine.StoredMail getMail(String mailbox, String id);
+
+        void deleteMails(String mailbox, List<String> ids);
+    }
+
+    private static final class DefaultBackend implements Backend {
+        @Override
+        public boolean isThrottled(String ip, String user) {
+            return LoginThrottle.isThrottled(ip, user);
+        }
+
+        @Override
+        public void recordFailure(String ip, String user) {
+            LoginThrottle.recordFailedAttempt(ip, user);
+        }
+
+        @Override
+        public void resetFailures(String ip, String user) {
+            LoginThrottle.resetAttempts(ip, user);
+        }
+
+        @Override
+        public String authenticate(String user, String password) {
+            String storedHash = UserStore.findHash(user);
+            boolean isLocked = "LOCKED".equalsIgnoreCase(UserStore.getStatus(user));
+            if (storedHash != null && !isLocked && SecurityUtils.checkPassword(password, storedHash)) {
+                return UserStore.canonical(user);
+            }
+            return null;
+        }
+
+        @Override
+        public List<MailStorageEngine.MailMeta> listMetas(String mailbox) {
+            return MailStorageEngine.listMailMetas(mailbox);
+        }
+
+        @Override
+        public MailStorageEngine.StoredMail getMail(String mailbox, String id) {
+            return MailStorageEngine.getSingleMail(mailbox, id);
+        }
+
+        @Override
+        public void deleteMails(String mailbox, List<String> ids) {
+            MailStorageEngine.deleteMailsByIds(mailbox, ids);
+        }
+    }
+
+    private static final Backend DEFAULT_BACKEND = new DefaultBackend();
+
     private Socket clientSocket;
+    private final Backend backend;
 
     public Pop3Handler(Socket socket) {
+        this(socket, DEFAULT_BACKEND);
+    }
+
+    Pop3Handler(Socket socket, Backend backend) {
         this.clientSocket = socket;
+        this.backend = backend;
     }
 
     @Override
@@ -59,7 +134,7 @@ public class Pop3Handler implements Runnable {
             boolean isAuthenticated = false;
             boolean isTlsActive = false;
 
-            // PASS chỉ lấy metadata (id + kích thước), KHÔNG giải mã cả hòm thư.
+            // PASS chỉ lấy metadata (id + kích thước byte thật), KHÔNG giải mã cả hòm thư.
             // Nội dung thư chỉ được giải mã lười, từng thư một, khi RETR/TOP.
             List<MailStorageEngine.MailMeta> metas = new ArrayList<>();
             long[] sizes = new long[0];
@@ -126,7 +201,7 @@ public class Pop3Handler implements Runnable {
                     }
                     pendingUser = argument;
                     send(out, "+OK User accepted");
-                } 
+                }
                 else if ("PASS".equals(command)) {
                     if (isAuthenticated) {
                         send(out, "-ERR Already authenticated");
@@ -142,25 +217,23 @@ public class Pop3Handler implements Runnable {
                             ? pendingUser.substring(0, pendingUser.length() - 5)
                             : pendingUser;
 
-                    if (LoginThrottle.isThrottled(clientIp, authCheckUser)) {
+                    if (backend.isThrottled(clientIp, authCheckUser)) {
                         send(out, "-ERR Too many failed attempts, try again later");
                         continue;
                     }
 
-                    String storedHash = UserStore.findHash(authCheckUser);
-                    boolean isLocked = "LOCKED".equalsIgnoreCase(UserStore.getStatus(authCheckUser));
+                    String canonicalUser = backend.authenticate(authCheckUser, argument);
 
-                    if (storedHash != null && !isLocked && SecurityUtils.checkPassword(argument, storedHash)) {
-                        LoginThrottle.resetAttempts(clientIp, authCheckUser);
+                    if (canonicalUser != null) {
+                        backend.resetFailures(clientIp, authCheckUser);
                         isAuthenticated = true;
-                        
-                        String canonicalUser = UserStore.canonical(authCheckUser);
+
                         currentUser = isSentFolder ? canonicalUser + "_sent" : canonicalUser;
-                        
+
                         pendingUser = null;
 
                         // Chỉ liệt kê metadata, không giải mã nội dung
-                        List<MailStorageEngine.MailMeta> loaded = MailStorageEngine.listMailMetas(currentUser);
+                        List<MailStorageEngine.MailMeta> loaded = backend.listMetas(currentUser);
                         metas = (loaded != null) ? loaded : new ArrayList<>();
                         sizes = new long[metas.size()];
                         for (int i = 0; i < sizes.length; i++) {
@@ -169,10 +242,10 @@ public class Pop3Handler implements Runnable {
                         deletedIndices.clear();
                         send(out, "+OK Logged in successfully");
                     } else {
-                        LoginThrottle.recordFailedAttempt(clientIp, authCheckUser);
+                        backend.recordFailure(clientIp, authCheckUser);
                         send(out, "-ERR Invalid username or password");
                     }
-                } 
+                }
                 else if ("STAT".equals(command)) {
                     if (!isAuthenticated) {
                         send(out, "-ERR Please authenticate first");
@@ -187,7 +260,7 @@ public class Pop3Handler implements Runnable {
                         }
                     }
                     send(out, "+OK " + activeCount + " " + totalBytes);
-                } 
+                }
                 else if ("LIST".equals(command)) {
                     if (!isAuthenticated) {
                         send(out, "-ERR Please authenticate first");
@@ -215,12 +288,13 @@ public class Pop3Handler implements Runnable {
                         writeLine(out, ".");
                         out.flush();
                     }
-                } 
+                }
                 else if ("UIDL".equals(command)) {
                     if (!isAuthenticated) {
                         send(out, "-ERR Please authenticate first");
                         continue;
                     }
+                    // UIDL = tên file .enc của thư (msg_<thời gian>_<uuid>.enc): bất biến, không đổi giữa các phiên
                     if (!argument.isEmpty()) {
                         try {
                             int idx = Integer.parseInt(argument);
@@ -263,38 +337,18 @@ public class Pop3Handler implements Runnable {
 
                         if (idx >= 0 && idx < metas.size() && !deletedIndices.contains(idx + 1)) {
                             // Giải mã lười đúng một thư
-                            MailStorageEngine.StoredMail mail = MailStorageEngine.getSingleMail(currentUser, metas.get(idx).id);
+                            MailStorageEngine.StoredMail mail = backend.getMail(currentUser, metas.get(idx).id);
                             if (mail == null) {
                                 send(out, "-ERR Message not available");
                                 continue;
                             }
-                            if (mail.content == null) {
+                            byte[] raw = mail.rawBytes();
+                            if (raw == null) {
                                 send(out, "-ERR Message decryption failed");
                                 continue;
                             }
                             writeLine(out, "+OK Top lines follow");
-
-                            String message = toLf(mail.content);
-                            boolean inBody = false;
-                            int bodyLineCount = 0;
-                            int start = 0;
-                            int n = message.length();
-
-                            while (start < n) {
-                                int nl = message.indexOf('\n', start);
-                                int end = (nl < 0) ? n : nl;
-                                if (!inBody) {
-                                    writeStuffedLine(out, message, start, end);
-                                    if (message.substring(start, end).trim().isEmpty()) {
-                                        inBody = true;
-                                    }
-                                } else {
-                                    if (bodyLineCount >= linesToReturn) break;
-                                    writeStuffedLine(out, message, start, end);
-                                    bodyLineCount++;
-                                }
-                                start = (nl < 0) ? n : nl + 1;
-                            }
+                            Pop3Wire.writeTop(out, raw, linesToReturn);
                             writeLine(out, ".");
                             out.flush();
                         } else {
@@ -313,34 +367,21 @@ public class Pop3Handler implements Runnable {
                         int index = Integer.parseInt(argument) - 1;
                         if (index >= 0 && index < metas.size() && !deletedIndices.contains(index + 1)) {
                             // Giải mã lười đúng một thư
-                            MailStorageEngine.StoredMail mail = MailStorageEngine.getSingleMail(currentUser, metas.get(index).id);
+                            MailStorageEngine.StoredMail mail = backend.getMail(currentUser, metas.get(index).id);
                             if (mail == null) {
                                 send(out, "-ERR Message not available");
                                 continue;
                             }
-                            if (mail.content == null) {
+                            byte[] raw = mail.rawBytes();
+                            if (raw == null) {
                                 send(out, "-ERR Message decryption failed");
                                 continue;
                             }
 
-                            // Chuẩn hóa về LF để tách dòng, khi gửi mỗi dòng kết thúc bằng CRLF.
-                            String message = toLf(mail.content);
-
-                            // Lượt 1: đếm số octet THỰC SỰ sẽ gửi (nội dung dạng CRLF, chưa tính
-                            // dấu '.' dot-stuffing và dòng kết thúc ".").
-                            long octets = 0;
-                            int n = message.length();
-                            int start = 0;
-                            while (start < n) {
-                                int nl = message.indexOf('\n', start);
-                                int end = (nl < 0) ? n : nl;
-                                octets += message.substring(start, end).getBytes(StandardCharsets.UTF_8).length + 2;
-                                start = (nl < 0) ? n : nl + 1;
-                            }
-
-                            // sizeBytes trong metadata có thể lệch (vd. thư lưu bằng LF, hoặc kích
-                            // thước tính trên dữ liệu mã hóa). Ưu tiên số đúng cho RETR và cập nhật
-                            // lại để LIST/STAT sau đó trong cùng phiên nhất quán.
+                            // Số octet THỰC SỰ sẽ gửi (đã chuẩn hóa CRLF, chưa tính dấu '.' dot-stuffing và dòng ".").
+                            // Với thư lưu bằng CRLF thì bằng đúng raw.length. Nếu meta lệch (thư lưu LF trần...)
+                            // thì cập nhật để LIST/STAT sau đó trong phiên nhất quán.
+                            long octets = Pop3Wire.octetCount(raw);
                             if (octets != sizes[index]) {
                                 LOG.log(Level.FINE, "[POP3] Kích thước meta lệch RETR: id={0} meta={1} thực={2}",
                                         new Object[]{metas.get(index).id, sizes[index], octets});
@@ -348,15 +389,7 @@ public class Pop3Handler implements Runnable {
                             }
 
                             writeLine(out, "+OK " + octets + " octets");
-
-                            // Lượt 2: gửi từng dòng + CRLF, dot-stuffing; không thêm dòng trống thừa ở cuối
-                            start = 0;
-                            while (start < n) {
-                                int nl = message.indexOf('\n', start);
-                                int end = (nl < 0) ? n : nl;
-                                writeStuffedLine(out, message, start, end);
-                                start = (nl < 0) ? n : nl + 1;
-                            }
+                            Pop3Wire.writeMessage(out, raw);
                             writeLine(out, ".");
                             out.flush();
                         } else {
@@ -365,7 +398,7 @@ public class Pop3Handler implements Runnable {
                     } catch (NumberFormatException e) {
                         send(out, "-ERR Invalid message number");
                     }
-                } 
+                }
                 else if ("DELE".equals(command)) {
                     if (!isAuthenticated) {
                         send(out, "-ERR Please authenticate first");
@@ -402,11 +435,11 @@ public class Pop3Handler implements Runnable {
                                 idsToDelete.add(metas.get(idx - 1).id);
                             }
                         }
-                        MailStorageEngine.deleteMailsByIds(currentUser, idsToDelete);
+                        backend.deleteMails(currentUser, idsToDelete);
                     }
                     send(out, "+OK Logging out");
                     break;
-                } 
+                }
                 else {
                     send(out, "-ERR Unknown command");
                 }
@@ -465,20 +498,5 @@ public class Pop3Handler implements Runnable {
     private void writeLine(OutputStream out, String line) throws IOException {
         out.write(line.getBytes(StandardCharsets.UTF_8));
         out.write(CRLF);
-    }
-
-    /** Ghi dòng message[start,end) + CRLF, thêm '.' đầu dòng nếu dòng bắt đầu bằng '.' (dot-stuffing). */
-    private void writeStuffedLine(OutputStream out, String message, int start, int end) throws IOException {
-        if (start < end && message.charAt(start) == '.') {
-            out.write('.');
-        }
-        out.write(message.substring(start, end).getBytes(StandardCharsets.UTF_8));
-        out.write(CRLF);
-    }
-
-    /** Chuẩn hóa mọi kiểu xuống dòng (CRLF, CR đơn) về LF. */
-    private static String toLf(String content) {
-        if (content.indexOf('\r') < 0) return content;
-        return content.replace("\r\n", "\n").replace('\r', '\n');
     }
 }

@@ -1,0 +1,534 @@
+﻿// FILE: src\main\java\com\pbl4\mailserver\MainApplication.java
+public class MainApplication {
+public static void main(String[] args) {
+// FILE: src\main\java\com\pbl4\mailserver\auth\DefaultInboundAuthenticator.java
+public final class DefaultInboundAuthenticator implements InboundAuthenticator {
+public record Settings(String authservId, String spfMode, boolean dmarcEnforce) {
+public DefaultInboundAuthenticator() {
+public InboundVerdict evaluate(InboundContext ctx, byte[] raw) {
+// FILE: src\main\java\com\pbl4\mailserver\auth\DkimCommon.java
+// FILE: src\main\java\com\pbl4\mailserver\auth\DkimKeys.java
+// FILE: src\main\java\com\pbl4\mailserver\auth\DkimResult.java
+public record DkimResult(String result, String domain, String selector, String reason) {}
+// FILE: src\main\java\com\pbl4\mailserver\auth\DkimSigner.java
+public final class DkimSigner {
+public static byte[] sign(byte[] raw, String domain) {
+public static byte[] sign(byte[] raw, String domain, String selector, Path keyDir) {
+public static String publicKeyRecord(String domain, String selector, Path keyDir) {
+public static String publicKeyRecord() {
+// FILE: src\main\java\com\pbl4\mailserver\auth\DkimVerifier.java
+public final class DkimVerifier {
+public static List<DkimResult> verify(byte[] raw) {
+// FILE: src\main\java\com\pbl4\mailserver\auth\DmarcEvaluator.java
+public final class DmarcEvaluator {
+public static DmarcResult evaluate(String fromDomain, SpfResult spf, String spfDomain, List<DkimResult> dkim) {
+// FILE: src\main\java\com\pbl4\mailserver\auth\DmarcOrgDomain.java
+public final class DmarcOrgDomain {
+public static String of(String domain) {
+// FILE: src\main\java\com\pbl4\mailserver\auth\DmarcRecord.java
+public record DmarcRecord(String domain, String p, String sp, boolean adkimStrict, boolean aspfStrict, int pct) {
+// FILE: src\main\java\com\pbl4\mailserver\auth\DmarcResult.java
+public record DmarcResult(String result, String disposition, String fromDomain, String recordDomain,
+// FILE: src\main\java\com\pbl4\mailserver\auth\DnsRecordPrinter.java
+public final class DnsRecordPrinter {
+public static void main(String[] args) {
+public static String render(String ip, String domain, String hostname, String selector, Path keyDir) {
+public static List<String> splitTxt(String value) {
+// FILE: src\main\java\com\pbl4\mailserver\auth\InboundAuthenticator.java
+public interface InboundAuthenticator {
+// FILE: src\main\java\com\pbl4\mailserver\auth\InboundContext.java
+public record InboundContext(String clientIp, String heloName, String envelopeFrom, boolean tlsUsed) {}
+// FILE: src\main\java\com\pbl4\mailserver\auth\InboundVerdict.java
+public record InboundVerdict(Action action, int smtpCode, String smtpMessage, byte[] rawWithHeaders) {
+public enum Action { ACCEPT, SPAM, REJECT, TEMPFAIL }
+// FILE: src\main\java\com\pbl4\mailserver\auth\SpfChecker.java
+public final class SpfChecker {
+public static SpfResult check(String clientIp, String heloName, String envelopeFrom) {
+// FILE: src\main\java\com\pbl4\mailserver\auth\SpfResult.java
+public enum SpfResult { PASS, FAIL, SOFTFAIL, NEUTRAL, NONE, TEMPERROR, PERMERROR }
+// FILE: src\main\java\com\pbl4\mailserver\client\POP3Client.java
+public class POP3Client {
+public static List<String> fetchAll(String username, String password) {
+// FILE: src\main\java\com\pbl4\mailserver\client\SMTPClient.java
+public class SMTPClient {
+public static boolean send(String username, String password, String to, String subject, String body) {
+// FILE: src\main\java\com\pbl4\mailserver\config\ServerConfig.java
+public class ServerConfig {
+public static final int HTTP_PORT = 8080;
+public static final int SMTP_PORT = envInt("PBL4_SMTP_PORT", 2525, 1, 65535);
+public static final int POP3_PORT = 1110;
+public static final int THREAD_POOL_SIZE = 20;
+public static final int SOCKET_TIMEOUT_MS = 30000;
+public static final long MAX_MESSAGE_BYTES = 25 * 1024 * 1024L;
+public static final String BASE_DATA_DIR = "data/mailboxes/";
+public static final String KEYSTORE_PATH = "data/keystore.jks";
+public static volatile long MAX_MAILBOX_QUOTA_MB = loadQuotaConfig();
+public static final String KEYSTORE_PASS = System.getenv().getOrDefault("PBL4_KEYSTORE_PASS", "pbl4secretpass");
+public static final String SECRET_KEY = getSecretKeyEnv();
+public static final String ADMIN_DEFAULT_PASS = System.getenv().getOrDefault("PBL4_ADMIN_PASSWORD", "@Luat0105");
+public static final boolean OUTBOUND_ENABLED = Boolean.parseBoolean(System.getenv().getOrDefault("PBL4_OUTBOUND_ENABLED", "false"));
+public static final String OUTBOUND_SMTP_HOST = System.getenv().getOrDefault("PBL4_OUTBOUND_SMTP_HOST", "");
+public static final int OUTBOUND_SMTP_PORT = Integer.parseInt(System.getenv().getOrDefault("PBL4_OUTBOUND_SMTP_PORT", "587"));
+public static final String OUTBOUND_SMTP_USER = System.getenv().getOrDefault("PBL4_OUTBOUND_SMTP_USER", "");
+public static final String OUTBOUND_SMTP_PASS = System.getenv().getOrDefault("PBL4_OUTBOUND_SMTP_PASS", "");
+public static final String MAIL_DOMAIN = System.getenv().getOrDefault("PBL4_MAIL_DOMAIN", "pbl4.com");
+public static final boolean OUTBOUND_TRUST_ALL = Boolean.parseBoolean(System.getenv().getOrDefault("PBL4_OUTBOUND_TRUST_ALL", "false"));
+public static final int HTTP_WORKER_THREADS = getHttpThreadsConfig();
+public static synchronized void saveQuotaConfig(long newQuotaMb) {
+public static final int SOCKET_BACKLOG = envInt("PBL4_SOCKET_BACKLOG", 500, 50, 65535);
+public static final int SMTP_POOL_SIZE = envInt("PBL4_SMTP_POOL_SIZE", 150, 1, 5000);
+public static final int SMTP_QUEUE_SIZE = envInt("PBL4_SMTP_QUEUE_SIZE", 50, 1, 10000);
+public static final int SMTP_MAX_CONN_PER_IP = envInt("PBL4_SMTP_MAX_CONN_PER_IP", 30, 0, 100000);
+public static final int POP3_POOL_SIZE = envInt("PBL4_POP3_POOL_SIZE", 150, 1, 5000);
+public static final int POP3_QUEUE_SIZE = envInt("PBL4_POP3_QUEUE_SIZE", 50, 1, 10000);
+public static final int POP3_MAX_CONN_PER_IP = envInt("PBL4_POP3_MAX_CONN_PER_IP", 30, 0, 100000);
+public static final int PREAUTH_TIMEOUT_MS = envInt("PBL4_PREAUTH_TIMEOUT_MS", 15000, 1000, 600000);
+public static final int POSTAUTH_TIMEOUT_MS = envInt("PBL4_POSTAUTH_TIMEOUT_MS", 30000, 1000, 3600000);
+public static final int SESSION_MAX_MS = envInt("PBL4_SESSION_MAX_MS", 1800000, 10000, 86400000);
+public static final int MAX_COMMAND_LINE_BYTES = envInt("PBL4_MAX_COMMAND_LINE_BYTES", 1024, 128, 65536);
+public static final int SMTP_MAX_DATA_LINE_BYTES = envInt("PBL4_SMTP_MAX_DATA_LINE_BYTES", 1000, 100, 1048576);
+public static final int SMTP_MAX_RECIPIENTS = envInt("PBL4_SMTP_MAX_RECIPIENTS", 100, 1, 100000);
+public static final boolean SMTP_REQUIRE_TLS = envBool("PBL4_SMTP_REQUIRE_TLS", true);
+public static final int MAIL_SUMMARY_CACHE_MAX_ENTRIES = 20000;
+public static final int MAIL_META_CACHE_MAX_ENTRIES = 100000;
+public static final int MAX_BODY_AUTH_BYTES = 4 * 1024;
+public static final int MAX_BODY_ADMIN_BYTES = 200 * 1024;
+public static final long MAX_BODY_SEND_BYTES = MAX_MESSAGE_BYTES * 3 / 2 + 64 * 1024;
+public static final long BODY_READ_IDLE_TIMEOUT_MS = 10_000;
+public static final long BODY_READ_TOTAL_TIMEOUT_SMALL_MS = 15_000;
+public static final int HTTP_MAX_REQ_TIME_SECONDS = 60;
+public static final long BODY_READ_TOTAL_TIMEOUT_SEND_MS = 55_000;
+public static final int SSE_MAX_PER_USER = 5;
+public static final long SSE_HEARTBEAT_SECONDS = 20;
+public static final int SSE_NOTIFY_THREADS = 2;
+public static final int SSE_NOTIFY_QUEUE_SIZE = 10_000;
+public static final long SSE_TICKET_TTL_MS = 30_000;
+public static final int SESSION_MAX_PER_USER = 10;
+public static final int THROTTLE_MAX_ATTEMPTS_PER_PAIR = 5;     // theo cặp IP+user
+public static final int THROTTLE_MAX_ATTEMPTS_PER_IP = 30;      // tổng theo IP
+public static final int THROTTLE_MAX_REGISTER_PER_IP = 20;      // số lần đăng ký / IP / cửa sổ
+public static final long THROTTLE_WINDOW_MS = 15 * 60 * 1000L;  // cửa sổ đếm / thời gian khóa
+public static final long ADMIN_STATS_CACHE_MS = 45_000;
+public static final int ADMIN_LOGS_DEFAULT_LINES = 500;
+public static final int ADMIN_LOGS_MAX_LINES = 2000;
+public static final long ADMIN_LOG_MAX_BYTES = 5 * 1024 * 1024L; // xoay vòng khi vượt
+public static final int ADMIN_LOG_KEEP_FILES = 3;
+public static final boolean PRODUCTION = envBool("PBL4_PRODUCTION", false);
+public static final String MAIL_HOSTNAME = envString("PBL4_MAIL_HOSTNAME", "mail." + MAIL_DOMAIN);
+public static final int MX_PORT = envInt("PBL4_MX_PORT", 25, 1, 65535);
+public static final int SUBMISSION_PORT = envInt("PBL4_SUBMISSION_PORT", 587, 1, 65535);
+public static final int SMTPS_PORT = envInt("PBL4_SMTPS_PORT", 465, 0, 65535);
+public static final String OUTBOUND_MODE = envEnum("PBL4_OUTBOUND_MODE", "DIRECT", "DIRECT", "RELAY");
+public static final String OUTBOUND_TLS = envEnum("PBL4_OUTBOUND_TLS", "OPPORTUNISTIC", "OPPORTUNISTIC", "REQUIRED", "OFF");
+public static final int OUTBOUND_REMOTE_PORT = envInt("PBL4_OUTBOUND_REMOTE_PORT", 25, 1, 65535);
+public static final int OUTBOUND_WORKERS = envInt("PBL4_OUTBOUND_WORKERS", 10, 1, 1000);
+public static final int OUTBOUND_PER_DOMAIN_CONN = envInt("PBL4_OUTBOUND_PER_DOMAIN_CONN", 2, 1, 100);
+public static final int OUTBOUND_MAX_AGE_HOURS = envInt("PBL4_OUTBOUND_MAX_AGE_HOURS", 96, 1, 24 * 90);
+public static final boolean OUTBOUND_USE_IPV6 = envBool("PBL4_OUTBOUND_USE_IPV6", false);
+public static final String DKIM_SELECTOR = envString("PBL4_DKIM_SELECTOR", "pbl4");
+public static final String DKIM_KEY_DIR = envString("PBL4_DKIM_KEY_DIR", "data/dkim/");
+public static final String SPF_MODE = envEnum("PBL4_SPF_MODE", "MARK", "OFF", "MARK", "ENFORCE");
+public static final boolean DMARC_ENFORCE = envBool("PBL4_DMARC_ENFORCE", true);
+public static final String DNS_SERVERS = envString("PBL4_DNS_SERVERS", "");
+public static final int INBOUND_MAX_CONN_PER_IP = envInt("PBL4_INBOUND_MAX_CONN_PER_IP", 20, 0, 100000);
+public static final int INBOUND_MSGS_PER_IP_PER_MIN = envInt("PBL4_INBOUND_MSGS_PER_IP_PER_MIN", 30, 0, 1000000);
+public static List<String> productionErrors(boolean production, String adminPassEnv, String secretKeyEnv, String mailDomain) {
+public static void validateProduction() {
+// FILE: src\main\java\com\pbl4\mailserver\core\Folder.java
+public enum Folder { INBOX, SPAM }
+// FILE: src\main\java\com\pbl4\mailserver\core\LimitedLineReader.java
+public class LimitedLineReader {
+public static class LineTooLongException extends IOException {
+public LineTooLongException(int limit) {
+public int getLimit() {
+public LimitedLineReader(InputStream in, int maxLineBytes) {
+public void setMaxLineBytes(int maxLineBytes) {
+public int getMaxLineBytes() {
+public void setDeadlineNanos(long deadlineNanos) {
+public boolean hasBufferedData() {
+public int readByte() throws IOException {
+public String readLine() throws IOException {
+// FILE: src\main\java\com\pbl4\mailserver\core\LoginThrottle.java
+public class LoginThrottle {
+public static boolean isThrottled(String clientIp, String username) {
+public static boolean isThrottled(String identity) {
+public static void recordFailedAttempt(String clientIp, String username) {
+public static void recordFailedAttempt(String identity) {
+public static void resetAttempts(String clientIp, String username) {
+public static void resetAttempts(String identity) {
+public static boolean isRegisterThrottled(String clientIp) {
+public static void recordRegistration(String clientIp) {
+public static void resetForTest(LongSupplier testClock) {
+// FILE: src\main\java\com\pbl4\mailserver\core\MailService.java
+public class MailService {
+public static class DeliveryResult {
+public final boolean success;
+public final int successCount;
+public final int failCount;
+public final String message;
+public final boolean quotaExceeded;
+public DeliveryResult(boolean success, int successCount, int failCount, String message) {
+public DeliveryResult(boolean success, int successCount, int failCount, String message, boolean quotaExceeded) {
+public static DeliveryResult deliver(String sender, String recipientsRaw, String subject, String body) {
+public static DeliveryResult deliverRaw(String sender, Set<String> recipients, String rawMessage) {
+public static DeliveryResult submit(String authUser, String envelopeFrom, Set<String> rcpts, byte[] raw) {
+public static DeliveryResult deliverLocal(String envelopeFrom, Set<String> localRcpts, byte[] raw, Folder folder) {
+public static List<String> listInbox(String username) {
+public static List<String> listSent(String username) {
+// FILE: src\main\java\com\pbl4\mailserver\core\MailStorageEngine.java
+public class MailStorageEngine {
+public static final class StoredMail {
+public final String id;
+public final String content;
+public StoredMail(String id, String content) {
+public static StoredMail ofBytes(String id, byte[] raw) {
+public byte[] rawBytes() {
+public static final class MailSummary {
+public final String id;
+public final String sender;
+public final String recipient;
+public final String subject;
+public final String timestamp;
+public MailSummary(String id, String sender, String recipient, String subject, String timestamp) {
+public static final class MailPage {
+public final List<MailSummary> mails;
+public final int total;
+public MailPage(List<MailSummary> mails, int total) {
+public static final class MailMeta {
+public final String id;
+public final long sizeBytes;
+public MailMeta(String id, long sizeBytes) {
+public long size() {
+public enum SaveResult { OK, NO_USER, OVER_QUOTA, ERROR }
+protected boolean removeEldestEntry(Map.Entry<String, V> eldest) {
+public boolean exists(String user) {
+public String findSalt(String user) {
+public static void initMailbox(String username) {
+public static long getMailboxSizeInBytes(String username) {
+public static boolean saveEmail(String recipient, String rawEmailContent) {
+public static SaveResult saveEmailResult(String recipient, String rawEmailContent) {
+public static SaveResult saveEmailResult(String mailbox, byte[] raw) {
+public static MailPage listMailSummaries(String username, int page, int limit) {
+public static List<StoredMail> listMails(String username) {
+public static List<MailMeta> listMailMetas(String mailbox) {
+public static StoredMail getSingleMail(String username, String fileId) {
+public static List<byte[]> readAllEmailBytes(String username) {
+public static List<String> readAllEmails(String username) {
+public static void deleteMailsByIds(String username, Collection<String> fileIds) {
+public static void deleteEmails(String username, Set<Integer> deletedIndices) {
+public static void deleteMailbox(String username) {
+public static void evictUser(String username) {
+public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
+public FileVisitResult postVisitDirectory(Path d, IOException exc) {
+public static int purgeOldSpam() {
+public static long getTotalMailCount() {
+public static long getTotalStorageSizeBytes() {
+// FILE: src\main\java\com\pbl4\mailserver\core\OutboundMailService.java
+public class OutboundMailService implements OutboundSender {
+public static OutboundMailService getInstance() {
+public MailService.DeliveryResult send(String sender, Set<String> externalRecipients, String rawEmailContent) {
+public X509Certificate[] getAcceptedIssuers() { return null; }
+public void checkClientTrusted(X509Certificate[] certs, String authType) {}
+public void checkServerTrusted(X509Certificate[] certs, String authType) {}
+// FILE: src\main\java\com\pbl4\mailserver\core\OutboundQueue.java
+public class OutboundQueue {
+public static void start() {
+public static boolean enqueue(String envelopeFrom, Set<String> externalRcpts, byte[] raw) {
+public static List<QueueEntry> snapshot() {
+public static boolean retryNow(String id) {
+public static boolean delete(String id) {
+public int compareTo(Sched o) {
+// FILE: src\main\java\com\pbl4\mailserver\core\OutboundSender.java
+public interface OutboundSender {
+// FILE: src\main\java\com\pbl4\mailserver\core\SecurityUtils.java
+public class SecurityUtils {
+public static String hashPassword(String plainPassword) {
+public static boolean checkPassword(String plainPassword, String hashedPassword) {
+public static byte[] generateSalt() {
+public static SecretKey deriveKey(String secretKey, byte[] salt) throws Exception {
+public static String encrypt(String plainText, String secretKey, byte[] userSalt) throws Exception {
+public static String decrypt(String encryptedData, String secretKey, byte[] userSalt) throws Exception {
+public static String decryptWithKey(String encryptedData, SecretKey secretKey) {
+// FILE: src\main\java\com\pbl4\mailserver\core\SslContextFactory.java
+public class SslContextFactory {
+public static SSLContext createSSLContext() {
+public static SSLSocket wrapServerSocket(Socket plain) throws IOException {
+public static boolean isUsingPem() {
+public static void setPemFiles(Path cert, Path key) {
+public static void setReloadCheckIntervalMs(long ms) {
+public static void reset() {
+public static SSLContext loadFromPem(Path cert, Path key) throws Exception {
+// FILE: src\main\java\com\pbl4\mailserver\core\User.java
+public class User {
+public User() {}
+public User(String username, String passwordHash, String salt, String status, String role) {
+public String getUsername() { return username; }
+public void setUsername(String username) { this.username = username; }
+public String getPasswordHash() { return passwordHash; }
+public void setPasswordHash(String passwordHash) { this.passwordHash = passwordHash; }
+public String getSalt() { return salt; }
+public void setSalt(String salt) { this.salt = salt; }
+public String getStatus() { return status; }
+public void setStatus(String status) { this.status = status; }
+public String getRole() { return role; }
+public void setRole(String role) { this.role = role; }
+public String toString() {
+// FILE: src\main\java\com\pbl4\mailserver\core\UserStore.java
+public class UserStore {
+public static synchronized void initDefaultUsers() {
+public static String canonical(String name) {
+public static boolean exists(String username) {
+public static User getUser(String username) {
+public static String findHash(String username) {
+public static String findSalt(String username) {
+public static String getStatus(String username) {
+public static synchronized boolean addUserIfAbsent(String username, String passwordHash) {
+public static synchronized void addUser(String username, String passwordHash) {
+public static synchronized void addUser(String username, String passwordHash, String saltBase64, String status, String role) {
+public static synchronized boolean setStatus(String username, String newStatus) {
+public static boolean deleteUser(String username) {
+public static synchronized List<User> getAllUsers() {
+// FILE: src\main\java\com\pbl4\mailserver\dns\DkimSigner.java
+public final class DkimSigner {
+public static byte[] sign(byte[] raw, String domain) {
+public static byte[] sign(byte[] raw, String domain, String selector, Path keyDir) {
+public static String publicKeyRecord(String domain, String selector, Path keyDir) {
+public static String publicKeyRecord() {
+// FILE: src\main\java\com\pbl4\mailserver\dns\DkimVerifier.java
+public final class DkimVerifier {
+public static List<DkimResult> verify(byte[] raw) {
+// FILE: src\main\java\com\pbl4\mailserver\dns\DnsException.java
+public class DnsException extends Exception {
+public DnsException(String message, boolean temporary) {
+public DnsException(String message, boolean temporary, Throwable cause) {
+public boolean temporary() {
+// FILE: src\main\java\com\pbl4\mailserver\dns\DnsJavaLookup.java
+public final class DnsJavaLookup implements DnsLookup {
+protected boolean removeEldestEntry(Map.Entry<String, CacheEntry> eldest) {
+public DnsJavaLookup() {
+public DnsJavaLookup(Resolver resolver) {
+public List<MxRecord> mx(String domain) throws DnsException {
+public List<String> txt(String nameStr) throws DnsException {
+public List<InetAddress> addresses(String host) throws DnsException {
+public String ptr(InetAddress ip) throws DnsException {
+public void clearCache() {
+// FILE: src\main\java\com\pbl4\mailserver\dns\DnsLookup.java
+public interface DnsLookup {
+// FILE: src\main\java\com\pbl4\mailserver\dns\DnsLookupHolder.java
+// FILE: src\main\java\com\pbl4\mailserver\dns\FakeDnsLookup.java
+public class FakeDnsLookup implements DnsLookup {
+public FakeDnsLookup addMx(String domain, int preference, String host) {
+public FakeDnsLookup setNullMx(String domain) {
+public FakeDnsLookup addTxt(String name, String value) {
+public FakeDnsLookup addAddress(String host, String ip) {
+public FakeDnsLookup setPtr(String ip, String host) {
+public FakeDnsLookup failTemporary(String name) {
+public FakeDnsLookup failPermanent(String name) {
+public FakeDnsLookup install() {
+public static void uninstall() {
+public int queryCount() {
+public List<MxRecord> mx(String domain) throws DnsException {
+public List<String> txt(String name) throws DnsException {
+public List<InetAddress> addresses(String host) throws DnsException {
+public String ptr(InetAddress ip) throws DnsException {
+// FILE: src\main\java\com\pbl4\mailserver\dns\MxRecord.java
+public record MxRecord(int preference, String host) {}
+// FILE: src\main\java\com\pbl4\mailserver\mime\AttachmentInfo.java
+public record AttachmentInfo(String name, String contentType, byte[] data) {
+public AttachmentInfo {
+public String toString() {
+// FILE: src\main\java\com\pbl4\mailserver\mime\MessageNormalizer.java
+public final class MessageNormalizer {
+public static byte[] normalize(byte[] raw, String envelopeFrom) {
+// FILE: src\main\java\com\pbl4\mailserver\mime\MimeBuilder.java
+public final class MimeBuilder {
+public static byte[] fromWebForm(String from, String to, String subject, String body) {
+// FILE: src\main\java\com\pbl4\mailserver\mime\MimeParser.java
+public final class MimeParser {
+public static final int MAX_MIME_DEPTH = 10;
+public static final int MAX_PARTS = 200;
+public static final int MAX_HEADER_BYTES = 256 * 1024;
+public static final int MAX_HEADER_FIELDS = 1000;
+public static final long MAX_ATTACHMENT_BYTES = 40L * 1024 * 1024;
+public static final long MAX_TOTAL_ATTACHMENT_BYTES = 64L * 1024 * 1024;
+public static final int MAX_TEXT_PART_BYTES = 4 * 1024 * 1024;
+public static final int MAX_TEXT_CHARS = 2_000_000;
+public static String decodeHeader(String v) {
+public static ParsedMail parse(byte[] raw) {
+// FILE: src\main\java\com\pbl4\mailserver\mime\ParsedMail.java
+public record ParsedMail(String from, String to, String subject, String date, String text,
+public ParsedMail {
+// FILE: src\main\java\com\pbl4\mailserver\outbound\BounceBuilder.java
+public final class BounceBuilder {
+public record Failure(String rcpt, String diagnostic, boolean expired) {
+public Failure {
+public static boolean shouldBounce(String envelopeFrom) {
+public static byte[] build(String mailDomain, String reportingHost, String envelopeFrom, String destDomain,
+// FILE: src\main\java\com\pbl4\mailserver\outbound\Deliverer.java
+public interface Deliverer {
+// FILE: src\main\java\com\pbl4\mailserver\outbound\Deliverers.java
+public final class Deliverers {
+public static Deliverer get() {
+public static void set(Deliverer d) {
+// FILE: src\main\java\com\pbl4\mailserver\outbound\MxDeliverer.java
+public final class MxDeliverer implements Deliverer {
+public record Settings(String ehloHostname, int remotePort, String tlsMode, boolean useIpv6,
+public Settings {
+public static Settings fromServerConfig() {
+public MxDeliverer() {
+public List<RcptResult> deliver(String envelopeFrom, String domain, List<String> rcpts, byte[] raw) {
+// FILE: src\main\java\com\pbl4\mailserver\outbound\QueueEntry.java
+public record QueueEntry(String id, String envelopeFrom, String domain, List<String> rcpts,
+public QueueEntry {
+// FILE: src\main\java\com\pbl4\mailserver\outbound\RcptResult.java
+public record RcptResult(String rcpt, RcptStatus status, String diagnostic) {
+public RcptResult {
+// FILE: src\main\java\com\pbl4\mailserver\outbound\RcptStatus.java
+public enum RcptStatus {
+// FILE: src\main\java\com\pbl4\mailserver\outbound\RelayDeliverer.java
+public final class RelayDeliverer implements Deliverer {
+public record Settings(String host, int port, String user, String pass, String ehloHostname,
+public static Settings fromServerConfig() {
+public RelayDeliverer() {
+public List<RcptResult> deliver(String envelopeFrom, String domain, List<String> rcpts, byte[] raw) {
+// FILE: src\main\java\com\pbl4\mailserver\outbound\SmtpClient.java
+public void close() { closeQuietly(socket); }
+// FILE: src\main\java\com\pbl4\mailserver\pop3\Pop3Handler.java
+public class Pop3Handler implements Runnable {
+public boolean isThrottled(String ip, String user) {
+public void recordFailure(String ip, String user) {
+public void resetFailures(String ip, String user) {
+public String authenticate(String user, String password) {
+public List<MailStorageEngine.MailMeta> listMetas(String mailbox) {
+public MailStorageEngine.StoredMail getMail(String mailbox, String id) {
+public void deleteMails(String mailbox, List<String> ids) {
+public Pop3Handler(Socket socket) {
+public void run() {
+// FILE: src\main\java\com\pbl4\mailserver\pop3\Pop3ServerManager.java
+public class Pop3ServerManager {
+public static void startServer() {
+public static void stopServer() {
+// FILE: src\main\java\com\pbl4\mailserver\pop3\Pop3Wire.java
+// FILE: src\main\java\com\pbl4\mailserver\ratelimit\AbuseGuard.java
+public final class AbuseGuard {
+public static Engine defaultEngine() {
+public static boolean allowConnect(String ip) {
+public static boolean allowMessage(String ip) {
+public static boolean recordBadRcpt(String ip) {
+public static void recordGoodRcpt(String ip) {
+public static void release(String ip) {
+public static final class Engine {
+public Engine(int maxConnPerIp, int msgsPerMin, int badRcptLimit, long banMs,
+public boolean allowConnect(String ip) {
+public void release(String ip) {
+public boolean allowMessage(String ip) {
+public boolean recordBadRcpt(String ip) {
+public void recordGoodRcpt(String ip) {
+public void ban(String ip, long ms) {
+public boolean isBanned(String ip) {
+public int trackedIps() {
+public void sweep() {
+// FILE: src\main\java\com\pbl4\mailserver\smtp\MxHandler.java
+public final class MxHandler implements SmtpListener.SessionHandler {
+public interface UserDirectory {
+public interface LocalDelivery {
+public MxHandler() {
+public MxHandler(AbuseGuard.Engine guard, InboundAuthenticator authenticator, LocalDelivery delivery,
+public void handle(SmtpConnection c) throws Exception {
+// FILE: src\main\java\com\pbl4\mailserver\smtp\SmtpListener.java
+public final class SmtpListener {
+public interface SessionHandler {
+public static final class Options {
+public final int poolSize;
+public final int queueSize;
+public final int backlog;
+public final int maxConnPerIp;      // 0 = không giới hạn
+public final AbuseGuard.Engine guard; // null = không dùng AbuseGuard
+public Options(int poolSize, int queueSize, int backlog, int maxConnPerIp, AbuseGuard.Engine guard) {
+public static Options fromConfig() {
+public SmtpListener(String name, int port, boolean implicitTls, Supplier<SessionHandler> factory) {
+public SmtpListener(String name, int port, boolean implicitTls, Supplier<SessionHandler> factory, Options options) {
+public synchronized void start() {
+public synchronized void stop() {
+public boolean isRunning() {
+public int getLocalPort() {
+public void run() {
+// FILE: src\main\java\com\pbl4\mailserver\smtp\SmtpServerManager.java
+public class SmtpServerManager {
+public static synchronized void startServer() {
+public static synchronized void stopServer() {
+// FILE: src\main\java\com\pbl4\mailserver\smtp\SubmissionHandler.java
+public class SubmissionHandler implements SmtpListener.SessionHandler {
+public SubmissionHandler() {
+public SubmissionHandler(boolean requireTls) {
+public void handle(SmtpConnection c) throws Exception {
+// FILE: src\main\java\com\pbl4\mailserver\smtp\wire\DataLineTooLongException.java
+public class DataLineTooLongException extends DataTooLargeException {
+public DataLineTooLongException(int limit) {
+public int getLimit() {
+// FILE: src\main\java\com\pbl4\mailserver\smtp\wire\DataTooLargeException.java
+public class DataTooLargeException extends IOException {
+public DataTooLargeException() {
+public DataTooLargeException(String message) {
+// FILE: src\main\java\com\pbl4\mailserver\smtp\wire\SmtpConnection.java
+public final class SmtpConnection implements AutoCloseable {
+public SmtpConnection(Socket socket) throws IOException {
+public SmtpConnection(Socket socket, boolean implicitTls) throws IOException {
+public String remoteIp() {
+public boolean isTls() {
+public boolean isClosed() {
+public boolean tlsAvailable() {
+public void setTimeoutMs(int ms) {
+public void setAuthenticated(boolean authenticated) {
+public void setMaxDataLineBytes(int bytes) {
+public String readCommand() throws IOException {
+public String readRawLine() throws IOException {
+public byte[] readData(long maxBytes) throws IOException {
+public void reply(String fullLine) throws IOException {
+public void replyMulti(int code, List<String> lines) throws IOException {
+public boolean startTls() {
+public void close() {
+// FILE: src\main\java\com\pbl4\mailserver\webapi\AdminHandler.java
+public class AdminHandler implements HttpHandler {
+public String validate(String token) {
+public boolean isAdmin(String user) {
+public List<QueueEntry> snapshot() {
+public boolean retryNow(String id) {
+public boolean delete(String id) {
+public void handle(HttpExchange exchange) throws IOException {
+// FILE: src\main\java\com\pbl4\mailserver\webapi\ApiServer.java
+public class ApiServer {
+public static void startServer() {
+public void run() {
+public CorsHandlerWrapper(HttpHandler handler) {
+public void handle(HttpExchange exchange) throws IOException {
+public void handle(HttpExchange exchange) throws IOException {
+// FILE: src\main\java\com\pbl4\mailserver\webapi\AuthHandler.java
+public class AuthHandler implements HttpHandler {
+public AuthHandler() {
+public void handle(HttpExchange exchange) throws IOException {
+// FILE: src\main\java\com\pbl4\mailserver\webapi\CorsFilter.java
+public class CorsFilter extends Filter {
+public void doFilter(HttpExchange exchange, Chain chain) throws IOException {
+public String description() {
+// FILE: src\main\java\com\pbl4\mailserver\webapi\MailHandler.java
+public class MailHandler implements HttpHandler {
+public void handle(HttpExchange exchange) throws IOException {
+// FILE: src\main\java\com\pbl4\mailserver\webapi\SessionManager.java
+public class SessionManager {
+public static String createSession(String username) {
+public static String validate(String token) {
+public static String getUsername(String token) {
+public static void invalidate(String token) {
+public static void invalidateUser(String username) {
+// FILE: src\main\java\com\pbl4\mailserver\webapi\SseManager.java
+public class SseManager {
+public static final class TicketInfo {
+public final String username;
+public final String token;
+public static String issueTicket(String username, String token) {
+public static TicketInfo consumeTicket(String ticketId) {
+public static void register(String username, String token, HttpExchange exchange, OutputStream os) {
+public static void closeByToken(String username, String token) {
+public static void closeUser(String username) {
+public static void notifyUser(String username, String mailSummaryJson) {

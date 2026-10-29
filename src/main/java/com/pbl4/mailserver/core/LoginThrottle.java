@@ -157,7 +157,7 @@ public class LoginThrottle {
         return attempts.size();
     }
 
-    static void resetForTest(LongSupplier testClock) {
+    public static void resetForTest(LongSupplier testClock) {
         attempts.clear();
         clock = testClock == null ? System::currentTimeMillis : testClock;
     }

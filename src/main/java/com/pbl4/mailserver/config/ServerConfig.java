@@ -37,6 +37,7 @@ public class ServerConfig {
     public static final String OUTBOUND_SMTP_USER = System.getenv().getOrDefault("PBL4_OUTBOUND_SMTP_USER", "");
     public static final String OUTBOUND_SMTP_PASS = System.getenv().getOrDefault("PBL4_OUTBOUND_SMTP_PASS", "");
     public static final String MAIL_DOMAIN = System.getenv().getOrDefault("PBL4_MAIL_DOMAIN", "pbl4.com");
+    public static final String ADMIN_EMAIL = "admin@" + MAIL_DOMAIN.toLowerCase(Locale.ROOT);
     public static final boolean OUTBOUND_TRUST_ALL = Boolean.parseBoolean(System.getenv().getOrDefault("PBL4_OUTBOUND_TRUST_ALL", "false"));
 
     public static final int HTTP_WORKER_THREADS = getHttpThreadsConfig();

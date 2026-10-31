@@ -1,6 +1,13 @@
-data/
-*.enc
 target/
+data/
+*.jar
+*.zip
+err-*.txt
+test-result.txt
+dependency-reduced-pom.xml
+*.log
+.idea/
+.vscode/
 .settings/
 .classpath
 .project

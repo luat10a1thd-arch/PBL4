@@ -1,7 +1,7 @@
 package com.pbl4.mailserver.auth;
 
 import com.pbl4.mailserver.auth.InboundVerdict.Action;
-
+import com.pbl4.mailserver.config.ServerConfig;
 import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -39,12 +39,11 @@ public final class DefaultInboundAuthenticator implements InboundAuthenticator {
     public record Settings(String authservId, String spfMode, boolean dmarcEnforce) {
 
         /**
-         * Đọc trực tiếp biến môi trường PBL4_* (cùng khóa và mặc định như CONTRACT).
-         * TODO(A1): khi ServerConfig có getter tương ứng thì thay bằng ServerConfig.
+         * authservId lấy từ ServerConfig.MAIL_HOSTNAME (cùng nguồn với Received và HELO);
+         * spfMode và dmarcEnforce vẫn đọc từ biến môi trường PBL4_*.
          */
         static Settings fromEnv() {
-            String domain = env("PBL4_MAIL_DOMAIN", "localhost");
-            String host = env("PBL4_MAIL_HOSTNAME", "mail." + domain);
+            String host = ServerConfig.MAIL_HOSTNAME;
             String spf = env("PBL4_SPF_MODE", "MARK").toUpperCase(Locale.ROOT);
             boolean dmarc = !"false".equalsIgnoreCase(env("PBL4_DMARC_ENFORCE", "true"));
             return new Settings(host, spf, dmarc);
@@ -97,9 +96,9 @@ public final class DefaultInboundAuthenticator implements InboundAuthenticator {
         List<Field> fields = splitHeaders(new String(raw, 0, hdrEnd, StandardCharsets.ISO_8859_1));
         List<Field> kept = new ArrayList<>();
         List<String> fromValues = new ArrayList<>();
-        for (Field f : fields) {
-            if (f.name.equalsIgnoreCase("authentication-results") && authservOf(f.value()).equals(authserv)) {
-                continue;                                     // giả mạo/cũ: gỡ
+                for (Field f : fields) {
+            if (f.name.equalsIgnoreCase("authentication-results")) {
+                continue;     // thư từ ngoài vào cổng MX: gỡ MỌI Authentication-Results có sẵn (người gửi có thể tự chèn giả)
             }
             if (f.name.equalsIgnoreCase("from")) {
                 fromValues.add(f.value());

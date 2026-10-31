@@ -588,7 +588,7 @@ public class AdminHandler implements HttpHandler {
             return;
         }
 
-        if ("admin@pbl4.com".equalsIgnoreCase(targetUser)) {
+        if (ServerConfig.ADMIN_EMAIL.equalsIgnoreCase(targetUser)) {
             sendResponse(exchange, 400, "{\"success\": false, \"message\": \"Không thể khóa tài khoản Admin mặc định!\"}");
             return;
         }
@@ -619,7 +619,7 @@ public class AdminHandler implements HttpHandler {
             return;
         }
 
-        if ("admin@pbl4.com".equalsIgnoreCase(targetUser)) {
+        if (ServerConfig.ADMIN_EMAIL.equalsIgnoreCase(targetUser)) {
             sendResponse(exchange, 400, "{\"success\": false, \"message\": \"Không thể xóa tài khoản Admin mặc định!\"}");
             return;
         }
@@ -665,7 +665,7 @@ public class AdminHandler implements HttpHandler {
         final List<String> recipients = new ArrayList<>();
         for (User user : UserStore.getAllUsers()) {
             if (user.getUsername() == null || user.getUsername().trim().isEmpty()
-                    || user.getUsername().equalsIgnoreCase("admin@pbl4.com")) {
+                    || user.getUsername().equalsIgnoreCase(ServerConfig.ADMIN_EMAIL)) {
                 continue;
             }
             recipients.add(user.getUsername().trim());
@@ -703,7 +703,7 @@ public class AdminHandler implements HttpHandler {
 
         for (String recipient : recipients) {
             try {
-                String rawEmail = "From: admin@pbl4.com\n"
+                String rawEmail = "From: " + ServerConfig.ADMIN_EMAIL + "\n"
                         + "To: " + recipient + "\n"
                         + "Subject: " + safeSubject + "\n"
                         + "Date: " + nowStr + "\n"
@@ -723,8 +723,8 @@ public class AdminHandler implements HttpHandler {
         }
 
         try {
-            String adminRecord = "From: admin@pbl4.com\nTo: ALL_USERS\nSubject: " + safeSubject + "\nDate: " + nowStr + "\n\n" + content;
-            MailStorageEngine.saveEmail("admin@pbl4.com_sent", adminRecord);
+            String adminRecord = "From: " + ServerConfig.ADMIN_EMAIL + "\nTo: ALL_USERS\nSubject: " + safeSubject + "\nDate: " + nowStr + "\n\n" + content;
+            MailStorageEngine.saveEmail(ServerConfig.ADMIN_EMAIL + "_sent", adminRecord);
         } catch (Exception ignored) {}
 
         invalidateStatsCache();

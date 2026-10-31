@@ -11,6 +11,7 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.util.Locale;
 import java.security.MessageDigest;
 import java.util.Base64;
 import java.util.concurrent.ConcurrentHashMap;
@@ -283,6 +284,15 @@ public class ApiServer {
 
                 byte[] raw = is.readAllBytes();
                 is.close();
+
+                // Thay domain mặc định bằng domain cấu hình (PBL4_MAIL_DOMAIN) trong tệp văn bản tĩnh
+                // (placeholder, nhãn, kiểm tra endsWith('@...'), so sánh admin). Kết quả được cache.
+                if (path.endsWith(".html") || path.endsWith(".js")) {
+                    String domain = ServerConfig.MAIL_DOMAIN.toLowerCase(Locale.ROOT);
+                    if (!"pbl4.com".equals(domain)) {
+                        raw = new String(raw, StandardCharsets.UTF_8).replace("pbl4.com", domain).getBytes(StandardCharsets.UTF_8);
+                    }
+                }
 
                 String contentType = getContentType(path);
                 String etag = "\"" + computeETag(raw) + "\"";

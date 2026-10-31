@@ -52,9 +52,9 @@ public class UserStore {
             byte[] salt = SecurityUtils.generateSalt();
             String saltBase64 = Base64.getEncoder().encodeToString(salt);
             String hash = SecurityUtils.hashPassword(ServerConfig.ADMIN_DEFAULT_PASS);
-            addUser("admin@pbl4.com", hash, saltBase64, "ACTIVE", "ADMIN");
-        } else if (!exists("admin@pbl4.com")) {
-            System.err.println("[USERSTORE] CẢNH BÁO: users.json đã có người dùng nhưng không có admin@pbl4.com, KHÔNG tự tạo lại admin mặc định.");
+            addUser(ServerConfig.ADMIN_EMAIL, hash, saltBase64, "ACTIVE", "ADMIN");
+        } else if (!exists(ServerConfig.ADMIN_EMAIL)) {
+            System.err.println("[USERSTORE] CẢNH BÁO: users.json đã có người dùng nhưng không có " + ServerConfig.ADMIN_EMAIL + ", KHÔNG tự tạo lại admin mặc định.");
         }
     }
 
@@ -267,7 +267,7 @@ public class UserStore {
     // Chỉ ảnh hưởng exists()/canonical() (để MxHandler nhận thư và MailService giao vào hòm admin).
     // KHÔNG nằm trong userMap: không xuất hiện trong getAllUsers() (trang admin), không đăng nhập được,
     // không ghi vào users.json. Nếu có tài khoản THẬT trùng tên thì tài khoản thật được ưu tiên.
-    private static final String ADMIN_USERNAME = "admin@pbl4.com";
+    private static final String ADMIN_USERNAME = ServerConfig.ADMIN_EMAIL;
     private static final Set<String> ALIAS_LOCAL_PARTS = Set.of("postmaster", "abuse");
 
     private static boolean isAliasName(String lowerName) {
@@ -277,7 +277,6 @@ public class UserStore {
         if (!ALIAS_LOCAL_PARTS.contains(lowerName.substring(0, at))) return false;
         String domain = lowerName.substring(at + 1);
         return domain.equals(ServerConfig.MAIL_DOMAIN.toLowerCase(Locale.ROOT))
-                || domain.equals("pbl4.com")
                 || domain.equals("localhost");
     }
 
@@ -318,7 +317,7 @@ public class UserStore {
         }
         byte[] saltBytes = SecurityUtils.generateSalt();
         String saltBase64 = Base64.getEncoder().encodeToString(saltBytes);
-        String role = "admin@pbl4.com".equalsIgnoreCase(username) ? "ADMIN" : "USER";
+        String role = ServerConfig.ADMIN_EMAIL.equalsIgnoreCase(username) ? "ADMIN" : "USER";
 
         User user = new User(username.trim(), passwordHash, saltBase64, "ACTIVE", role);
         userMap.put(key, user);
@@ -329,7 +328,7 @@ public class UserStore {
     public static synchronized void addUser(String username, String passwordHash) {
         byte[] saltBytes = SecurityUtils.generateSalt();
         String saltBase64 = Base64.getEncoder().encodeToString(saltBytes);
-        String role = "admin@pbl4.com".equalsIgnoreCase(username) ? "ADMIN" : "USER";
+        String role = ServerConfig.ADMIN_EMAIL.equalsIgnoreCase(username) ? "ADMIN" : "USER";
 
         addUser(username, passwordHash, saltBase64, "ACTIVE", role);
     }

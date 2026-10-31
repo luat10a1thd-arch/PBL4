@@ -1,18 +1,17 @@
 package com.pbl4.mailserver.pop3;
 
+import com.pbl4.mailserver.config.ServerConfig;
+import com.pbl4.mailserver.core.LimitedLineReader;
 import com.pbl4.mailserver.core.LoginThrottle;
 import com.pbl4.mailserver.core.MailStorageEngine;
 import com.pbl4.mailserver.core.SecurityUtils;
 import com.pbl4.mailserver.core.SslContextFactory;
 import com.pbl4.mailserver.core.UserStore;
 
-import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLSocket;
-import javax.net.ssl.SSLSocketFactory;
-import java.io.BufferedReader;
-import java.io.InputStreamReader;
-import java.io.OutputStreamWriter;
-import java.io.PrintWriter;
+import java.io.BufferedOutputStream;
+import java.io.IOException;
+import java.io.OutputStream;
 import java.net.Socket;
 import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
@@ -20,11 +19,18 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 public class Pop3Handler implements Runnable {
 
+    private static final Logger LOG = Logger.getLogger(Pop3Handler.class.getName());
+
+    // Mọi dòng trả về POP3 phải kết thúc bằng CRLF tường minh (println dùng "\n" trên Linux)
+    private static final byte[] CRLF = {'\r', '\n'};
+
     private Socket clientSocket;
-    private static final int SOCKET_TIMEOUT_MS = 30000;
 
     public Pop3Handler(Socket socket) {
         this.clientSocket = socket;
@@ -32,87 +38,102 @@ public class Pop3Handler implements Runnable {
 
     @Override
     public void run() {
+        final long sessionDeadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(ServerConfig.SESSION_MAX_MS);
+
         try {
-            clientSocket.setSoTimeout(SOCKET_TIMEOUT_MS);
+            clientSocket.setSoTimeout(ServerConfig.PREAUTH_TIMEOUT_MS);
         } catch (Exception ignored) {}
 
         String clientIp = clientSocket.getInetAddress().getHostAddress();
+        OutputStream out = null;
 
         try {
-            BufferedReader in = new BufferedReader(new InputStreamReader(clientSocket.getInputStream(), StandardCharsets.UTF_8));
-            PrintWriter out = new PrintWriter(new OutputStreamWriter(clientSocket.getOutputStream(), StandardCharsets.UTF_8), true);
+            LimitedLineReader in = newReader(clientSocket, sessionDeadline);
+            out = newWriter(clientSocket);
 
-            out.println("+OK PBL4 POP3 Server Ready");
+            send(out, "+OK PBL4 POP3 Server Ready");
 
             String line;
             String pendingUser = null;
             String currentUser = null;
             boolean isAuthenticated = false;
             boolean isTlsActive = false;
-            List<MailStorageEngine.StoredMail> emails = new ArrayList<>();
+
+            // PASS chỉ lấy metadata (id + kích thước), KHÔNG giải mã cả hòm thư.
+            // Nội dung thư chỉ được giải mã lười, từng thư một, khi RETR/TOP.
+            List<MailStorageEngine.MailMeta> metas = new ArrayList<>();
+            long[] sizes = new long[0];
             Set<Integer> deletedIndices = new HashSet<>();
 
-            while ((line = in.readLine()) != null) {
+            while (true) {
+                applyReadTimeout(isAuthenticated, sessionDeadline);
+                line = in.readLine();
+                if (line == null) break;
+
                 String[] tokens = line.split(" ", 2);
                 String command = tokens[0].toUpperCase();
                 String argument = tokens.length > 1 ? tokens[1].trim() : "";
 
                 if ("STLS".equals(command)) {
+                    if (isAuthenticated) {
+                        send(out, "-ERR Command not permitted when authenticated");
+                        continue;
+                    }
                     if (isTlsActive) {
-                        out.println("-ERR TLS already active");
+                        send(out, "-ERR TLS already active");
                         continue;
                     }
 
-                    SSLContext sslContext = SslContextFactory.createSSLContext();
-                    if (sslContext == null) {
-                        out.println("-ERR STLS not available");
+                    if (SslContextFactory.createSSLContext() == null) {
+                        send(out, "-ERR STLS not available");
                         continue;
                     }
 
-                    out.println("+OK Begin TLS negotiation now");
+                    // Còn dữ liệu thô đã đọc sẵn = client chen lệnh trước khi bắt tay TLS -> đóng
+                    if (in.hasBufferedData()) {
+                        send(out, "-ERR Unexpected data before TLS negotiation");
+                        break;
+                    }
 
-                    SSLSocketFactory sf = sslContext.getSocketFactory();
-                    SSLSocket sslSocket = (SSLSocket) sf.createSocket(
-                            clientSocket,
-                            clientSocket.getInetAddress().getHostAddress(),
-                            clientSocket.getPort(),
-                            true
-                    );
-                    sslSocket.setUseClientMode(false);
+                    send(out, "+OK Begin TLS negotiation now");
+
+                    applyReadTimeout(false, sessionDeadline);
+                    SSLSocket sslSocket = SslContextFactory.wrapServerSocket(clientSocket);
                     sslSocket.startHandshake();
 
                     clientSocket = sslSocket;
-                    in = new BufferedReader(new InputStreamReader(clientSocket.getInputStream(), StandardCharsets.UTF_8));
-                    out = new PrintWriter(new OutputStreamWriter(clientSocket.getOutputStream(), StandardCharsets.UTF_8), true);
-                    
+                    in = newReader(clientSocket, sessionDeadline);
+                    out = newWriter(clientSocket);
+
                     isTlsActive = true;
                     pendingUser = null;
                 }
                 else if ("CAPA".equals(command)) {
-                    out.println("+OK Capability list follows");
-                    out.println("USER");
-                    out.println("UIDL");
-                    out.println("TOP");
+                    writeLine(out, "+OK Capability list follows");
+                    writeLine(out, "USER");
+                    writeLine(out, "UIDL");
+                    writeLine(out, "TOP");
                     if (!isTlsActive) {
-                        out.println("STLS");
+                        writeLine(out, "STLS");
                     }
-                    out.println(".");
+                    writeLine(out, ".");
+                    out.flush();
                 }
                 else if ("USER".equals(command)) {
                     if (isAuthenticated) {
-                        out.println("-ERR Already authenticated");
+                        send(out, "-ERR Already authenticated");
                         continue;
                     }
                     pendingUser = argument;
-                    out.println("+OK User accepted");
+                    send(out, "+OK User accepted");
                 } 
                 else if ("PASS".equals(command)) {
                     if (isAuthenticated) {
-                        out.println("-ERR Already authenticated");
+                        send(out, "-ERR Already authenticated");
                         continue;
                     }
                     if (pendingUser == null) {
-                        out.println("-ERR USER command required first");
+                        send(out, "-ERR USER command required first");
                         continue;
                     }
 
@@ -122,7 +143,7 @@ public class Pop3Handler implements Runnable {
                             : pendingUser;
 
                     if (LoginThrottle.isThrottled(clientIp, authCheckUser)) {
-                        out.println("-ERR Too many failed attempts, try again later");
+                        send(out, "-ERR Too many failed attempts, try again later");
                         continue;
                     }
 
@@ -137,207 +158,269 @@ public class Pop3Handler implements Runnable {
                         currentUser = isSentFolder ? canonicalUser + "_sent" : canonicalUser;
                         
                         pendingUser = null;
-                        emails = MailStorageEngine.listMails(currentUser);
+
+                        // Chỉ liệt kê metadata, không giải mã nội dung
+                        List<MailStorageEngine.MailMeta> loaded = MailStorageEngine.listMailMetas(currentUser);
+                        metas = (loaded != null) ? loaded : new ArrayList<>();
+                        sizes = new long[metas.size()];
+                        for (int i = 0; i < sizes.length; i++) {
+                            sizes[i] = Math.max(0L, metas.get(i).sizeBytes);
+                        }
                         deletedIndices.clear();
-                        out.println("+OK Logged in successfully");
+                        send(out, "+OK Logged in successfully");
                     } else {
                         LoginThrottle.recordFailedAttempt(clientIp, authCheckUser);
-                        out.println("-ERR Invalid username or password");
+                        send(out, "-ERR Invalid username or password");
                     }
                 } 
                 else if ("STAT".equals(command)) {
                     if (!isAuthenticated) {
-                        out.println("-ERR Please authenticate first");
+                        send(out, "-ERR Please authenticate first");
                         continue;
                     }
                     int activeCount = 0;
                     long totalBytes = 0;
-                    for (int i = 0; i < emails.size(); i++) {
+                    for (int i = 0; i < metas.size(); i++) {
                         if (!deletedIndices.contains(i + 1)) {
                             activeCount++;
-                            String content = emails.get(i).content;
-                            totalBytes += (content != null) ? content.getBytes(StandardCharsets.UTF_8).length : 0;
+                            totalBytes += sizes[i];
                         }
                     }
-                    out.println("+OK " + activeCount + " " + totalBytes);
+                    send(out, "+OK " + activeCount + " " + totalBytes);
                 } 
                 else if ("LIST".equals(command)) {
                     if (!isAuthenticated) {
-                        out.println("-ERR Please authenticate first");
+                        send(out, "-ERR Please authenticate first");
                         continue;
                     }
                     if (!argument.isEmpty()) {
                         try {
                             int idx = Integer.parseInt(argument);
-                            if (idx < 1 || idx > emails.size() || deletedIndices.contains(idx)) {
-                                out.println("-ERR No such message");
+                            if (idx < 1 || idx > metas.size() || deletedIndices.contains(idx)) {
+                                send(out, "-ERR No such message");
                             } else {
-                                String content = emails.get(idx - 1).content;
-                                int size = (content != null) ? content.getBytes(StandardCharsets.UTF_8).length : 0;
-                                out.println("+OK " + idx + " " + size);
+                                send(out, "+OK " + idx + " " + sizes[idx - 1]);
                             }
                         } catch (NumberFormatException e) {
-                            out.println("-ERR Invalid message number");
+                            send(out, "-ERR Invalid message number");
                         }
                     } else {
-                        int activeCount = emails.size() - deletedIndices.size();
-                        out.println("+OK " + activeCount + " messages");
-                        for (int i = 0; i < emails.size(); i++) {
+                        int activeCount = metas.size() - deletedIndices.size();
+                        writeLine(out, "+OK " + activeCount + " messages");
+                        for (int i = 0; i < metas.size(); i++) {
                             if (!deletedIndices.contains(i + 1)) {
-                                String content = emails.get(i).content;
-                                int size = (content != null) ? content.getBytes(StandardCharsets.UTF_8).length : 0;
-                                out.println((i + 1) + " " + size);
+                                writeLine(out, (i + 1) + " " + sizes[i]);
                             }
                         }
-                        out.println(".");
+                        writeLine(out, ".");
+                        out.flush();
                     }
                 } 
                 else if ("UIDL".equals(command)) {
                     if (!isAuthenticated) {
-                        out.println("-ERR Please authenticate first");
+                        send(out, "-ERR Please authenticate first");
                         continue;
                     }
                     if (!argument.isEmpty()) {
                         try {
                             int idx = Integer.parseInt(argument);
-                            if (idx < 1 || idx > emails.size() || deletedIndices.contains(idx)) {
-                                out.println("-ERR No such message");
+                            if (idx < 1 || idx > metas.size() || deletedIndices.contains(idx)) {
+                                send(out, "-ERR No such message");
                             } else {
-                                out.println("+OK " + idx + " " + emails.get(idx - 1).id);
+                                send(out, "+OK " + idx + " " + metas.get(idx - 1).id);
                             }
                         } catch (NumberFormatException e) {
-                            out.println("-ERR Invalid message number");
+                            send(out, "-ERR Invalid message number");
                         }
                     } else {
-                        out.println("+OK Unique-ID listing follows");
-                        for (int i = 0; i < emails.size(); i++) {
+                        writeLine(out, "+OK Unique-ID listing follows");
+                        for (int i = 0; i < metas.size(); i++) {
                             if (!deletedIndices.contains(i + 1)) {
-                                out.println((i + 1) + " " + emails.get(i).id);
+                                writeLine(out, (i + 1) + " " + metas.get(i).id);
                             }
                         }
-                        out.println(".");
+                        writeLine(out, ".");
+                        out.flush();
                     }
                 }
                 else if ("TOP".equals(command)) {
                     if (!isAuthenticated) {
-                        out.println("-ERR Please authenticate first");
+                        send(out, "-ERR Please authenticate first");
                         continue;
                     }
                     String[] parts = argument.split("\\s+");
                     if (parts.length < 2) {
-                        out.println("-ERR Usage: TOP msg_num lines");
+                        send(out, "-ERR Usage: TOP msg_num lines");
                         continue;
                     }
                     try {
                         int idx = Integer.parseInt(parts[0]) - 1;
                         int linesToReturn = Integer.parseInt(parts[1]);
+                        if (linesToReturn < 0) {
+                            send(out, "-ERR Invalid parameters");
+                            continue;
+                        }
 
-                        if (idx >= 0 && idx < emails.size() && !deletedIndices.contains(idx + 1)) {
-                            String mailContent = emails.get(idx).content;
-                            if (mailContent == null) {
-                                out.println("-ERR Message decryption failed");
+                        if (idx >= 0 && idx < metas.size() && !deletedIndices.contains(idx + 1)) {
+                            // Giải mã lười đúng một thư
+                            MailStorageEngine.StoredMail mail = MailStorageEngine.getSingleMail(currentUser, metas.get(idx).id);
+                            if (mail == null) {
+                                send(out, "-ERR Message not available");
                                 continue;
                             }
-                            out.println("+OK Top lines follow");
-                            String[] lines = mailContent.split("\r?\n");
+                            if (mail.content == null) {
+                                send(out, "-ERR Message decryption failed");
+                                continue;
+                            }
+                            writeLine(out, "+OK Top lines follow");
+
+                            String message = toLf(mail.content);
                             boolean inBody = false;
                             int bodyLineCount = 0;
+                            int start = 0;
+                            int n = message.length();
 
-                            for (String l : lines) {
+                            while (start < n) {
+                                int nl = message.indexOf('\n', start);
+                                int end = (nl < 0) ? n : nl;
                                 if (!inBody) {
-                                    out.println(l.startsWith(".") ? "." + l : l);
-                                    if (l.trim().isEmpty()) {
+                                    writeStuffedLine(out, message, start, end);
+                                    if (message.substring(start, end).trim().isEmpty()) {
                                         inBody = true;
                                     }
                                 } else {
                                     if (bodyLineCount >= linesToReturn) break;
-                                    out.println(l.startsWith(".") ? "." + l : l);
+                                    writeStuffedLine(out, message, start, end);
                                     bodyLineCount++;
                                 }
+                                start = (nl < 0) ? n : nl + 1;
                             }
-                            out.println(".");
+                            writeLine(out, ".");
+                            out.flush();
                         } else {
-                            out.println("-ERR Message not found");
+                            send(out, "-ERR Message not found");
                         }
                     } catch (NumberFormatException e) {
-                        out.println("-ERR Invalid parameters");
+                        send(out, "-ERR Invalid parameters");
                     }
                 }
                 else if ("RETR".equals(command)) {
                     if (!isAuthenticated) {
-                        out.println("-ERR Please authenticate first");
+                        send(out, "-ERR Please authenticate first");
                         continue;
                     }
                     try {
                         int index = Integer.parseInt(argument) - 1;
-                        if (index >= 0 && index < emails.size() && !deletedIndices.contains(index + 1)) {
-                            String mailContent = emails.get(index).content;
-                            if (mailContent == null) {
-                                out.println("-ERR Message decryption failed");
+                        if (index >= 0 && index < metas.size() && !deletedIndices.contains(index + 1)) {
+                            // Giải mã lười đúng một thư
+                            MailStorageEngine.StoredMail mail = MailStorageEngine.getSingleMail(currentUser, metas.get(index).id);
+                            if (mail == null) {
+                                send(out, "-ERR Message not available");
                                 continue;
                             }
-                            int size = mailContent.getBytes(StandardCharsets.UTF_8).length;
-                            out.println("+OK " + size + " octets");
-                            String message = mailContent.replace("\r\n", "\n").replace('\r', '\n');
-                            String[] messageLines = message.split("\n", -1);
-                            for (String messageLine : messageLines) {
-                                out.println(messageLine.startsWith(".") ? "." + messageLine : messageLine);
+                            if (mail.content == null) {
+                                send(out, "-ERR Message decryption failed");
+                                continue;
                             }
-                            out.println(".");
+
+                            // Chuẩn hóa về LF để tách dòng, khi gửi mỗi dòng kết thúc bằng CRLF.
+                            String message = toLf(mail.content);
+
+                            // Lượt 1: đếm số octet THỰC SỰ sẽ gửi (nội dung dạng CRLF, chưa tính
+                            // dấu '.' dot-stuffing và dòng kết thúc ".").
+                            long octets = 0;
+                            int n = message.length();
+                            int start = 0;
+                            while (start < n) {
+                                int nl = message.indexOf('\n', start);
+                                int end = (nl < 0) ? n : nl;
+                                octets += message.substring(start, end).getBytes(StandardCharsets.UTF_8).length + 2;
+                                start = (nl < 0) ? n : nl + 1;
+                            }
+
+                            // sizeBytes trong metadata có thể lệch (vd. thư lưu bằng LF, hoặc kích
+                            // thước tính trên dữ liệu mã hóa). Ưu tiên số đúng cho RETR và cập nhật
+                            // lại để LIST/STAT sau đó trong cùng phiên nhất quán.
+                            if (octets != sizes[index]) {
+                                LOG.log(Level.FINE, "[POP3] Kích thước meta lệch RETR: id={0} meta={1} thực={2}",
+                                        new Object[]{metas.get(index).id, sizes[index], octets});
+                                sizes[index] = octets;
+                            }
+
+                            writeLine(out, "+OK " + octets + " octets");
+
+                            // Lượt 2: gửi từng dòng + CRLF, dot-stuffing; không thêm dòng trống thừa ở cuối
+                            start = 0;
+                            while (start < n) {
+                                int nl = message.indexOf('\n', start);
+                                int end = (nl < 0) ? n : nl;
+                                writeStuffedLine(out, message, start, end);
+                                start = (nl < 0) ? n : nl + 1;
+                            }
+                            writeLine(out, ".");
+                            out.flush();
                         } else {
-                            out.println("-ERR Message not found or marked for deletion");
+                            send(out, "-ERR Message not found or marked for deletion");
                         }
                     } catch (NumberFormatException e) {
-                        out.println("-ERR Invalid message number");
+                        send(out, "-ERR Invalid message number");
                     }
                 } 
                 else if ("DELE".equals(command)) {
                     if (!isAuthenticated) {
-                        out.println("-ERR Please authenticate first");
+                        send(out, "-ERR Please authenticate first");
                         continue;
                     }
                     try {
                         int idx = Integer.parseInt(argument);
-                        if (idx < 1 || idx > emails.size() || deletedIndices.contains(idx)) {
-                            out.println("-ERR Message " + idx + " already deleted or does not exist");
+                        if (idx < 1 || idx > metas.size() || deletedIndices.contains(idx)) {
+                            send(out, "-ERR Message " + idx + " already deleted or does not exist");
                         } else {
                             deletedIndices.add(idx);
-                            out.println("+OK Message " + idx + " marked for deletion");
+                            send(out, "+OK Message " + idx + " marked for deletion");
                         }
                     } catch (NumberFormatException e) {
-                        out.println("-ERR Invalid message number");
+                        send(out, "-ERR Invalid message number");
                     }
                 }
                 else if ("RSET".equals(command)) {
                     if (!isAuthenticated) {
-                        out.println("-ERR Please authenticate first");
+                        send(out, "-ERR Please authenticate first");
                         continue;
                     }
                     deletedIndices.clear();
-                    out.println("+OK Reset state, all marked deletions cleared");
+                    send(out, "+OK Reset state, all marked deletions cleared");
                 }
                 else if ("NOOP".equals(command)) {
-                    out.println("+OK");
+                    send(out, "+OK");
                 }
                 else if ("QUIT".equals(command)) {
                     if (isAuthenticated && currentUser != null && !deletedIndices.isEmpty()) {
                         List<String> idsToDelete = new ArrayList<>();
                         for (int idx : deletedIndices) {
-                            if (idx >= 1 && idx <= emails.size()) {
-                                idsToDelete.add(emails.get(idx - 1).id);
+                            if (idx >= 1 && idx <= metas.size()) {
+                                idsToDelete.add(metas.get(idx - 1).id);
                             }
                         }
                         MailStorageEngine.deleteMailsByIds(currentUser, idsToDelete);
                     }
-                    out.println("+OK Logging out");
+                    send(out, "+OK Logging out");
                     break;
                 } 
                 else {
-                    out.println("-ERR Unknown command");
+                    send(out, "-ERR Unknown command");
                 }
             }
+        } catch (LimitedLineReader.LineTooLongException e) {
+            // Dòng quá dài: báo lỗi rồi đóng kết nối
+            try {
+                if (out != null) send(out, "-ERR Line too long");
+            } catch (IOException ignored) {}
         } catch (SocketTimeoutException e) {
             System.err.println("[POP3] Timeout: " + clientSocket.getInetAddress());
+        } catch (IOException e) {
+            // Client ngắt kết nối đột ngột: không cần in cả stack trace
+            System.err.println("[POP3] Connection error: " + e.getMessage());
         } catch (Exception e) {
             e.printStackTrace();
         } finally {
@@ -345,5 +428,57 @@ public class Pop3Handler implements Runnable {
                 clientSocket.close();
             } catch (Exception ignored) {}
         }
+    }
+
+    // ---- Hàm phụ ----
+
+    private LimitedLineReader newReader(Socket socket, long sessionDeadlineNanos) throws IOException {
+        LimitedLineReader reader = new LimitedLineReader(socket.getInputStream(), ServerConfig.MAX_COMMAND_LINE_BYTES);
+        reader.setDeadlineNanos(sessionDeadlineNanos);
+        return reader;
+    }
+
+    private OutputStream newWriter(Socket socket) throws IOException {
+        return new BufferedOutputStream(socket.getOutputStream(), 8192);
+    }
+
+    /**
+     * Đặt timeout đọc: ngắn trước khi xác thực, dài hơn sau xác thực, và không vượt quá
+     * thời gian còn lại của phiên.
+     */
+    private void applyReadTimeout(boolean authenticated, long sessionDeadlineNanos) throws IOException {
+        long phaseMs = authenticated ? ServerConfig.POSTAUTH_TIMEOUT_MS : ServerConfig.PREAUTH_TIMEOUT_MS;
+        long remainingMs = TimeUnit.NANOSECONDS.toMillis(sessionDeadlineNanos - System.nanoTime());
+        if (remainingMs <= 0) {
+            throw new SocketTimeoutException("Session time limit exceeded");
+        }
+        clientSocket.setSoTimeout((int) Math.max(1L, Math.min(phaseMs, remainingMs)));
+    }
+
+    /** Gửi một dòng phản hồi đơn (kết thúc CRLF) và flush ngay. */
+    private void send(OutputStream out, String line) throws IOException {
+        writeLine(out, line);
+        out.flush();
+    }
+
+    /** Ghi một dòng kết thúc CRLF vào bộ đệm (chưa flush) - dùng cho phản hồi nhiều dòng. */
+    private void writeLine(OutputStream out, String line) throws IOException {
+        out.write(line.getBytes(StandardCharsets.UTF_8));
+        out.write(CRLF);
+    }
+
+    /** Ghi dòng message[start,end) + CRLF, thêm '.' đầu dòng nếu dòng bắt đầu bằng '.' (dot-stuffing). */
+    private void writeStuffedLine(OutputStream out, String message, int start, int end) throws IOException {
+        if (start < end && message.charAt(start) == '.') {
+            out.write('.');
+        }
+        out.write(message.substring(start, end).getBytes(StandardCharsets.UTF_8));
+        out.write(CRLF);
+    }
+
+    /** Chuẩn hóa mọi kiểu xuống dòng (CRLF, CR đơn) về LF. */
+    private static String toLf(String content) {
+        if (content.indexOf('\r') < 0) return content;
+        return content.replace("\r\n", "\n").replace('\r', '\n');
     }
 }

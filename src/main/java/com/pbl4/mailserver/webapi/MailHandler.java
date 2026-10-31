@@ -6,9 +6,7 @@ import com.pbl4.mailserver.core.MailStorageEngine;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 
-import java.io.BufferedReader;
 import java.io.IOException;
-import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.Collections;
@@ -18,9 +16,7 @@ public class MailHandler implements HttpHandler {
 
     @Override
     public void handle(HttpExchange exchange) throws IOException {
-        exchange.getResponseHeaders().add("Access-Control-Allow-Origin", "*");
-        exchange.getResponseHeaders().add("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
-        exchange.getResponseHeaders().add("Access-Control-Allow-Headers", "Content-Type, Authorization");
+        // CORS do CorsHandlerWrapper đặt một lần duy nhất, không thêm header CORS ở đây
 
         if ("OPTIONS".equalsIgnoreCase(exchange.getRequestMethod())) {
             exchange.sendResponseHeaders(204, -1);
@@ -47,7 +43,9 @@ public class MailHandler implements HttpHandler {
             return;
         }
 
-        if ("POST".equalsIgnoreCase(method) && path.endsWith("/send")) {
+        if ("POST".equalsIgnoreCase(method) && path.endsWith("/stream-ticket")) {
+            handleStreamTicket(exchange, authedUser, token);
+        } else if ("POST".equalsIgnoreCase(method) && path.endsWith("/send")) {
             handleSendMail(exchange, authedUser);
         } else if ("GET".equalsIgnoreCase(method) && path.endsWith("/inbox")) {
             handleGetInbox(exchange, authedUser);
@@ -64,47 +62,62 @@ public class MailHandler implements HttpHandler {
         }
     }
 
+    // Cấp ticket dùng một lần (sống ~30s) để mở SSE mà không đưa token phiên lên URL
+    private void handleStreamTicket(HttpExchange exchange, String username, String token) throws IOException {
+        String ticket = SseManager.issueTicket(username, token);
+        if (ticket == null) {
+            sendResponse(exchange, 503, "{\"success\": false, \"message\": \"Hệ thống bận, vui lòng thử lại!\"}");
+            return;
+        }
+        sendResponse(exchange, 200, "{\"success\": true, \"ticket\": \"" + ticket + "\"}");
+    }
+
     private void handleSseStream(HttpExchange exchange) throws IOException {
         String query = exchange.getRequestURI().getQuery();
-        String token = null;
+        String ticket = null;
 
         if (query != null) {
             for (String param : query.split("&")) {
                 String[] pair = param.split("=");
-                if (pair.length > 1 && "token".equalsIgnoreCase(pair[0])) {
-                    token = java.net.URLDecoder.decode(pair[1], StandardCharsets.UTF_8);
+                if (pair.length > 1 && "ticket".equalsIgnoreCase(pair[0])) {
+                    ticket = java.net.URLDecoder.decode(pair[1], StandardCharsets.UTF_8);
                 }
             }
         }
 
-        String username = SessionManager.validate(token);
-        if (username == null) {
-            sendResponse(exchange, 401, "{\"success\": false, \"message\": \"Token không hợp lệ!\"}");
+        // Ticket chỉ dùng được một lần; kiểm tra lại phiên còn hợp lệ và đúng user
+        SseManager.TicketInfo info = SseManager.consumeTicket(ticket);
+        String username = (info == null) ? null : SessionManager.validate(info.token);
+        if (info == null || username == null || !username.equalsIgnoreCase(info.username)) {
+            sendResponse(exchange, 401, "{\"success\": false, \"message\": \"Ticket không hợp lệ hoặc đã hết hạn!\"}");
             return;
         }
 
         exchange.getResponseHeaders().set("Content-Type", "text/event-stream; charset=UTF-8");
         exchange.getResponseHeaders().set("Cache-Control", "no-cache");
         exchange.getResponseHeaders().set("Connection", "keep-alive");
-        exchange.getResponseHeaders().set("Access-Control-Allow-Origin", "*");
+        exchange.getResponseHeaders().set("X-Accel-Buffering", "no");
 
         exchange.sendResponseHeaders(200, 0); // Giữ luồng Chunked
         OutputStream os = exchange.getResponseBody();
 
-        // Đăng ký client với SseManager (Lưu cả Username đầy đủ và Username sạch)
-        SseManager.register(username, exchange, os);
-        if (username.contains("@")) {
-            SseManager.register(username.split("@")[0], exchange, os);
+        // Ghi lời chào TRƯỚC khi đăng ký để không lẫn với dữ liệu từ luồng thông báo
+        try {
+            os.write("retry: 5000\n: connected\n\n".getBytes(StandardCharsets.UTF_8));
+            os.flush();
+        } catch (Exception e) {
+            try { exchange.close(); } catch (Exception ignored) {}
+            return;
         }
 
-        try {
-            os.write(": connected\n\n".getBytes(StandardCharsets.UTF_8));
-            os.flush();
-        } catch (Exception ignored) {}
+        // Chỉ đăng ký MỘT key (username đầy đủ); SseManager tự giới hạn số kết nối/user
+        SseManager.register(username, info.token, exchange, os);
     }
 
     private void handleSendMail(HttpExchange exchange, String from) throws IOException {
-        String body = readBody(exchange);
+        String body = ApiServer.readBodyOrReply(exchange, (int) Math.min(Integer.MAX_VALUE, ServerConfig.MAX_BODY_SEND_BYTES),
+                ServerConfig.BODY_READ_TOTAL_TIMEOUT_SEND_MS);
+        if (body == null) return;
         String rawTo = getParamValue(body, "to");
         String rawSubject = getParamValue(body, "subject");
         String content = getParamValue(body, "body");
@@ -208,7 +221,8 @@ public class MailHandler implements HttpHandler {
     }
 
     private void handleDeleteMail(HttpExchange exchange, String username) throws IOException {
-        String body = readBody(exchange);
+        String body = ApiServer.readBodyOrReply(exchange, ServerConfig.MAX_BODY_AUTH_BYTES, ServerConfig.BODY_READ_TOTAL_TIMEOUT_SMALL_MS);
+        if (body == null) return;
         String fileId = getParamValue(body, "id");
         String folder = getParamValue(body, "folder");
 
@@ -302,14 +316,6 @@ public class MailHandler implements HttpHandler {
     private String escapeJson(String input) {
         if (input == null) return "";
         return input.replace("\r", "").replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\t", "\\t");
-    }
-
-    private String readBody(HttpExchange exchange) throws IOException {
-        BufferedReader br = new BufferedReader(new InputStreamReader(exchange.getRequestBody(), StandardCharsets.UTF_8));
-        StringBuilder sb = new StringBuilder();
-        String line;
-        while ((line = br.readLine()) != null) sb.append(line);
-        return sb.toString();
     }
 
     private String getParamValue(String body, String paramName) {

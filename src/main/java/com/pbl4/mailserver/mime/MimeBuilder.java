@@ -72,11 +72,22 @@ public final class MimeBuilder {
      * @return thư hoàn chỉnh (header + thân) dạng byte, CRLF, luôn kết thúc bằng CRLF
      */
     public static byte[] fromWebForm(String from, String to, String subject, String body) {
-        return build(from, to, subject, body, ServerConfig.MAIL_HOSTNAME);
+        return build(from, to, subject, body, ServerConfig.MAIL_HOSTNAME, null, null);
+    }
+
+    /** Bản dùng khi TRẢ LỜI thư: thêm In-Reply-To / References để client mail gom đúng chuỗi hội thoại. */
+    public static byte[] fromWebForm(String from, String to, String subject, String body,
+                                     String inReplyTo, String references) {
+        return build(from, to, subject, body, ServerConfig.MAIL_HOSTNAME, inReplyTo, references);
     }
 
     /** Bản có hostname để test không phụ thuộc biến môi trường. */
     static byte[] build(String from, String to, String subject, String body, String hostname) {
+        return build(from, to, subject, body, hostname, null, null);
+    }
+
+    static byte[] build(String from, String to, String subject, String body, String hostname,
+                        String inReplyTo, String references) {
         String f = cleanHeader(from);
         String t = cleanHeader(to);
         String s = cleanHeader(subject);
@@ -92,6 +103,15 @@ public final class MimeBuilder {
         writeHeader(out, "Date", MessageNormalizer.formatDate(ZonedDateTime.now()));
         writeHeader(out, "Message-ID", MessageNormalizer.newMessageId(hostname));
         writeHeader(out, "MIME-Version", "1.0");
+
+        String irt = cleanHeader(inReplyTo);
+        if (!irt.isEmpty()) {
+            writeHeader(out, "In-Reply-To", irt);
+        }
+        String refs = cleanHeader(references);
+        if (!refs.isEmpty()) {
+            writeHeader(out, "References", refs);
+        }
 
         if (pb.attachments().isEmpty()) {
             writeHeader(out, "Content-Type", "text/plain; charset=UTF-8");

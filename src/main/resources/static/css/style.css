@@ -675,3 +675,7 @@
     from { opacity: 0; transform: scale(0.95); }
     to { opacity: 1; transform: scale(1); }
 }
+
+/* ===== Nút hành động trong chi tiết thư (Trả lời) ===== */
+.detail-actions { display: flex; gap: 10px; margin: 12px 0 4px; }
+.detail-actions .btn { display: inline-flex; align-items: center; gap: 6px; padding: 8px 16px; font-size: 13px; cursor: pointer; }

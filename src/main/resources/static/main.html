@@ -122,6 +122,13 @@
             <div id="email-detail" class="email-detail hidden">
                 <div class="detail-header">
                     <h2 id="detail-subject">Tiêu đề email ở đây</h2>
+                    
+                    <div class="detail-actions">
+                        <button id="reply-btn" class="btn btn-primary hidden" onclick="openReply()">
+                            <i class="fa-solid fa-reply"></i> Trả lời
+                        </button>
+                    </div>
+
                     <div class="detail-meta">
                         <p><i class="fa-solid fa-user-tag"></i> <strong>Từ:</strong> <span id="detail-sender">admin@pbl4.com</span></p>
                         <p><i class="fa-solid fa-paper-plane"></i> <strong>Tới:</strong> <span id="detail-receiver">user@pbl4.com</span></p>

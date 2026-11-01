@@ -34,6 +34,26 @@ public class MailHandler implements HttpHandler {
     private static final Pattern RCPT_PATTERN =
             Pattern.compile("^[^\\s@<>\"(),:;\\[\\]\\\\]{1,64}@[\\p{L}\\p{N}][\\p{L}\\p{N}.-]{0,253}$");
 
+    private static final Pattern MSG_ID_PATTERN =
+            Pattern.compile("<[^<>\\s]{1,200}>");
+
+    static List<String> extractMessageIds(String headerValue) {
+        List<String> out = new java.util.ArrayList<>();
+        if (headerValue == null) return out;
+        java.util.regex.Matcher m = MSG_ID_PATTERN.matcher(headerValue);
+        while (m.find()) out.add(m.group());
+        return out;
+    }
+
+    static String buildReferences(String oldReferences, String parentId) {
+        List<String> ids = extractMessageIds(oldReferences);
+        if (ids.size() > 9) ids = ids.subList(ids.size() - 9, ids.size());
+        List<String> all = new java.util.ArrayList<>(ids);
+        all.remove(parentId);
+        all.add(parentId);
+        return String.join(" ", all);
+    }
+
     @Override
     public void handle(HttpExchange exchange) throws IOException {
         // CORS do CorsHandlerWrapper đặt một lần duy nhất, không thêm header CORS ở đây
@@ -147,6 +167,8 @@ public class MailHandler implements HttpHandler {
         String rawTo = form.get("to");
         String subject = form.get("subject");
         String content = form.get("body");
+        String replyId = form.get("reply_id");
+        String replyFolder = form.get("reply_folder");
 
         List<String> rcptList = parseRecipients(rawTo);
         if (rcptList == null || rcptList.isEmpty()) {
@@ -164,8 +186,23 @@ public class MailHandler implements HttpHandler {
 
         MailService.DeliveryResult result;
         try {
+            String inReplyTo = null;
+            String references = null;
+
+            if (replyId != null && !replyId.isBlank()) {
+                MailStorageEngine.StoredMail orig =
+                        MailStorageEngine.getSingleMail(mailboxFor(authUser, replyFolder), replyId.trim());
+                if (orig != null && orig.rawBytes() != null) {
+                    List<String> ids = extractMessageIds(MimeParser.rawHeader(orig.rawBytes(), "message-id"));
+                    if (!ids.isEmpty()) {
+                        inReplyTo = ids.get(0);
+                        references = buildReferences(MimeParser.rawHeader(orig.rawBytes(), "references"), inReplyTo);
+                    }
+                }
+            }
+
             byte[] raw = MimeBuilder.fromWebForm(fromAddress, String.join(", ", rcptList), cleanSubject,
-                    content == null ? "" : content);
+                    content == null ? "" : content, inReplyTo, references);
             Set<String> rcpts = new LinkedHashSet<>(rcptList);
             result = MailService.submit(authUser, fromAddress, rcpts, raw);
         } catch (RuntimeException e) {

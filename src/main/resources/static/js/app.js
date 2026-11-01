@@ -1,6 +1,8 @@
 let selectedFiles = [];
 let activeMailbox = 'inbox';
 let currentSelectedMail = null;
+let currentDetailMail = null; // THÊM
+let replyContext = null;      // THÊM
 let confirmCallback = null;
 let loadedMailsCache = [];
 
@@ -175,6 +177,7 @@ function closeComposeModal() {
 function resetComposeForm() {
     document.getElementById('compose-form').reset();
     selectedFiles = [];
+    replyContext = null; // THÊM: Xóa trạng thái trả lời khi reset form
     renderFilePreview();
 }
 
@@ -301,6 +304,17 @@ async function handleSendMail(event) {
 
     const fullContent = bodyText + attachmentData;
 
+    let payload =
+        `to=${encodeURIComponent(recipients.join(','))}` +
+        `&subject=${encodeURIComponent(subject)}` +
+        `&body=${encodeURIComponent(fullContent)}`;
+
+    // THÊM: Nếu đang trả lời thư, gửi kèm ID thư gốc cho server
+    if (replyContext) {
+        payload += `&reply_id=${encodeURIComponent(replyContext.id)}` +
+                   `&reply_folder=${encodeURIComponent(replyContext.folder)}`;
+    }
+
     try {
         const response = await fetch('/api/mails/send', {
             method: 'POST',
@@ -308,10 +322,7 @@ async function handleSendMail(event) {
                 'Content-Type': 'application/x-www-form-urlencoded',
                 'Authorization': 'Bearer ' + token
             },
-            body:
-                `to=${encodeURIComponent(recipients.join(','))}` +
-                `&subject=${encodeURIComponent(subject)}` +
-                `&body=${encodeURIComponent(fullContent)}`
+            body: payload
         });
 
         const data = await response.json();
@@ -553,6 +564,7 @@ function handleDeleteMail(mailId, event) {
 
 function resetEmailDetail() {
     currentSelectedMail = null;
+    currentDetailMail = null; // THÊM: Xóa dữ liệu chi tiết
     document.getElementById('no-email-selected').classList.remove('hidden');
     document.getElementById('email-detail').classList.add('hidden');
 }
@@ -623,8 +635,16 @@ function downloadAttachment(fileName, rawBase64) {
 }
 
 function renderEmailDetail(mail) {
+    currentDetailMail = mail; // THÊM: Lưu thư đang hiển thị
+
     document.getElementById('no-email-selected').classList.add('hidden');
     document.getElementById('email-detail').classList.remove('hidden');
+
+    // THÊM: Quản lý ẩn/hiện nút Trả lời khi xem thư đã gửi
+    const replyBtn = document.getElementById('reply-btn');
+    if (replyBtn) {
+        replyBtn.classList.toggle('hidden', activeMailbox === 'sent');
+    }
 
     document.getElementById('detail-subject').textContent = mail.subject;
     document.getElementById('detail-sender').textContent = mail.sender;
@@ -795,4 +815,60 @@ async function logout() {
         localStorage.removeItem('authToken');
         window.location.href = '/';
     }
+}
+
+// ===== THÊM CÁC HÀM XỬ LÝ TRẢ LỜI THƯ =====
+function extractEmail(text) {
+    if (!text) return '';
+    const angle = String(text).match(/<([^<>\s]+@[^<>\s]+)>/);
+    if (angle) return angle[1];
+    const plain = String(text).match(/[^\s<>"',;]+@[^\s<>"',;]+/);
+    return plain ? plain[0] : '';
+}
+
+function stripAttachmentTags(body) {
+    return String(body || '')
+        .replace(/\[ATTACHMENT:[^\]\r\n]+\][\s\S]*?\[\/ATTACHMENT\]/g, '')
+        .trim();
+}
+
+function buildReplySubject(subject) {
+    const s = (subject || '').trim();
+    return /^re\s*:/i.test(s) ? s : 'Re: ' + s;
+}
+
+function buildQuotedBody(mail) {
+    const quoted = stripAttachmentTags(mail.body)
+        .split(/\r?\n/)
+        .map(line => '> ' + line)
+        .join('\n');
+    const when = formatMailDate(mail.timestamp);
+    const who = mail.sender || 'người gửi';
+    return `\n\n\nVào ${when}, ${who} đã viết:\n${quoted}`;
+}
+
+function openReply() {
+    const mail = currentDetailMail;
+    if (!mail) {
+        showToast('Hãy chọn một thư để trả lời!', 'error');
+        return;
+    }
+    const replyTo = extractEmail(mail.sender);
+    if (!replyTo) {
+        showToast('Không xác định được địa chỉ người gửi để trả lời!', 'error');
+        return;
+    }
+
+    openComposeModal();
+    document.getElementById('compose-to').value = replyTo;
+    document.getElementById('compose-subject').value = buildReplySubject(mail.subject);
+
+    const bodyEl = document.getElementById('compose-body');
+    bodyEl.value = buildQuotedBody(mail);
+
+    replyContext = { id: mail.id, folder: activeMailbox };
+
+    bodyEl.focus();
+    bodyEl.setSelectionRange(0, 0);
+    bodyEl.scrollTop = 0;
 }

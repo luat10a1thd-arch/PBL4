@@ -1387,4 +1387,19 @@ public final class MimeParser {
             return new ParsedMail(from, to, subject, date, "", List.of());
         }
     }
+
+    /**
+     * Giá trị thô (đã nối dòng gấp, đã strip) của header đầu tiên tên {@code name}; "" nếu không có.
+     * Không giải mã RFC 2047 - dùng cho Message-ID / References / In-Reply-To.
+     */
+    public static String rawHeader(byte[] raw, String name) {
+        if (raw == null || raw.length == 0 || name == null) return "";
+        try {
+            Headers h = parseHeaders(raw, 0, raw.length);
+            String v = h.first(name.toLowerCase(Locale.ROOT));
+            return v == null ? "" : v;
+        } catch (RuntimeException e) {
+            return "";
+        }
+    }
 }

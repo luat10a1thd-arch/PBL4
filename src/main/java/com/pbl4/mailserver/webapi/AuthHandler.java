@@ -17,8 +17,8 @@ import java.util.regex.Pattern;
 
 public class AuthHandler implements HttpHandler {
 
-    private static final String ADMIN_EMAIL = "admin@pbl4.com";
-    private static final Pattern SAFE_EMAIL_PATTERN = Pattern.compile("^[a-z0-9][a-z0-9._-]{2,31}@pbl4[.]com$");
+    private static final String ADMIN_EMAIL = ServerConfig.ADMIN_EMAIL;
+    private static final Pattern SAFE_EMAIL_PATTERN = Pattern.compile("^[a-z0-9][a-z0-9._-]{2,31}@" + Pattern.quote(ServerConfig.MAIL_DOMAIN.toLowerCase(Locale.ROOT)) + "$");
     private static final String DUMMY_HASH = SecurityUtils.hashPassword("DummyPassword123!");
 
     public AuthHandler() {
@@ -110,12 +110,12 @@ public class AuthHandler implements HttpHandler {
         LoginThrottle.recordRegistration(clientIp);
 
         if (!SAFE_EMAIL_PATTERN.matcher(username).matches()) {
-            sendResponse(exchange, 400, "{\"success\": false, \"message\": \"Tên tài khoản chứa ký tự không hợp lệ hoặc sai định dạng @pbl4.com!\"}");
+            sendResponse(exchange, 400, "{\"success\": false, \"message\": \"Tên tài khoản chứa ký tự không hợp lệ hoặc sai định dạng @" + ServerConfig.MAIL_DOMAIN.toLowerCase(Locale.ROOT) + "!\"}");
             return;
         }
 
         String emailPrefix = username.substring(0, username.indexOf('@'));
-        if ("admin@pbl4.com".equals(username) || emailPrefix.startsWith("admin")) {
+        if (ADMIN_EMAIL.equals(username) || emailPrefix.startsWith("admin")) {
             sendResponse(exchange, 403, "{\"success\": false, \"message\": \"Không được phép đăng ký tài khoản Admin!\"}");
             return;
         }

@@ -21,6 +21,8 @@ import java.nio.charset.StandardCharsets;
  *  - Có thể đặt "hạn chót" cho cả phiên: quá hạn sẽ ném SocketTimeoutException ở lần
  *    đọc kế tiếp (chống kiểu tấn công gửi từng byte một cách chậm rãi).
  *  - Không thread-safe (mỗi kết nối dùng một reader, trong một thread).
+ *  - MỚI (A2): {@link #readByte()} đọc từng byte thô từ cùng bộ đệm, để SmtpConnection
+ *    đọc phần DATA ở mức byte (dot-unstuff, thư nhị phân) mà không lệch bộ đệm với readLine().
  */
 public class LimitedLineReader {
 
@@ -80,6 +82,17 @@ public class LimitedLineReader {
      */
     public boolean hasBufferedData() {
         return pos < lim;
+    }
+
+    /**
+     * Đọc một byte thô (0..255), hoặc -1 nếu hết luồng. Không kiểm tra độ dài dòng:
+     * người gọi tự giới hạn. Vẫn tôn trọng hạn chót phiên và timeout socket.
+     */
+    public int readByte() throws IOException {
+        if (pos >= lim && !fill()) {
+            return -1;
+        }
+        return buf[pos++] & 0xFF;
     }
 
     /**

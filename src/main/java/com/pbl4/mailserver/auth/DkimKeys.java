@@ -7,7 +7,6 @@ import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.security.KeyFactory;
 import java.security.KeyPair;
@@ -18,10 +17,6 @@ import java.security.spec.RSAPublicKeySpec;
 import java.util.Base64;
 import java.util.concurrent.ConcurrentHashMap;
 
-/**
- * Quản lý khóa riêng DKIM (RSA 2048, PKCS#8 PEM) trong DKIM_KEY_DIR.
- * Tên file: &lt;selector&gt;.&lt;domain&gt;.private.pem. Tự sinh ở lần dùng đầu tiên, quyền file chỉ chủ sở hữu đọc/ghi.
- */
 final class DkimKeys {
 
     private static final ConcurrentHashMap<String, RSAPrivateCrtKey> CACHE = new ConcurrentHashMap<>();
@@ -56,7 +51,6 @@ final class DkimKeys {
         }
     }
 
-    /** Khóa công khai dạng SubjectPublicKeyInfo (X.509) mã hóa Base64 - đúng định dạng thẻ p= trong bản ghi DNS. */
     static String publicKeyBase64(RSAPrivateCrtKey k) throws Exception {
         byte[] enc = KeyFactory.getInstance("RSA")
                 .generatePublic(new RSAPublicKeySpec(k.getModulus(), k.getPublicExponent()))
@@ -92,7 +86,7 @@ final class DkimKeys {
             }
             Files.write(tmp, pem.getBytes(StandardCharsets.US_ASCII));
             try {
-                Files.move(tmp, file); // không ghi đè: nếu tiến trình khác vừa tạo thì dùng khóa của họ
+                Files.move(tmp, file);
             } catch (FileAlreadyExistsException e) {
                 return read(file);
             }

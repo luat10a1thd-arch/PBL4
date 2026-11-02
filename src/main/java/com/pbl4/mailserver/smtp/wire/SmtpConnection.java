@@ -17,24 +17,8 @@ import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.List;
 
-/**
- * Một kết nối SMTP ở mức BYTE. Không xử lý lệnh SMTP (việc của MxHandler/SubmissionHandler).
- *
- * Quy ước:
- *  - readCommand(): dòng quá dài -> tự gửi "500 5.5.2 Line too long" rồi ném
- *    LimitedLineReader.LineTooLongException; handler chỉ cần kết thúc phiên (không trả lời thêm).
- *  - startTls(): handler gửi "220 ..." TRƯỚC khi gọi. Trả false nghĩa là kết nối ĐÃ bị đóng
- *    (bắt tay lỗi, thiếu chứng chỉ, hoặc client gửi chen lệnh trước khi bắt tay) -> handler thoát.
- *    Ngoại lệ: đã ở TLS thì trả false mà KHÔNG đóng. Dùng {@link #tlsAvailable()} để kiểm tra
- *    trước khi trả 220 (nếu không có chứng chỉ thì trả 454).
- *  - Timeout đọc mặc định PREAUTH_TIMEOUT_MS; gọi {@link #setAuthenticated(boolean)} sau AUTH để
- *    chuyển sang POSTAUTH_TIMEOUT_MS (hoặc setTimeoutMs tùy ý). readData() tạm nâng timeout lên
- *    ít nhất POSTAUTH_TIMEOUT_MS. Cả phiên bị chặn bởi SESSION_MAX_MS.
- *  - Không thread-safe: một kết nối, một thread.
- */
 public final class SmtpConnection implements AutoCloseable {
 
-    /** Dòng AUTH base64 (RFC 4954 gợi ý 12288 byte). */
     private static final int AUTH_LINE_MAX_BYTES = 12288;
     private static final int HANDSHAKE_MIN_TIMEOUT_MS = 10_000;
     private static final long SWALLOW_EXTRA_BYTES = 1L << 20;
@@ -54,10 +38,6 @@ public final class SmtpConnection implements AutoCloseable {
         this(socket, false);
     }
 
-    /**
-     * @param implicitTls true: bắt tay TLS ngay (cổng 465). Ném IOException nếu bắt tay lỗi
-     *                    (socket đã được đóng).
-     */
     public SmtpConnection(Socket socket, boolean implicitTls) throws IOException {
         this.socket = socket;
         this.remoteIp = extractIp(socket);
@@ -90,8 +70,6 @@ public final class SmtpConnection implements AutoCloseable {
         this.reader.setDeadlineNanos(deadlineNanos);
     }
 
-    // ------------------------------------------------------------------ thông tin
-
     public String remoteIp() {
         return remoteIp;
     }
@@ -104,7 +82,6 @@ public final class SmtpConnection implements AutoCloseable {
         return closed;
     }
 
-    /** true nếu máy chủ có chứng chỉ để làm STARTTLS. */
     public boolean tlsAvailable() {
         return SslContextFactory.createSSLContext() != null;
     }
@@ -117,26 +94,20 @@ public final class SmtpConnection implements AutoCloseable {
         } catch (SocketException ignored) {}
     }
 
-    /** Đã xác thực: dùng timeout POSTAUTH; chưa: PREAUTH. */
     public void setAuthenticated(boolean authenticated) {
         setTimeoutMs(authenticated ? ServerConfig.POSTAUTH_TIMEOUT_MS : ServerConfig.PREAUTH_TIMEOUT_MS);
     }
 
-    /** Đổi giới hạn độ dài dòng trong DATA (mặc định SMTP_MAX_DATA_LINE_BYTES). */
     public void setMaxDataLineBytes(int bytes) {
         if (bytes < 1) throw new IllegalArgumentException("bytes < 1");
         this.maxDataLineBytes = bytes;
     }
 
-    // ------------------------------------------------------------------ đọc
-
-    /** Một dòng lệnh (đã bỏ CRLF/LF); null nếu client đóng kết nối. */
     public String readCommand() throws IOException {
         reader.setMaxLineBytes(ServerConfig.MAX_COMMAND_LINE_BYTES);
         return readLineChecked();
     }
 
-    /** Dòng thô (ví dụ phản hồi base64 của AUTH), giới hạn lớn hơn lệnh thường; null nếu client đóng. */
     public String readRawLine() throws IOException {
         reader.setMaxLineBytes(AUTH_LINE_MAX_BYTES);
         try {
@@ -157,16 +128,6 @@ public final class SmtpConnection implements AutoCloseable {
         }
     }
 
-    /**
-     * Đọc nội dung thư tới dòng chỉ có ".". Dot-unstuff trên byte, mọi dòng kết thúc bằng CRLF
-     * (LF trần được chuẩn hóa thành CRLF; CR lẻ giữa dòng giữ nguyên), byte nhị phân giữ nguyên.
-     * Kết quả KHÔNG gồm dòng "." kết thúc.
-     *
-     * Vượt maxBytes hoặc có dòng quá dài: nuốt hết phần còn lại tới dòng "." rồi ném
-     * {@link DataTooLargeException} / {@link DataLineTooLongException} (phiên vẫn đồng bộ).
-     * Client đóng giữa chừng: ném EOFException. Gửi quá nhiều dữ liệu sau khi đã vượt hạn mức
-     * (> 4 x maxBytes + 1MB): ném IOException thường (nên đóng kết nối).
-     */
     public byte[] readData(long maxBytes) throws IOException {
         int saved = timeoutMs;
         int dataTimeout = Math.max(saved, ServerConfig.POSTAUTH_TIMEOUT_MS);
@@ -180,7 +141,7 @@ public final class SmtpConnection implements AutoCloseable {
 
     private byte[] readDataInternal(long maxBytes) throws IOException {
         final int lineLimit = maxDataLineBytes;
-        final int cap = lineLimit + 2; // chứa tối đa: dấu chấm "stuffing" + nội dung + CR
+        final int cap = lineLimit + 2;
         final long limit = Math.min(maxBytes, Integer.MAX_VALUE - 16L);
         final long swallowCap = Math.max(limit, 0L) * 4 + SWALLOW_EXTRA_BYTES;
 
@@ -225,9 +186,9 @@ public final class SmtpConnection implements AutoCloseable {
                 len--;
             }
             if (len == 1 && line[0] == '.') {
-                break; // dòng kết thúc
+                break;
             }
-            int start = (len > 0 && line[0] == '.') ? 1 : 0; // bỏ một dấu chấm stuffing
+            int start = (len > 0 && line[0] == '.') ? 1 : 0;
             int content = len - start;
             if (content > lineLimit) {
                 lineTooLong = true;
@@ -239,7 +200,7 @@ public final class SmtpConnection implements AutoCloseable {
             int need = dataLen + content + 2;
             if (need > limit) {
                 tooLarge = true;
-                data = null; // giải phóng bộ nhớ, chỉ nuốt tiếp
+                data = null;
                 continue;
             }
             if (need > data.length) {
@@ -260,15 +221,11 @@ public final class SmtpConnection implements AutoCloseable {
         return dataLen == data.length ? data : Arrays.copyOf(data, dataLen);
     }
 
-    // ------------------------------------------------------------------ ghi
-
-    /** Gửi một dòng trả lời (tự thêm CRLF, flush). CR/LF trong nội dung bị thay bằng dấu cách. */
     public void reply(String fullLine) throws IOException {
         writeLine(fullLine);
         out.flush();
     }
 
-    /** Trả lời nhiều dòng: "code-text" ... "code text". Danh sách rỗng gửi "code ". */
     public void replyMulti(int code, List<String> lines) throws IOException {
         if (lines == null || lines.isEmpty()) {
             writeLine(code + " ");
@@ -292,16 +249,11 @@ public final class SmtpConnection implements AutoCloseable {
         out.write('\n');
     }
 
-    // ------------------------------------------------------------------ TLS
-
-    /** Nâng cấp tại chỗ lên TLS (server mode). Xem ghi chú đầu lớp về ý nghĩa giá trị false. */
     public boolean startTls() {
         if (closed || tls) {
             return false;
         }
         if (reader.hasBufferedData()) {
-            // Client gửi chen dữ liệu trước khi bắt tay: nguy cơ command injection.
-            System.err.println("[SMTP] STARTTLS bị từ chối: có dữ liệu chen trước bắt tay từ " + remoteIp);
             close();
             return false;
         }

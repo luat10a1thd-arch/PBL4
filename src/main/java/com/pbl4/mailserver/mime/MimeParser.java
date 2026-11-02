@@ -16,50 +16,24 @@ import java.util.Optional;
 import java.util.TreeMap;
 import java.util.concurrent.ConcurrentHashMap;
 
-/**
- * Đọc thư MIME thật (Gmail/Outlook/Yahoo...) từ byte[] RFC 5322.
- *
- * <ul>
- *   <li>{@link #decodeHeader(String)}: RFC 2047 (B/Q), nhiều encoded-word liền nhau, charset bất kỳ, header gấp dòng.</li>
- *   <li>{@link #parse(byte[])}: multipart lồng nhau, quoted-printable, base64, charset khác UTF-8, message/rfc822,
- *       tên tệp RFC 2231/2047. Thư lỗi định dạng trả về bản tốt nhất có thể.</li>
- * </ul>
- * Không ném exception ra ngoài; không bao giờ trả HTML thô trong {@link ParsedMail#text()}.
- */
 public final class MimeParser {
 
     private MimeParser() {
     }
 
-    // ---------------------------------------------------------------------------------------------
-    // GIỚI HẠN CHỐNG THƯ ĐỘC (có thể chỉnh ở đây)
-    // ---------------------------------------------------------------------------------------------
-
-    /** Độ sâu tối đa của multipart / message/rfc822 lồng nhau. Sâu hơn thì bỏ qua phần đó. */
     public static final int MAX_MIME_DEPTH = 10;
-    /** Tổng số phần MIME tối đa được xử lý trong một thư (kể cả thư lồng). */
     public static final int MAX_PARTS = 200;
-    /** Kích thước tối đa của khối header của một phần (byte). */
     public static final int MAX_HEADER_BYTES = 256 * 1024;
-    /** Số trường header tối đa được ghi nhận cho một phần. */
     public static final int MAX_HEADER_FIELDS = 1000;
-    /** Kích thước tối đa (sau giải mã) của MỘT tệp đính kèm. Vượt thì bỏ tệp đó. */
     public static final long MAX_ATTACHMENT_BYTES = 40L * 1024 * 1024;
-    /** Tổng kích thước tối đa (sau giải mã) của mọi đính kèm trong một thư. */
     public static final long MAX_TOTAL_ATTACHMENT_BYTES = 64L * 1024 * 1024;
-    /** Kích thước tối đa (byte sau giải mã transfer-encoding) của MỘT phần văn bản. Vượt thì cắt. */
     public static final int MAX_TEXT_PART_BYTES = 4 * 1024 * 1024;
-    /** Số ký tự tối đa của thân văn bản trả về. */
     public static final int MAX_TEXT_CHARS = 2_000_000;
 
     private static final String TRUNCATED_NOTE =
             "[Một phần nội dung thư đã bị bỏ qua vì vượt giới hạn xử lý của máy chủ]";
 
     private static final Charset WIN1252 = Charset.forName("windows-1252");
-
-    // ---------------------------------------------------------------------------------------------
-    // CHARSET
-    // ---------------------------------------------------------------------------------------------
 
     private static final Map<String, Optional<Charset>> CHARSET_CACHE = new ConcurrentHashMap<>();
 
@@ -68,7 +42,6 @@ public final class MimeParser {
             try {
                 return Optional.of(Charset.forName(n));
             } catch (RuntimeException ignored) {
-                // thử tên kế tiếp
             }
         }
         return Optional.empty();
@@ -116,7 +89,6 @@ public final class MimeParser {
             case "tis-620":
             case "windows-874":
                 return first("x-windows-874", "TIS-620", "x-iso-8859-11");
-            // Thư gắn nhãn ISO-8859-1 hầu như luôn là windows-1252 (tập cha, in được ký tự 0x80-0x9F)
             case "iso-8859-1":
             case "iso_8859-1":
             case "latin1":
@@ -140,7 +112,6 @@ public final class MimeParser {
         }
     }
 
-    /** Trả null nếu tên rỗng/lạ/không hỗ trợ. Bỏ phần ngôn ngữ "*vi" (RFC 2231) và dấu nháy. */
     private static Charset lookupCharset(String name) {
         if (name == null) return null;
         String n = name.trim();
@@ -176,11 +147,6 @@ public final class MimeParser {
         return true;
     }
 
-    /**
-     * Giải mã byte theo tên charset khai báo, có đường lùi hợp lý:
-     * charset lạ/vắng -> thử UTF-8 chặt, hỏng thì windows-1252; us-ascii mà có byte cao -> như trên;
-     * charset hợp lệ -> giải mã lỏng (ký tự hỏng thành U+FFFD).
-     */
     static String decodeBytes(byte[] b, String charsetName) {
         if (b == null || b.length == 0) return "";
         Charset c = lookupCharset(charsetName);
@@ -203,10 +169,6 @@ public final class MimeParser {
         return decodeStrictUtf8OrWin1252(Arrays.copyOfRange(b, s, e));
     }
 
-    // ---------------------------------------------------------------------------------------------
-    // GIẢI MÃ TRANSFER-ENCODING
-    // ---------------------------------------------------------------------------------------------
-
     private static final byte[] B64 = new byte[128];
 
     static {
@@ -215,7 +177,6 @@ public final class MimeParser {
         for (int i = 0; i < alpha.length(); i++) B64[alpha.charAt(i)] = (byte) i;
     }
 
-    /** Base64 lỏng: bỏ qua ký tự lạ/xuống dòng, chịu thiếu padding. Trả null nếu kết quả vượt max. */
     private static byte[] decodeBase64(byte[] src, int s, int e, long max) {
         long estimate = ((long) (e - s) * 3) / 4 + 3;
         ByteArrayOutputStream out = new ByteArrayOutputStream((int) Math.min(estimate, 1 << 20));
@@ -258,7 +219,6 @@ public final class MimeParser {
         return -1;
     }
 
-    /** Quoted-printable lỏng; giữ nguyên ngắt dòng của nguồn, bỏ khoảng trắng thừa cuối dòng. */
     private static byte[] decodeQuotedPrintable(byte[] b, int s, int e, long max) {
         ByteArrayOutputStream out = new ByteArrayOutputStream(Math.min(e - s, 1 << 20));
         int i = s;
@@ -282,11 +242,10 @@ public final class MimeParser {
                         continue;
                     }
                 }
-                if (i + 1 >= e) { // "=" ở cuối dữ liệu: coi như ngắt dòng mềm
+                if (i + 1 >= e) {
                     i++;
                     continue;
                 }
-                // "=" + khoảng trắng + xuống dòng: ngắt dòng mềm có khoảng trắng thừa
                 int j = i + 1;
                 while (j < e && (b[j] == ' ' || b[j] == '\t')) j++;
                 if (j < e && (b[j] == '\n' || b[j] == '\r')) {
@@ -303,7 +262,7 @@ public final class MimeParser {
                 int j = i;
                 while (j < e && (b[j] == ' ' || b[j] == '\t')) j++;
                 if (j >= e || b[j] == '\n' || b[j] == '\r') {
-                    i = j; // khoảng trắng cuối dòng bị bỏ theo RFC 2045
+                    i = j;
                     continue;
                 }
                 out.write(b, i, j - i);
@@ -318,7 +277,6 @@ public final class MimeParser {
         return out.toByteArray();
     }
 
-    /** Trả null nếu vượt max. */
     private static byte[] decodeTransfer(byte[] buf, int s, int e, String cte, long max) {
         if (e < s) e = s;
         if ("base64".equals(cte)) return decodeBase64(buf, s, e, max);
@@ -326,10 +284,6 @@ public final class MimeParser {
         if ((long) (e - s) > max) return null;
         return Arrays.copyOfRange(buf, s, e);
     }
-
-    // ---------------------------------------------------------------------------------------------
-    // HEADER
-    // ---------------------------------------------------------------------------------------------
 
     private static final class Headers {
         final Map<String, List<String>> map = new HashMap<>();
@@ -362,11 +316,9 @@ public final class MimeParser {
         return true;
     }
 
-    /** Đọc khối header [start,end); bodyStart trỏ tới byte đầu thân (sau dòng trống). Lỏng với thư lỗi. */
     private static Headers parseHeaders(byte[] buf, int start, int end) {
         Headers h = new Headers();
         int pos = start;
-        // Bỏ dòng "From " kiểu mbox nếu có
         if (end - pos > 5 && buf[pos] == 'F' && buf[pos + 1] == 'r' && buf[pos + 2] == 'o'
                 && buf[pos + 3] == 'm' && buf[pos + 4] == ' ') {
             int le = indexOfByte(buf, (byte) '\n', pos, end);
@@ -382,12 +334,12 @@ public final class MimeParser {
             int contentEnd = lineEnd;
             if (contentEnd > pos && buf[contentEnd - 1] == '\r') contentEnd--;
 
-            if (contentEnd == pos) { // dòng trống: hết header
+            if (contentEnd == pos) {
                 if (curName != null) h.add(curName, cur.toString());
                 h.bodyStart = next;
                 return h;
             }
-            if (pos - headerStart > MAX_HEADER_BYTES) { // header quá lớn: coi như không có thân
+            if (pos - headerStart > MAX_HEADER_BYTES) {
                 if (curName != null) h.add(curName, cur.toString());
                 h.bodyStart = end;
                 return h;
@@ -395,12 +347,11 @@ public final class MimeParser {
             String line = bytesToHeaderString(buf, pos, contentEnd);
             char c0 = line.charAt(0);
             if (c0 == ' ' || c0 == '\t') {
-                if (curName != null) cur.append(line); // dòng nối tiếp, giữ khoảng trắng đầu dòng
+                if (curName != null) cur.append(line);
             } else {
                 int colon = line.indexOf(':');
                 String name = colon > 0 ? line.substring(0, colon).trim().toLowerCase(Locale.ROOT) : "";
                 if (!validHeaderName(name)) {
-                    // Không phải header: thư lỗi, coi từ dòng này là thân
                     if (curName != null) h.add(curName, cur.toString());
                     h.bodyStart = pos;
                     return h;
@@ -415,10 +366,6 @@ public final class MimeParser {
         h.bodyStart = end;
         return h;
     }
-
-    // ---------------------------------------------------------------------------------------------
-    // CONTENT-TYPE / CONTENT-DISPOSITION (tham số, RFC 2231)
-    // ---------------------------------------------------------------------------------------------
 
     private static final class Field {
         String value = "";
@@ -443,8 +390,8 @@ public final class MimeParser {
             int ks = i;
             while (i < n && s.charAt(i) != '=' && s.charAt(i) != ';') i++;
             String key = s.substring(ks, i).trim().toLowerCase(Locale.ROOT);
-            if (i >= n || s.charAt(i) == ';') continue; // tham số không có giá trị
-            i++; // bỏ '='
+            if (i >= n || s.charAt(i) == ';') continue;
+            i++;
             while (i < n && isWs(s.charAt(i))) i++;
             String val;
             if (i < n && s.charAt(i) == '"') {
@@ -457,7 +404,7 @@ public final class MimeParser {
                     } else if (c == '"') {
                         break;
                     } else {
-                        vb.append(c); // gồm cả '\' đơn (đường dẫn kiểu Windows)
+                        vb.append(c);
                     }
                 }
                 val = vb.toString();
@@ -537,10 +484,6 @@ public final class MimeParser {
         }
     }
 
-    // ---------------------------------------------------------------------------------------------
-    // RFC 2047
-    // ---------------------------------------------------------------------------------------------
-
     private static final class EncodedWord {
         final int end;
         final String charset;
@@ -553,7 +496,6 @@ public final class MimeParser {
         }
     }
 
-    /** Mở gấp dòng: CRLF + khoảng trắng -> giữ khoảng trắng; CR/LF lẻ -> một dấu cách. */
     private static String unfold(String v) {
         if (v.indexOf('\r') < 0 && v.indexOf('\n') < 0) return v;
         StringBuilder sb = new StringBuilder(v.length());
@@ -586,7 +528,7 @@ public final class MimeParser {
         String text = s.substring(q1 + 3, q3);
         for (int k = 0; k < text.length(); k++) {
             char c = text.charAt(k);
-            if (c == ' ' || c == '\t') return null; // encoded-word không chứa khoảng trắng
+            if (c == ' ' || c == '\t') return null;
         }
         byte[] bytes;
         if (enc == 'B') {
@@ -621,7 +563,6 @@ public final class MimeParser {
             String cs = run.get(i).charset.trim().toLowerCase(Locale.ROOT);
             ByteArrayOutputStream bytes = new ByteArrayOutputStream();
             int j = i;
-            // Gộp các encoded-word liền nhau cùng charset trước khi giải mã: chịu được ký tự đa byte bị cắt đôi giữa hai từ
             while (j < run.size() && run.get(j).charset.trim().toLowerCase(Locale.ROOT).equals(cs)) {
                 byte[] b = run.get(j).bytes;
                 bytes.write(b, 0, b.length);
@@ -633,10 +574,6 @@ public final class MimeParser {
         run.clear();
     }
 
-    /**
-     * Giá trị header không bao giờ hợp lệ khi chứa ký tự điều khiển: đổi thành dấu cách (kể cả do encoded-word nhúng vào),
-     * cùng U+2028/U+2029; rồi cắt khoảng trắng hai đầu. Bảo vệ cả các nơi khác dựng JSON từ giá trị này.
-     */
     private static String cleanHeaderOutput(String s) {
         int n = s.length();
         StringBuilder sb = null;
@@ -656,10 +593,6 @@ public final class MimeParser {
         return (sb == null ? s : sb.toString()).strip();
     }
 
-    /**
-     * Giải mã header theo RFC 2047. Không ném exception; đầu vào null trả "".
-     * Khoảng trắng giữa hai encoded-word liền nhau bị bỏ; encoded-word lỗi được giữ nguyên văn.
-     */
     public static String decodeHeader(String v) {
         if (v == null || v.isEmpty()) return "";
         try {
@@ -682,7 +615,7 @@ public final class MimeParser {
                         int j = i;
                         while (j < n && isWs(s.charAt(j))) j++;
                         if (j < n && parseEncodedWord(s, j) != null) {
-                            i = j; // khoảng trắng giữa hai encoded-word: bỏ
+                            i = j;
                             continue;
                         }
                     }
@@ -702,14 +635,6 @@ public final class MimeParser {
         }
     }
 
-    // ---------------------------------------------------------------------------------------------
-    // LÀM SẠCH VĂN BẢN
-    // ---------------------------------------------------------------------------------------------
-
-    /**
-     * Chuẩn hóa xuống dòng về "\n", bỏ ký tự điều khiển (trừ \n và \t), sửa surrogate lẻ.
-     * Vô hiệu hóa chuỗi "[ATTACHMENT:" xuất hiện trong chính nội dung thư để thư lạ không giả được đính kèm ở frontend.
-     */
     static String cleanText(String s) {
         int n = s.length();
         StringBuilder sb = new StringBuilder(n);
@@ -721,7 +646,6 @@ public final class MimeParser {
             } else if (c == '\n' || c == '\t') {
                 sb.append(c);
             } else if (c < 0x20 || c == 0x7f) {
-                // bỏ
             } else if (Character.isHighSurrogate(c)) {
                 if (i + 1 < n && Character.isLowSurrogate(s.charAt(i + 1))) {
                     sb.append(c).append(s.charAt(++i));
@@ -731,7 +655,6 @@ public final class MimeParser {
             } else if (Character.isLowSurrogate(c)) {
                 sb.append('\uFFFD');
             } else if (c == '\uFFFE' || c == '\uFFFF') {
-                // bỏ
             } else {
                 sb.append(c);
             }
@@ -749,10 +672,6 @@ public final class MimeParser {
         }
         return s.substring(0, e);
     }
-
-    // ---------------------------------------------------------------------------------------------
-    // HTML -> VĂN BẢN AN TOÀN (bộ quét tuyến tính, không regex)
-    // ---------------------------------------------------------------------------------------------
 
     private static final Map<String, String> ENTITIES = new HashMap<>();
 
@@ -774,7 +693,6 @@ public final class MimeParser {
                 {"acute", "\u00B4"}, {"cedil", "\u00B8"}, {"sup1", "\u00B9"}
         };
         for (String[] p : pairs) ENTITIES.put(p[0], p[1]);
-        // Chữ Latin-1 U+00C0..U+00FF (bỏ × và ÷)
         String latin = "Agrave Aacute Acirc Atilde Auml Aring AElig Ccedil Egrave Eacute Ecirc Euml Igrave Iacute Icirc Iuml "
                 + "ETH Ntilde Ograve Oacute Ocirc Otilde Ouml * Oslash Ugrave Uacute Ucirc Uuml Yacute THORN szlig "
                 + "agrave aacute acirc atilde auml aring aelig ccedil egrave eacute ecirc euml igrave iacute icirc iuml "
@@ -800,7 +718,7 @@ public final class MimeParser {
             sb.append(c);
         }
 
-        void literal(String s) { // thực thể đã giải mã: giữ nguyên, không gộp khoảng trắng
+        void literal(String s) {
             if (s.isEmpty()) return;
             if (space && sb.length() > 0 && last() != '\n' && last() != ' ' && s.charAt(0) != ' ') sb.append(' ');
             space = false;
@@ -815,12 +733,12 @@ public final class MimeParser {
             }
         }
 
-        void newline() { // đảm bảo đang ở đầu dòng
+        void newline() {
             space = false;
             if (sb.length() > 0 && last() != '\n') sb.append('\n');
         }
 
-        void blankLine() { // đảm bảo có một dòng trống phía trước
+        void blankLine() {
             newline();
             int len = sb.length();
             if (len > 0 && !(len >= 2 && sb.charAt(len - 2) == '\n')) sb.append('\n');
@@ -837,10 +755,6 @@ public final class MimeParser {
         }
     }
 
-    private static boolean regionEqIgnoreCase(String s, int at, String lowerNeedle) {
-        return s.regionMatches(true, at, lowerNeedle, 0, lowerNeedle.length());
-    }
-
     private static int indexOfIgnoreCase(String s, String needle, int from) {
         int max = s.length() - needle.length();
         for (int i = Math.max(0, from); i <= max; i++) {
@@ -853,10 +767,6 @@ public final class MimeParser {
         return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
     }
 
-    /**
-     * Chuyển HTML sang văn bản thuần: bỏ mọi thẻ, bỏ nội dung script/style/head/title, đổi br và thẻ khối thành xuống dòng,
-     * giải mã thực thể. Kết quả không chứa thẻ HTML.
-     */
     static String htmlToText(String html) {
         HtmlOut o = new HtmlOut();
         int n = html.length();
@@ -885,7 +795,6 @@ public final class MimeParser {
                     int nameStart = j;
                     while (j < n && (isAsciiLetter(html.charAt(j)) || (html.charAt(j) >= '0' && html.charAt(j) <= '9'))) j++;
                     String name = html.substring(nameStart, j).toLowerCase(Locale.ROOT);
-                    // Tìm '>' có nhận biết dấu nháy, tối đa 8192 ký tự; quá thì lùi về '>' đầu tiên
                     int k = j;
                     char q = 0;
                     int lim = Math.min(n, j + 8192);
@@ -903,7 +812,7 @@ public final class MimeParser {
                         k++;
                     }
                     if (tagEnd < 0) tagEnd = html.indexOf('>', j);
-                    if (tagEnd < 0) { // thẻ không đóng: bỏ phần còn lại
+                    if (tagEnd < 0) {
                         i = n;
                         continue;
                     }
@@ -913,7 +822,7 @@ public final class MimeParser {
                         if (name.equals("script") || name.equals("style")) {
                             int ce = indexOfIgnoreCase(html, "</" + name, i);
                             if (ce < 0) {
-                                i = n; // script/style không đóng: bỏ hết cho an toàn
+                                i = n;
                             } else {
                                 int gt = html.indexOf('>', ce);
                                 i = gt < 0 ? n : gt + 1;
@@ -932,7 +841,7 @@ public final class MimeParser {
                     applyTag(o, name, closing);
                     continue;
                 }
-                o.text('<'); // dấu '<' trơ trọi trong văn bản
+                o.text('<');
                 i++;
                 continue;
             }
@@ -1045,11 +954,10 @@ public final class MimeParser {
                 }
                 break;
             default:
-                break; // thẻ khác: bỏ thẻ, giữ nội dung
+                break;
         }
     }
 
-    /** Bỏ khoảng trắng cuối dòng, tối đa hai dòng trống liên tiếp, bỏ dòng trống đầu/cuối, bỏ ký tự điều khiển. */
     private static String tidyLines(String s) {
         String[] lines = s.split("\n", -1);
         StringBuilder sb = new StringBuilder(s.length());
@@ -1070,10 +978,6 @@ public final class MimeParser {
         }
         return cleanText(sb.toString());
     }
-
-    // ---------------------------------------------------------------------------------------------
-    // DUYỆT CÂY MIME
-    // ---------------------------------------------------------------------------------------------
 
     private static final class Ctx {
         int parts = 0;
@@ -1199,7 +1103,7 @@ public final class MimeParser {
             pos = next;
         }
         if (!closed && partStart >= 0 && partStart < end) {
-            parts.add(new int[]{partStart, end}); // thư cắt cụt: lấy phần cuối
+            parts.add(new int[]{partStart, end});
         }
         return parts;
     }
@@ -1246,7 +1150,6 @@ public final class MimeParser {
                     return combine(rs, type.equals("multipart/alternative"));
                 }
             }
-            // multipart hỏng (không có boundary / không thấy phần nào): xử lý như văn bản thường
             type = "text/plain";
         }
 
@@ -1301,7 +1204,6 @@ public final class MimeParser {
             return r;
         }
 
-        // Còn lại: đính kèm
         long allowed = Math.min(MAX_ATTACHMENT_BYTES, MAX_TOTAL_ATTACHMENT_BYTES - ctx.attachmentBytes);
         if (allowed <= 0) {
             ctx.truncated = true;
@@ -1325,11 +1227,11 @@ public final class MimeParser {
         if (alternative) {
             Result best = null;
             for (Result x : rs) {
-                if (!x.text.isBlank() && !x.htmlOnly) best = x; // bản văn bản thuần cuối cùng
+                if (!x.text.isBlank() && !x.htmlOnly) best = x;
             }
             if (best == null) {
                 for (Result x : rs) {
-                    if (!x.text.isBlank()) best = x; // chỉ có HTML
+                    if (!x.text.isBlank()) best = x;
                 }
             }
             return best == null ? out : best;
@@ -1347,13 +1249,6 @@ public final class MimeParser {
         return out;
     }
 
-    // ---------------------------------------------------------------------------------------------
-    // API CHÍNH
-    // ---------------------------------------------------------------------------------------------
-
-    /**
-     * Đọc thư. Không ném exception: thư lỗi định dạng trả bản tốt nhất có thể, thư rỗng/null trả ParsedMail rỗng.
-     */
     public static ParsedMail parse(byte[] raw) {
         if (raw == null || raw.length == 0) {
             return new ParsedMail("", "", "", "", "", List.of());
@@ -1369,7 +1264,6 @@ public final class MimeParser {
             subject = decodeHeader(h.first("subject"));
             date = decodeHeader(h.first("date"));
         } catch (RuntimeException | StackOverflowError e) {
-            // giữ các giá trị rỗng
         }
         try {
             Ctx ctx = new Ctx();
@@ -1388,10 +1282,6 @@ public final class MimeParser {
         }
     }
 
-    /**
-     * Giá trị thô (đã nối dòng gấp, đã strip) của header đầu tiên tên {@code name}; "" nếu không có.
-     * Không giải mã RFC 2047 - dùng cho Message-ID / References / In-Reply-To.
-     */
     public static String rawHeader(byte[] raw, String name) {
         if (raw == null || raw.length == 0 || name == null) return "";
         try {

@@ -1,8 +1,8 @@
 let selectedFiles = [];
 let activeMailbox = 'inbox';
 let currentSelectedMail = null;
-let currentDetailMail = null; // THÊM
-let replyContext = null;      // THÊM
+let currentDetailMail = null;
+let replyContext = null;
 let confirmCallback = null;
 let loadedMailsCache = [];
 
@@ -12,6 +12,9 @@ let totalMailCount = 0;
 let currentRequestId = 0;
 
 let sseSource = null;
+let sseReconnectTimer = null;
+let sseRetryDelay = 3000;
+let sseGeneration = 0;
 
 document.addEventListener('DOMContentLoaded', () => {
     const currentUser = localStorage.getItem('currentUser');
@@ -29,14 +32,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
     loadInbox();
     updateStorageUsage();
-    
-    // KÍCH HOẠT LẮNG NGHE REALTIME SSE KHI VỪA VÀO TRANG
     startRealtimeListener();
 });
-
-let sseReconnectTimer = null;
-let sseRetryDelay = 3000;
-let sseGeneration = 0; // chống chạy chồng khi start được gọi nhiều lần
 
 async function startRealtimeListener() {
     stopRealtimeListener();
@@ -46,14 +43,13 @@ async function startRealtimeListener() {
 
     const generation = ++sseGeneration;
 
-    // Xin ticket dùng một lần (sống ~30s) để không đưa token phiên lên URL
     let ticket = null;
     try {
         const res = await fetch('/api/mails/stream-ticket', {
             method: 'POST',
             headers: { 'Authorization': 'Bearer ' + token }
         });
-        if (res.status === 401) return; // phiên hết hạn/bị khóa: không kết nối lại
+        if (res.status === 401) return;
         if (!res.ok) throw new Error('ticket');
         const data = await res.json();
         ticket = data.ticket;
@@ -63,21 +59,18 @@ async function startRealtimeListener() {
     }
     if (!ticket || generation !== sseGeneration) return;
 
-    // Khởi tạo kết nối SSE tới Server
     sseSource = new EventSource(`/api/mails/stream?ticket=${encodeURIComponent(ticket)}`);
 
     sseSource.onopen = () => {
         sseRetryDelay = 3000;
     };
 
-    // Lắng nghe sự kiện thông điệp chung
     sseSource.onmessage = (event) => {
         if (activeMailbox === 'inbox') {
             refreshMails();
         }
     };
 
-    // Lắng nghe sự kiện 'new_mail' cụ thể từ SseManager trên Java Server
     sseSource.addEventListener('new_mail', (event) => {
         try {
             const data = JSON.parse(event.data);
@@ -91,13 +84,11 @@ async function startRealtimeListener() {
         }
     });
 
-    // Server đóng kết nối này vì user mở quá nhiều tab: không kết nối lại để các tab không đá nhau
     sseSource.addEventListener('evicted', () => {
         sseGeneration++;
         if (sseSource) { sseSource.close(); sseSource = null; }
     });
 
-    // Ticket chỉ dùng một lần nên không để trình duyệt tự reconnect: đóng và xin ticket mới
     sseSource.onerror = () => {
         if (sseSource) { sseSource.close(); sseSource = null; }
         scheduleSseReconnect();
@@ -107,7 +98,7 @@ async function startRealtimeListener() {
 function scheduleSseReconnect() {
     if (sseReconnectTimer) return;
     const delay = sseRetryDelay;
-    sseRetryDelay = Math.min(sseRetryDelay * 2, 60000); // backoff tối đa 60s
+    sseRetryDelay = Math.min(sseRetryDelay * 2, 60000);
     sseReconnectTimer = setTimeout(() => {
         sseReconnectTimer = null;
         startRealtimeListener();
@@ -133,9 +124,7 @@ function showToast(message, type = 'success') {
     const toast = document.createElement('div');
     toast.className = `toast ${type}`;
 
-    const iconClass = type === 'success'
-        ? 'fa-circle-check'
-        : 'fa-circle-exclamation';
+    const iconClass = type === 'success' ? 'fa-circle-check' : 'fa-circle-exclamation';
 
     toast.innerHTML = `
         <i class="fa-solid ${iconClass} toast-icon"></i>
@@ -143,9 +132,7 @@ function showToast(message, type = 'success') {
     `;
 
     container.appendChild(toast);
-
     setTimeout(() => toast.classList.add('show'), 10);
-
     setTimeout(() => {
         toast.classList.remove('show');
         setTimeout(() => toast.remove(), 300);
@@ -177,7 +164,7 @@ function closeComposeModal() {
 function resetComposeForm() {
     document.getElementById('compose-form').reset();
     selectedFiles = [];
-    replyContext = null; // THÊM: Xóa trạng thái trả lời khi reset form
+    replyContext = null;
     renderFilePreview();
 }
 
@@ -208,12 +195,10 @@ function renderFilePreview() {
     if (!previewContainer) return;
 
     previewContainer.innerHTML = '';
-
     if (selectedFiles.length === 0) return;
 
     selectedFiles.forEach((file, index) => {
         const fileChip = document.createElement('div');
-
         fileChip.style.cssText = `
             display: inline-flex;
             align-items: center;
@@ -233,11 +218,15 @@ function renderFilePreview() {
             <span style="color: #64748b; font-size: 11px;">
                 (${formatFileSize(file.size)})
             </span>
-            <i class="fa-solid fa-xmark"
+            <i class="fa-solid fa-xmark remove-file-btn"
                style="cursor: pointer; color: #ef4444; margin-left: 4px; font-size: 14px;"
-               onclick="removeFile(${index})"
                title="Xóa file này"></i>
         `;
+
+        const rmBtn = fileChip.querySelector('.remove-file-btn');
+        if (rmBtn) {
+            rmBtn.onclick = () => removeFile(index);
+        }
 
         previewContainer.appendChild(fileChip);
     });
@@ -245,19 +234,15 @@ function renderFilePreview() {
 
 function formatFileSize(bytes) {
     if (bytes === 0) return '0 B';
-
     const k = 1024;
     const sizes = ['B', 'KB', 'MB', 'GB'];
     const i = Math.floor(Math.log(bytes) / Math.log(k));
-
-    return parseFloat((bytes / Math.pow(k, i)).toFixed(1))
-        + ' ' + sizes[i];
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
 }
 
 function convertFileToBase64(file) {
     return new Promise((resolve, reject) => {
         const reader = new FileReader();
-
         reader.readAsDataURL(file);
         reader.onload = () => resolve(reader.result);
         reader.onerror = error => reject(error);
@@ -278,23 +263,18 @@ async function handleSendMail(event) {
     }
 
     const recipients = rawTo.split(/[\s,;]+/).filter(email => email.length > 0);
-
     if (recipients.length === 0) {
         showToast('Địa chỉ email người nhận không hợp lệ!', 'error');
         return;
     }
 
     let attachmentData = '';
-
     if (selectedFiles.length > 0) {
         for (let i = 0; i < selectedFiles.length; i++) {
             const file = selectedFiles[i];
-
             try {
                 const base64 = await convertFileToBase64(file);
-
-                attachmentData +=
-                    `\n[ATTACHMENT:${file.name}]${base64}[/ATTACHMENT]`;
+                attachmentData += `\n[ATTACHMENT:${file.name}]${base64}[/ATTACHMENT]`;
             } catch (err) {
                 showToast(`Lỗi đọc file: ${file.name}`, 'error');
                 return;
@@ -303,13 +283,11 @@ async function handleSendMail(event) {
     }
 
     const fullContent = bodyText + attachmentData;
-
     let payload =
         `to=${encodeURIComponent(recipients.join(','))}` +
         `&subject=${encodeURIComponent(subject)}` +
         `&body=${encodeURIComponent(fullContent)}`;
 
-    // THÊM: Nếu đang trả lời thư, gửi kèm ID thư gốc cho server
     if (replyContext) {
         payload += `&reply_id=${encodeURIComponent(replyContext.id)}` +
                    `&reply_folder=${encodeURIComponent(replyContext.folder)}`;
@@ -326,7 +304,6 @@ async function handleSendMail(event) {
         });
 
         const data = await response.json();
-
         if (data.success) {
             closeComposeModal();
             showToast(data.message || 'Gửi thư thành công!', 'success');
@@ -448,11 +425,19 @@ function renderEmailList(mails) {
                 <div class="email-subject">${escapeHtml(mail.subject)}</div>
                 <div class="email-date">${escapeHtml(formatMailDate(mail.timestamp))}</div>
             </div>
-            <button onclick="handleDeleteMail('${escapeHtml(mail.id)}', event)" title="Xóa thư"
+            <button class="delete-mail-btn" title="Xóa thư"
                     style="position: absolute; right: 12px; top: 12px; background: none; border: none; color: #ef4444; cursor: pointer; padding: 4px; font-size: 14px;">
                 <i class="fa-solid fa-trash"></i>
             </button>
         `;
+
+        const delBtn = item.querySelector('.delete-mail-btn');
+        if (delBtn) {
+            delBtn.onclick = (e) => {
+                e.stopPropagation();
+                handleDeleteMail(mail.id, e);
+            };
+        }
 
         emailListDiv.appendChild(item);
     });
@@ -548,7 +533,6 @@ function handleDeleteMail(mailId, event) {
             });
 
             const data = await response.json();
-
             if (data.success) {
                 showToast('Đã xóa thư thành công!', 'success');
                 refreshMails();
@@ -564,17 +548,19 @@ function handleDeleteMail(mailId, event) {
 
 function resetEmailDetail() {
     currentSelectedMail = null;
-    currentDetailMail = null; // THÊM: Xóa dữ liệu chi tiết
+    currentDetailMail = null;
     document.getElementById('no-email-selected').classList.remove('hidden');
     document.getElementById('email-detail').classList.add('hidden');
 }
 
 async function selectEmail(mail, element) {
+    if (!mail || typeof mail !== 'object') return;
+
     document.querySelectorAll('.email-item').forEach(item => {
         item.classList.remove('active');
     });
 
-    element.classList.add('active');
+    if (element) element.classList.add('active');
     currentSelectedMail = mail;
 
     const token = localStorage.getItem('authToken');
@@ -635,26 +621,26 @@ function downloadAttachment(fileName, rawBase64) {
 }
 
 function renderEmailDetail(mail) {
-    currentDetailMail = mail; // THÊM: Lưu thư đang hiển thị
+    currentDetailMail = mail;
 
     document.getElementById('no-email-selected').classList.add('hidden');
     document.getElementById('email-detail').classList.remove('hidden');
 
-    // THÊM: Quản lý ẩn/hiện nút Trả lời khi xem thư đã gửi
     const replyBtn = document.getElementById('reply-btn');
     if (replyBtn) {
         replyBtn.classList.toggle('hidden', activeMailbox === 'sent');
     }
 
-    document.getElementById('detail-subject').textContent = mail.subject;
-    document.getElementById('detail-sender').textContent = mail.sender;
+    document.getElementById('detail-subject').textContent = mail.subject || '';
+    document.getElementById('detail-sender').textContent = mail.sender || '';
     document.getElementById('detail-receiver').textContent =
-        mail.recipient || localStorage.getItem('currentUser');
+        mail.recipient || localStorage.getItem('currentUser') || '';
     document.getElementById('detail-time').textContent =
         formatMailDate(mail.timestamp);
 
     const detailBodyElem = document.getElementById('detail-body');
     detailBodyElem.innerHTML = '';
+    detailBodyElem.style.whiteSpace = 'pre-wrap';
 
     let bodyText = mail.body || '';
 
@@ -728,7 +714,6 @@ function renderEmailDetail(mail) {
 
 function escapeHtml(text) {
     if (!text) return '';
-
     return String(text)
         .replace(/&/g, '&amp;')
         .replace(/</g, '&lt;')
@@ -772,7 +757,6 @@ function formatMailDate(value) {
     );
 
     let date = new Date(normalized);
-
     if (Number.isNaN(date.getTime())) {
         date = new Date(
             normalized.replace(/^(\d{4}-\d{2}-\d{2})\s+/, '$1T')
@@ -817,7 +801,6 @@ async function logout() {
     }
 }
 
-// ===== THÊM CÁC HÀM XỬ LÝ TRẢ LỜI THƯ =====
 function extractEmail(text) {
     if (!text) return '';
     const angle = String(text).match(/<([^<>\s]+@[^<>\s]+)>/);

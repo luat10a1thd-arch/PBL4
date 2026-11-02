@@ -330,4 +330,32 @@ public class SseManager {
     static void heartbeatNowForTest() {
         heartbeatAll(true);
     }
+
+    /**
+     * Bắn sự kiện đồng bộ 2 chiều (state_sync) tới mọi kết nối SSE của user khi đọc/gắn sao/xóa/khôi phục/gửi thư.
+     */
+    public static void notifyStateChange(String username, String eventType, String mailId, String folder) {
+        String key = normalize(username);
+        if (key == null) return;
+        List<SseClient> clients = userClients.get(key);
+        if (clients == null || clients.isEmpty()) return;
+
+        String payload = String.format(
+            "{\"type\":\"%s\",\"mailId\":\"%s\",\"folder\":\"%s\",\"timestamp\":%d}",
+            eventType == null ? "SYNC" : eventType.replace("\"", ""),
+            mailId == null ? "" : mailId.replace("\"", ""),
+            folder == null ? "inbox" : folder.replace("\"", ""),
+            System.currentTimeMillis()
+        );
+        byte[] bytes = ("event: state_sync\ndata: " + payload + "\n\n").getBytes(StandardCharsets.UTF_8);
+        try {
+            writer.execute(() -> {
+                List<SseClient> current = userClients.get(key);
+                if (current == null) return;
+                for (SseClient c : current) write(c, bytes);
+            });
+        } catch (RejectedExecutionException e) {
+            droppedNotifications.incrementAndGet();
+        }
+    }
 }

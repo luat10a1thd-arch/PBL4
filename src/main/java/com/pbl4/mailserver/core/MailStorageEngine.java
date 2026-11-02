@@ -274,6 +274,9 @@ public class MailStorageEngine {
 
     private static final String SENT_SUFFIX = "_sent";
     private static final String SPAM_SUFFIX = "_spam";
+    private static final String DRAFTS_SUFFIX = "_drafts";
+    private static final String TRASH_SUFFIX = "_trash";
+    public static final long DEFAULT_QUOTA_BYTES = 100L * 1024L * 1024L;
 
     /** Thư rác cũ hơn ngần này thì bị dọn. */
     private static final long SPAM_MAX_AGE_MS = TimeUnit.DAYS.toMillis(30);
@@ -412,7 +415,9 @@ public class MailStorageEngine {
     private static long usedBytesOfUser(String cleanUser) {
         return loadedIndex(cleanUser).totalBytes()
                 + loadedIndex(cleanUser + SENT_SUFFIX).totalBytes()
-                + loadedIndex(cleanUser + SPAM_SUFFIX).totalBytes();
+                + loadedIndex(cleanUser + SPAM_SUFFIX).totalBytes()
+                + loadedIndex(cleanUser + DRAFTS_SUFFIX).totalBytes()
+                + loadedIndex(cleanUser + TRASH_SUFFIX).totalBytes();
     }
 
     private static long maxQuotaBytes() {
@@ -474,7 +479,15 @@ public class MailStorageEngine {
         return mailbox != null && mailbox.endsWith(SPAM_SUFFIX);
     }
 
-    // "u", "u_sent", "u_spam" -> "u"
+    private static boolean isDraftsBox(String mailbox) {
+        return mailbox != null && mailbox.endsWith(DRAFTS_SUFFIX);
+    }
+
+    private static boolean isTrashBox(String mailbox) {
+        return mailbox != null && mailbox.endsWith(TRASH_SUFFIX);
+    }
+
+    // "u", "u_sent", "u_spam", "u_drafts", "u_trash" -> "u"
     private static String getCleanUsername(String username) {
         if (username == null) return null;
         if (username.endsWith(SENT_SUFFIX)) {
@@ -482,6 +495,12 @@ public class MailStorageEngine {
         }
         if (username.endsWith(SPAM_SUFFIX)) {
             return username.substring(0, username.length() - SPAM_SUFFIX.length());
+        }
+        if (username.endsWith(DRAFTS_SUFFIX)) {
+            return username.substring(0, username.length() - DRAFTS_SUFFIX.length());
+        }
+        if (username.endsWith(TRASH_SUFFIX)) {
+            return username.substring(0, username.length() - TRASH_SUFFIX.length());
         }
         return username;
     }
@@ -612,6 +631,14 @@ public class MailStorageEngine {
             return SaveResult.NO_USER;
         }
 
+        // Nếu thư đang giao vào INBOX nhưng người gửi nằm trong danh sách hạn chế (Thư rác) của người nhận -> tự động chuyển thẳng vào _spam
+        if (!isSentBox(mailbox) && !isSpamBox(mailbox) && !isDraftsBox(mailbox) && !isTrashBox(mailbox)) {
+            if (isSenderBlockedFromRaw(cleanRecipient, raw)) {
+                mailbox = cleanRecipient + SPAM_SUFFIX;
+                System.out.println("[MAIL STORAGE] Tự động chuyển thư từ người gửi bị hạn chế vào Thư rác: " + mailbox);
+            }
+        }
+
         try {
             initMailbox(mailbox);
 
@@ -631,7 +658,7 @@ public class MailStorageEngine {
 
             // Chỉ hòm nhận thật (inbox) mới bắn SSE; "_sent" và "_spam" thì không
             String summaryJson = null;
-            if (!isSentBox(mailbox) && !isSpamBox(mailbox)) {
+            if (!isSentBox(mailbox) && !isSpamBox(mailbox) && !isDraftsBox(mailbox) && !isTrashBox(mailbox)) {
                 MailSummary s = parseHeaderToSummary(fileName, cutHeader(raw));
                 summaryJson = String.format(
                         "{\"id\":\"%s\",\"sender\":\"%s\",\"recipient\":\"%s\",\"subject\":\"%s\",\"timestamp\":\"%s\"}",
@@ -682,13 +709,17 @@ public class MailStorageEngine {
                 lock.writeLock().unlock();
             }
 
-            // 3. KÍCH HOẠT REALTIME EVENT: ngoài write-lock, chỉ MỘT lần, chỉ cho hòm thư nhận (inbox)
+            // 3. KÍCH HOẠT REALTIME EVENT: ngoài write-lock
             if (summaryJson != null) {
                 try {
                     com.pbl4.mailserver.webapi.SseManager.notifyUser(cleanRecipient, summaryJson);
                 } catch (Exception e) {
                     System.err.println("[MAIL STORAGE] Lỗi khi bắn SSE: " + e.getMessage());
                 }
+            } else if (isSpamBox(mailbox)) {
+                try {
+                    com.pbl4.mailserver.webapi.SseManager.notifyStateChange(cleanRecipient, "NEW_SPAM", fileName, "spam");
+                } catch (Exception ignored) {}
             }
 
             return SaveResult.OK;
@@ -1069,6 +1100,8 @@ public class MailStorageEngine {
         }
         try {
             Files.deleteIfExists(filePath);
+            Path metaPath = dir.resolve("meta").resolve(fileId + ".meta").normalize();
+            if (metaPath.startsWith(dir)) Files.deleteIfExists(metaPath);
         } catch (IOException e) {
             System.err.println("[MAIL STORAGE] Lỗi khi xóa file " + fileId + ": " + e.getMessage());
         }
@@ -1151,39 +1184,52 @@ public class MailStorageEngine {
         if (base == null || base.isEmpty()) return;
         String sent = base + SENT_SUFFIX;
         String spam = base + SPAM_SUFFIX;
+        String drafts = base + DRAFTS_SUFFIX;
+        String trash = base + TRASH_SUFFIX;
 
         ReentrantReadWriteLock lockInbox = getLockForUser(base);
         ReentrantReadWriteLock lockSent = getLockForUser(sent);
         ReentrantReadWriteLock lockSpam = getLockForUser(spam);
-        // Luôn khóa theo thứ tự inbox -> sent -> spam; các hàm lưu/xóa/dọn chỉ giữ một lock nên không thể bế tắc
+        ReentrantReadWriteLock lockDrafts = getLockForUser(drafts);
+        ReentrantReadWriteLock lockTrash = getLockForUser(trash);
         lockInbox.writeLock().lock();
         lockSent.writeLock().lock();
         lockSpam.writeLock().lock();
+        lockDrafts.writeLock().lock();
+        lockTrash.writeLock().lock();
         try {
             if (deleteFiles) {
                 try {
                     deleteDirectoryQuietly(mailboxDir(base));
                     deleteDirectoryQuietly(mailboxDir(sent));
                     deleteDirectoryQuietly(mailboxDir(spam));
+                    deleteDirectoryQuietly(mailboxDir(drafts));
+                    deleteDirectoryQuietly(mailboxDir(trash));
                 } catch (Exception e) {
                     System.err.println("[MAIL STORAGE] Lỗi khi xóa hòm thư " + base + ": " + e.getMessage());
                 }
             }
 
-            // Dọn index + cache (không phân biệt hoa/thường vì khóa user trong UserStore là chữ thường)
-            indexes.keySet().removeIf(k -> k.equalsIgnoreCase(base) || k.equalsIgnoreCase(sent) || k.equalsIgnoreCase(spam));
+            indexes.keySet().removeIf(k -> k.equalsIgnoreCase(base) || k.equalsIgnoreCase(sent) || k.equalsIgnoreCase(spam) || k.equalsIgnoreCase(drafts) || k.equalsIgnoreCase(trash));
             SUMMARY_CACHE.removeByPrefixIgnoreCase(base + "|");
             SUMMARY_CACHE.removeByPrefixIgnoreCase(sent + "|");
             SUMMARY_CACHE.removeByPrefixIgnoreCase(spam + "|");
+            SUMMARY_CACHE.removeByPrefixIgnoreCase(drafts + "|");
+            SUMMARY_CACHE.removeByPrefixIgnoreCase(trash + "|");
             META_CACHE.removeByPrefixIgnoreCase(base + "|");
             META_CACHE.removeByPrefixIgnoreCase(sent + "|");
             META_CACHE.removeByPrefixIgnoreCase(spam + "|");
+            META_CACHE.removeByPrefixIgnoreCase(drafts + "|");
+            META_CACHE.removeByPrefixIgnoreCase(trash + "|");
             quotaMonitors.keySet().removeIf(k -> k.equalsIgnoreCase(base));
         } finally {
-            // Bỏ lock khỏi map trước khi mở khóa: luồng đến sau sẽ dùng lock mới (user đã xóa nên không còn gì để tranh chấp)
             userLocks.remove(base, lockInbox);
             userLocks.remove(sent, lockSent);
             userLocks.remove(spam, lockSpam);
+            userLocks.remove(drafts, lockDrafts);
+            userLocks.remove(trash, lockTrash);
+            lockTrash.writeLock().unlock();
+            lockDrafts.writeLock().unlock();
             lockSpam.writeLock().unlock();
             lockSent.writeLock().unlock();
             lockInbox.writeLock().unlock();
@@ -1323,5 +1369,240 @@ public class MailStorageEngine {
             }
         }
         return sb.toString();
+    }
+
+    // ------------------------------------------------------------------------------------------------
+    // QUOTA, THÙNG RÁC (MOVE/RESTORE) & CỜ TRẠNG THÁI (SEEN / STARRED)
+    // ------------------------------------------------------------------------------------------------
+
+    /**
+     * Tính tổng dung lượng (bytes) tất cả các hòm thư của một user (inbox, _sent, _drafts, _spam, _trash).
+     */
+    public static long getUsedQuotaBytes(String username) {
+        if (username == null || username.trim().isEmpty()) return 0;
+        String clean = getCleanUsername(username.trim());
+        return getMailboxSizeInBytes(clean)
+                + getMailboxSizeInBytes(clean + SENT_SUFFIX)
+                + getMailboxSizeInBytes(clean + DRAFTS_SUFFIX)
+                + getMailboxSizeInBytes(clean + SPAM_SUFFIX)
+                + getMailboxSizeInBytes(clean + TRASH_SUFFIX);
+    }
+
+    /**
+     * Kiểm tra xem user còn đủ dung lượng lưu thư mới không.
+     */
+    public static boolean hasQuotaAvailable(String username, long incomingBytes) {
+        if (username == null) return false;
+        long estimated = estimateEncryptedSize(Math.max(0, incomingBytes));
+        return (getUsedQuotaBytes(username) + estimated) <= maxQuotaBytes();
+    }
+
+    /**
+     * Di chuyển email giữa các thư mục (VD: Xóa mềm vào _trash hoặc Khôi phục về inbox).
+     */
+    public static boolean moveEmail(String sourceMailbox, String targetMailbox, String fileId) {
+        if (sourceMailbox == null || targetMailbox == null || fileId == null) return false;
+        try {
+            StoredMail mail = getSingleMail(sourceMailbox, fileId);
+            if (mail == null || mail.rawBytes() == null) return false;
+
+            java.util.Properties oldFlags = getMailFlags(sourceMailbox, fileId);
+            SaveResult sr = saveEmailResult(targetMailbox, mail.rawBytes());
+            if (sr == SaveResult.OK) {
+                // Tìm file mới nhất vừa tạo trong targetMailbox để giữ nguyên cờ seen/starred nếu cần
+                List<String> targetFiles = loadedIndex(targetMailbox).snapshotAscending();
+                if (!targetFiles.isEmpty()) {
+                    String newId = targetFiles.get(targetFiles.size() - 1);
+                    Boolean seen = oldFlags.containsKey("seen") ? Boolean.parseBoolean(oldFlags.getProperty("seen")) : null;
+                    Boolean starred = oldFlags.containsKey("starred") ? Boolean.parseBoolean(oldFlags.getProperty("starred")) : null;
+                    if (seen != null || starred != null) {
+                        updateMailFlags(targetMailbox, newId, seen, starred);
+                    }
+                }
+                deleteMailsByIds(sourceMailbox, Collections.singletonList(fileId));
+                return true;
+            }
+        } catch (Exception e) {
+            System.err.println("[MAIL STORAGE] Lỗi khi chuyển thư " + fileId + ": " + e.getMessage());
+        }
+        return false;
+    }
+
+    /**
+     * Cập nhật cờ trạng thái thư (seen, starred) trong thư mục con meta/.
+     */
+    public static boolean updateMailFlags(String mailbox, String fileId, Boolean seen, Boolean starred) {
+        if (mailbox == null || fileId == null || fileId.contains("/") || fileId.contains("\\") || fileId.contains("..")) {
+            return false;
+        }
+        initMailbox(mailbox);
+        ReentrantReadWriteLock lock = getLockForUser(mailbox);
+        lock.writeLock().lock();
+        try {
+            Path dir = mailboxDir(mailbox);
+            Path mailFile = dir.resolve(fileId).normalize();
+            if (!mailFile.startsWith(dir) || !Files.exists(mailFile)) {
+                return false;
+            }
+            Path metaDir = dir.resolve("meta");
+            Files.createDirectories(metaDir);
+            Path metaFile = metaDir.resolve(fileId + ".meta").normalize();
+            if (!metaFile.startsWith(metaDir)) return false;
+
+            java.util.Properties props = new java.util.Properties();
+            if (Files.exists(metaFile)) {
+                try ( java.io.InputStream in = Files.newInputStream(metaFile)) {
+                    props.load(in);
+                }
+            }
+            if (seen != null) props.setProperty("seen", seen.toString());
+            if (starred != null) props.setProperty("starred", starred.toString());
+
+            try (java.io.OutputStream out = Files.newOutputStream(metaFile)) {
+                props.store(out, "Mail Flags");
+            }
+            return true;
+        } catch (IOException e) {
+            System.err.println("[MAIL STORAGE] Lỗi cập nhật cờ thư " + fileId + ": " + e.getMessage());
+            return false;
+        } finally {
+            lock.writeLock().unlock();
+        }
+    }
+
+    /**
+     * Đọc cờ trạng thái (seen, starred) của một thư.
+     */
+    public static java.util.Properties getMailFlags(String mailbox, String fileId) {
+        java.util.Properties props = new java.util.Properties();
+        if (mailbox == null || fileId == null || fileId.contains("/") || fileId.contains("\\") || fileId.contains("..")) {
+            return props;
+        }
+        try {
+            Path dir = mailboxDir(mailbox);
+            Path metaFile = dir.resolve("meta").resolve(fileId + ".meta").normalize();
+            if (metaFile.startsWith(dir) && Files.exists(metaFile)) {
+                try (java.io.InputStream in = Files.newInputStream(metaFile)) {
+                    props.load(in);
+                }
+            }
+        } catch (Exception ignored) {}
+        return props;
+    }
+
+    // ------------------------------------------------------------------------------------------------
+    // DANH SÁCH HẠN CHẾ NGƯỜI GỬI VÀO THƯ RÁC (SPAM BLOCKLIST THEO TỪNG USER)
+    // ------------------------------------------------------------------------------------------------
+
+    public static String extractCleanEmail(String rawAddress) {
+        if (rawAddress == null) return "";
+        String s = rawAddress.trim();
+        int lt = s.lastIndexOf('<');
+        int gt = s.lastIndexOf('>');
+        if (lt >= 0 && gt > lt) {
+            s = s.substring(lt + 1, gt).trim();
+        }
+        // Nếu chuỗi có nhiều địa chỉ phân tách bằng phẩy/khoảng trắng, lấy địa chỉ đầu tiên
+        String[] parts = s.split("[\\s,;]+");
+        if (parts.length > 0) s = parts[0].trim();
+        s = s.replaceAll("[\\s\"'<>]", "").toLowerCase(Locale.ROOT);
+        if (s.isEmpty()) return "";
+        if (!s.contains("@")) s = s + "@" + ServerConfig.MAIL_DOMAIN.toLowerCase(Locale.ROOT);
+        return s;
+    }
+
+    public static boolean isSenderBlockedFromRaw(String recipientUser, byte[] raw) {
+        if (recipientUser == null || raw == null || raw.length == 0) return false;
+        try {
+            MailSummary sum = parseHeaderToSummary("", cutHeader(raw));
+            String senderEmail = extractCleanEmail(sum.sender);
+            String cleanRcpt = extractCleanEmail(recipientUser);
+            if (!senderEmail.isEmpty() && isSenderBlocked(cleanRcpt, senderEmail)) {
+                return true;
+            }
+            // Kiểm tra chiều ngược lại: nếu người gửi đã đánh dấu hạn chế người nhận này thì thư gửi đi cũng vào thẳng Thư rác
+            if (!senderEmail.isEmpty() && !cleanRcpt.isEmpty() && isSenderBlocked(senderEmail, cleanRcpt)) {
+                return true;
+            }
+            return false;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    public static boolean addBlockedSender(String username, String senderRaw) {
+        String cleanUser = getCleanUsername(username);
+        String sender = extractCleanEmail(senderRaw);
+        if (cleanUser == null || cleanUser.isEmpty() || sender.isEmpty()) return false;
+        // Cho phép chặn cả khi tự gửi cho chính mình để phục vụ test trên 1 tài khoản
+
+        initMailbox(cleanUser);
+        ReentrantReadWriteLock lock = getLockForUser(cleanUser);
+        lock.writeLock().lock();
+        try {
+            Path file = mailboxDir(cleanUser).resolve("blocked_senders.txt");
+            Set<String> set = new java.util.LinkedHashSet<>();
+            if (Files.exists(file)) {
+                for (String line : Files.readAllLines(file, StandardCharsets.UTF_8)) {
+                    String t = line.trim().toLowerCase(Locale.ROOT);
+                    if (!t.isEmpty()) set.add(t);
+                }
+            }
+            set.add(sender);
+            Files.write(file, set, StandardCharsets.UTF_8);
+            return true;
+        } catch (IOException e) {
+            System.err.println("[MAIL STORAGE] Lỗi lưu danh sách chặn thư rác: " + e.getMessage());
+            return false;
+        } finally {
+            lock.writeLock().unlock();
+        }
+    }
+
+    public static boolean removeBlockedSender(String username, String senderRaw) {
+        String cleanUser = getCleanUsername(username);
+        String sender = extractCleanEmail(senderRaw);
+        if (cleanUser == null || cleanUser.isEmpty() || sender.isEmpty()) return false;
+
+        ReentrantReadWriteLock lock = getLockForUser(cleanUser);
+        lock.writeLock().lock();
+        try {
+            Path file = mailboxDir(cleanUser).resolve("blocked_senders.txt");
+            if (!Files.exists(file)) return true;
+            Set<String> set = new java.util.LinkedHashSet<>();
+            for (String line : Files.readAllLines(file, StandardCharsets.UTF_8)) {
+                String t = line.trim().toLowerCase(Locale.ROOT);
+                if (!t.isEmpty() && !t.equals(sender)) set.add(t);
+            }
+            Files.write(file, set, StandardCharsets.UTF_8);
+            return true;
+        } catch (IOException e) {
+            return false;
+        } finally {
+            lock.writeLock().unlock();
+        }
+    }
+
+    public static boolean isSenderBlocked(String username, String senderRaw) {
+        String cleanUser = getCleanUsername(username);
+        String sender = extractCleanEmail(senderRaw);
+        if (cleanUser == null || cleanUser.isEmpty() || sender.isEmpty()) return false;
+
+        ReentrantReadWriteLock lock = getLockForUser(cleanUser);
+        lock.readLock().lock();
+        try {
+            Path file = mailboxDir(cleanUser).resolve("blocked_senders.txt");
+            if (!Files.exists(file)) return false;
+            for (String line : Files.readAllLines(file, StandardCharsets.UTF_8)) {
+                if (sender.equals(line.trim().toLowerCase(Locale.ROOT))) {
+                    return true;
+                }
+            }
+            return false;
+        } catch (IOException e) {
+            return false;
+        } finally {
+            lock.readLock().unlock();
+        }
     }
 }

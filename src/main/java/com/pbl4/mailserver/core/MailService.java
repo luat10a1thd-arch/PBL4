@@ -7,17 +7,8 @@ import com.pbl4.mailserver.mime.MessageNormalizer;
 import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
-<<<<<<< HEAD
-import java.util.ArrayList;
-import java.util.Date;
-import java.util.LinkedHashSet;
-import java.util.List;
-import java.util.Locale;
-import java.util.Set;
-=======
 import java.util.*;
 import java.util.regex.Pattern;
->>>>>>> 2ddd475ffae551c7bec96beedcb184858a522c4b
 
 public class MailService {
 
@@ -202,16 +193,20 @@ public class MailService {
             }
         }
 
-<<<<<<< HEAD
-=======
         // 5) Lưu bản sao thư đã gửi (đồng bộ, ngay lập tức)
         MailStorageEngine.SaveResult sentResult = MailStorageEngine.saveEmailResult(canonicalSender + "_sent", message);
         if (sentResult != MailStorageEngine.SaveResult.OK) {
             System.err.println("[MAIL SERVICE] Không lưu được bản Sent của " + canonicalSender + ": " + sentResult);
         }
+        // Nếu người gửi đã đánh dấu hạn chế người nhận (và khác chính mình), lưu thêm bản ghi vào _spam của người gửi để kiểm tra trực quan
+        for (String rcpt : localRecipients) {
+            if (!rcpt.equalsIgnoreCase(canonicalSender) && MailStorageEngine.isSenderBlocked(canonicalSender, rcpt)) {
+                MailStorageEngine.saveEmailResult(canonicalSender + "_spam", message);
+                break;
+            }
+        }
 
         // 6) Người nhận bên ngoài -> hàng đợi gửi ra
->>>>>>> 2ddd475ffae551c7bec96beedcb184858a522c4b
         if (!externalRecipients.isEmpty()) {
             boolean enqueued;
             try {
@@ -239,17 +234,7 @@ public class MailService {
         }
 
         if (successTotal > 0) {
-<<<<<<< HEAD
-            MailStorageEngine.saveEmail(canonicalSender + "_sent", rawMessage);
-            return new DeliveryResult(true, successTotal, failTotal, String.join(" | ", messages));
-=======
             return new DeliveryResult(true, successTotal, failTotal, String.join(" | ", messages), quotaExceeded);
-<<<<<<< HEAD
->>>>>>> bba0316887593dda52ea2d1e62263797d368c125
-        } else {
-            return new DeliveryResult(false, 0, failTotal, messages.isEmpty() ? "Gửi thư thất bại!" : String.join(" | ", messages), quotaExceeded);
-=======
->>>>>>> 2ddd475ffae551c7bec96beedcb184858a522c4b
         }
         return new DeliveryResult(false, 0, failTotal,
                 messages.isEmpty() ? "Gửi thư thất bại!" : String.join(" | ", messages), quotaExceeded);
@@ -323,33 +308,29 @@ public class MailService {
 
     private static final Pattern SENDER_UNSAFE = Pattern.compile("[\\s<>\"\\x00-\\x1f\\x7f]");
 
-    /**
-     * Thay header From ĐẦU TIÊN (kể cả khi gấp dòng) bằng địa chỉ {@code address}; chưa có From thì thêm vào đầu header.
-     * Giữ tên hiển thị nếu parse được (đúng một địa chỉ dạng "Tên &lt;addr&gt;"), giữ nguyên thân thư và kiểu xuống dòng.
-     */
     static byte[] forceFromHeader(byte[] raw, String address) {
         final int n = raw.length;
         int pos = 0;
         int fromStart = -1;
-        int fromEnd = -1;        // exclusive, đã gồm ký tự xuống dòng cuối của header From
+        int fromEnd = -1;
         int fromColon = -1;
         byte[] firstEol = null;
 
         while (pos < n) {
             int nl = indexOfLf(raw, pos);
-            int lineEnd = (nl < 0) ? n : nl + 1;                                   // gồm EOL
-            int contentEnd = (nl < 0) ? n : ((nl > pos && raw[nl - 1] == '\r') ? nl - 1 : nl); // không gồm EOL
-            if (contentEnd == pos) break; // dòng trống: hết phần header
+            int lineEnd = (nl < 0) ? n : nl + 1;
+            int contentEnd = (nl < 0) ? n : ((nl > pos && raw[nl - 1] == '\r') ? nl - 1 : nl);
+            if (contentEnd == pos) break;
 
             if (firstEol == null) firstEol = Arrays.copyOfRange(raw, contentEnd, lineEnd);
 
             if (fromStart >= 0) {
-                if (raw[pos] == ' ' || raw[pos] == '\t') { // dòng gấp của header From
+                if (raw[pos] == ' ' || raw[pos] == '\t') {
                     fromEnd = lineEnd;
                     pos = lineEnd;
                     continue;
                 }
-                break; // đã gặp hết header From đầu tiên
+                break;
             }
             int colon = fromFieldColon(raw, pos, contentEnd);
             if (colon >= 0) {
@@ -365,18 +346,16 @@ public class MailService {
         ByteArrayOutputStream out = new ByteArrayOutputStream(n + 64);
 
         if (fromStart < 0) {
-            // Chưa có From: thêm vào đầu (header rỗng thì sau đó vẫn là dòng trống phân cách thân thư)
             writeFromLine(out, "", address, eol);
             out.write(raw, 0, n);
             return out.toByteArray();
         }
 
-        // Kiểu xuống dòng của chính header From (dòng cuối của nó)
         byte[] fromEol = eolAt(raw, fromEnd);
         if (fromEol.length == 0) fromEol = eol;
 
         String value = new String(raw, fromColon + 1, trimEol(raw, fromEnd) - (fromColon + 1), StandardCharsets.ISO_8859_1)
-                .replace("\r", "").replace("\n", ""); // bỏ gấp dòng (dòng gấp bắt đầu bằng SP/HT nên vẫn còn khoảng trắng)
+                .replace("\r", "").replace("\n", "");
         String display = parseDisplayName(value);
 
         out.write(raw, 0, fromStart);
@@ -387,7 +366,7 @@ public class MailService {
 
     private static void writeFromLine(ByteArrayOutputStream out, String display, String address, byte[] eol) {
         byte[] line = ((display.isEmpty() ? "From: " + address : "From: " + display + " <" + address + ">"))
-                .getBytes(StandardCharsets.ISO_8859_1); // tên hiển thị được giữ nguyên từng byte (đọc bằng ISO_8859_1)
+                .getBytes(StandardCharsets.ISO_8859_1);
         out.write(line, 0, line.length);
         out.write(eol, 0, eol.length);
     }
@@ -399,7 +378,6 @@ public class MailService {
         return -1;
     }
 
-    // Vị trí dấu ':' nếu dòng [start,end) bắt đầu bằng tên header "From" (không phân biệt hoa thường), ngược lại -1
     private static int fromFieldColon(byte[] b, int start, int end) {
         if (end - start < 5) return -1;
         if ((b[start] | 0x20) != 'f' || (b[start + 1] | 0x20) != 'r'
@@ -409,7 +387,6 @@ public class MailService {
         return (i < end && b[i] == ':') ? i : -1;
     }
 
-    // Chỉ số ngay sau nội dung, trước EOL, của vùng kết thúc ở "end" (end đã gồm EOL)
     private static int trimEol(byte[] b, int end) {
         int e = end;
         if (e > 0 && b[e - 1] == '\n') e--;
@@ -417,16 +394,11 @@ public class MailService {
         return e;
     }
 
-    // EOL nằm ở cuối vùng kết thúc tại "end" (rỗng nếu hết thư mà không có xuống dòng)
     private static byte[] eolAt(byte[] b, int end) {
         int contentEnd = trimEol(b, end);
         return Arrays.copyOfRange(b, contentEnd, end);
     }
 
-    /**
-     * Lấy tên hiển thị từ giá trị header From đã bỏ gấp dòng. Chỉ chấp nhận đúng MỘT địa chỉ dạng "Tên <addr>";
-     * nhiều địa chỉ, nhóm, ngoặc/nháy không cân bằng... đều bỏ tên hiển thị (trả ""), chỉ dùng địa chỉ trần.
-     */
     static String parseDisplayName(String value) {
         int depth = 0;
         boolean inQuote = false;

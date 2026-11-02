@@ -273,25 +273,54 @@ public class ApiServer {
                 return;
             }
 
-            CachedFile cached = fileCache.get(path);
+            // Đọc trực tiếp từ src/main/resources/static nếu tồn tại trên đĩa để luôn lấy bản mới nhất (không bị kẹt cache)
+            java.nio.file.Path diskFile = java.nio.file.Paths.get("src/main/resources/static" + path).normalize();
+            if (!java.nio.file.Files.isRegularFile(diskFile) && path.endsWith("/dut_mail_features.js")) {
+                java.nio.file.Path alt1 = java.nio.file.Paths.get("src/main/resources/static/dut_mail_features.js");
+                java.nio.file.Path alt2 = java.nio.file.Paths.get("src/main/resources/static/js/dut_mail_features.js");
+                if (java.nio.file.Files.isRegularFile(alt1)) diskFile = alt1;
+                else if (java.nio.file.Files.isRegularFile(alt2)) diskFile = alt2;
+            }
+
+            CachedFile cached = java.nio.file.Files.isRegularFile(diskFile) ? null : fileCache.get(path);
             if (cached == null) {
-                String resourcePath = "/static" + path;
-                InputStream is = getClass().getResourceAsStream(resourcePath);
-                if (is == null) {
-                    sendError(exchange, 404, "404 Not Found");
-                    return;
+                byte[] raw;
+                if (java.nio.file.Files.isRegularFile(diskFile)) {
+                    raw = java.nio.file.Files.readAllBytes(diskFile);
+                } else {
+                    String resourcePath = "/static" + path;
+                    InputStream is = getClass().getResourceAsStream(resourcePath);
+                    if (is == null && path.endsWith("/dut_mail_features.js")) {
+                        is = getClass().getResourceAsStream("/static/dut_mail_features.js");
+                        if (is == null) is = getClass().getResourceAsStream("/static/js/dut_mail_features.js");
+                    }
+                    if (is == null) {
+                        sendError(exchange, 404, "404 Not Found");
+                        return;
+                    }
+                    raw = is.readAllBytes();
+                    is.close();
                 }
 
-                byte[] raw = is.readAllBytes();
-                is.close();
-
                 // Thay domain mặc định bằng domain cấu hình (PBL4_MAIL_DOMAIN) trong tệp văn bản tĩnh
-                // (placeholder, nhãn, kiểm tra endsWith('@...'), so sánh admin). Kết quả được cache.
                 if (path.endsWith(".html") || path.endsWith(".js")) {
+                    String text = new String(raw, StandardCharsets.UTF_8);
                     String domain = ServerConfig.MAIL_DOMAIN.toLowerCase(Locale.ROOT);
                     if (!"pbl4.com".equals(domain)) {
-                        raw = new String(raw, StandardCharsets.UTF_8).replace("pbl4.com", domain).getBytes(StandardCharsets.UTF_8);
+                        text = text.replace("pbl4.com", domain);
                     }
+                    // Luôn gắn tham số chống cache (?v=...) cho dut_mail_features.js trong main.html
+                    if ("/main.html".equals(path)) {
+                        String bustUrl = "/dut_mail_features.js?v=" + System.currentTimeMillis();
+                        if (text.contains("dut_mail_features.js")) {
+                            text = text.replaceAll("(?i)[/a-z0-9_.-]*dut_mail_features\\.js(\\?[^\"'<>\\s]*)?", bustUrl);
+                        } else if (text.contains("</body>")) {
+                            text = text.replace("</body>", "<script src=\"" + bustUrl + "\"></script>\n</body>");
+                        } else {
+                            text = text + "\n<script src=\"" + bustUrl + "\"></script>";
+                        }
+                    }
+                    raw = text.getBytes(StandardCharsets.UTF_8);
                 }
 
                 String contentType = getContentType(path);
@@ -303,24 +332,26 @@ public class ApiServer {
                 }
 
                 cached = new CachedFile(raw, gzip, contentType, etag);
-                fileCache.put(path, cached);
+                if (!java.nio.file.Files.isRegularFile(diskFile)) {
+                    fileCache.put(path, cached);
+                }
             }
 
             exchange.getResponseHeaders().set("Content-Type", cached.contentType);
             exchange.getResponseHeaders().set("ETag", cached.etag);
             exchange.getResponseHeaders().set("Vary", "Accept-Encoding");
 
-            if (path.endsWith(".html")) {
-                exchange.getResponseHeaders().set("Cache-Control", "no-cache");
+            boolean isDynamicAsset = path.endsWith(".html") || path.endsWith(".js");
+            if (isDynamicAsset) {
+                exchange.getResponseHeaders().set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
+                exchange.getResponseHeaders().set("Pragma", "no-cache");
             } else {
                 exchange.getResponseHeaders().set("Cache-Control", "public, max-age=300");
-            }
-
-            // Kiểm tra Cache ETag người dùng
-            String ifNoneMatch = exchange.getRequestHeaders().getFirst("If-None-Match");
-            if (ifNoneMatch != null && ifNoneMatch.trim().equals(cached.etag)) {
-                exchange.sendResponseHeaders(304, -1);
-                return;
+                String ifNoneMatch = exchange.getRequestHeaders().getFirst("If-None-Match");
+                if (ifNoneMatch != null && ifNoneMatch.trim().equals(cached.etag)) {
+                    exchange.sendResponseHeaders(304, -1);
+                    return;
+                }
             }
 
             String acceptEncoding = exchange.getRequestHeaders().getFirst("Accept-Encoding");

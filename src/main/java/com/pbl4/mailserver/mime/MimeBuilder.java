@@ -15,21 +15,6 @@ import java.util.UUID;
 
 /**
  * Dựng thư RFC 5322 (byte[], CRLF) từ dữ liệu form web. Hàm tĩnh thuần túy.
- *
- * <h3>Quyết định thiết kế</h3>
- * <ul>
- *   <li><b>Content-Transfer-Encoding của phần chữ: luôn {@code quoted-printable}</b> (UTF-8), cho mọi nội dung.
- *       Lý do: kết quả là ASCII 7-bit thuần nên đi qua mọi MX (kể cả MX không có 8BITMIME), dòng nào cũng
- *       &le; 76 ký tự nên không bao giờ vượt giới hạn 998 byte. Dấu '.' ở đầu dòng được mã hóa thành {@code =2E}
- *       (và "From " đầu dòng thành {@code =46rom }) nên thân thư không có dòng nào chỉ gồm một dấu chấm, dù tầng SMTP
- *       có quên dot-stuffing. Việc dot-stuffing vẫn thuộc tầng SMTP.</li>
- *   <li>Đính kèm: base64 chia dòng 76 ký tự. Base64 được kiểm tra ký tự/độ dài/padding; sai thì bỏ đính kèm đó
- *       và ghi chú vào phần chữ.</li>
- *   <li>Header From/To/Subject bị loại mọi CR/LF/ký tự điều khiển (chặn header injection).</li>
- * </ul>
- *
- * <p>Tách tag {@code [ATTACHMENT:tên]base64[/ATTACHMENT]} đọc trực tiếp từ chuỗi gốc bằng chỉ số,
- * không tạo bản sao chuỗi lớn; mỗi đính kèm chỉ có một mảng byte base64 đã làm sạch.
  */
 public final class MimeBuilder {
 
@@ -72,14 +57,34 @@ public final class MimeBuilder {
      * @return thư hoàn chỉnh (header + thân) dạng byte, CRLF, luôn kết thúc bằng CRLF
      */
     public static byte[] fromWebForm(String from, String to, String subject, String body) {
-        return build(from, to, subject, body, ServerConfig.MAIL_HOSTNAME);
+        return build(from, to, subject, body, null, null, ServerConfig.MAIL_HOSTNAME);
+    }
+
+    /**
+     * Dựng thư trả lời (Reply) kèm header In-Reply-To và References phục vụ gom luồng hội thoại (Threading).
+     */
+    public static byte[] fromWebFormWithReply(
+            String from,
+            String to,
+            String subject,
+            String body,
+            String inReplyTo,
+            String references) {
+        return build(from, to, subject, body, inReplyTo, references, ServerConfig.MAIL_HOSTNAME);
     }
 
     /** Bản có hostname để test không phụ thuộc biến môi trường. */
     static byte[] build(String from, String to, String subject, String body, String hostname) {
+        return build(from, to, subject, body, null, null, hostname);
+    }
+
+    static byte[] build(String from, String to, String subject, String body,
+                        String inReplyTo, String references, String hostname) {
         String f = cleanHeader(from);
         String t = cleanHeader(to);
         String s = cleanHeader(subject);
+        String irt = cleanHeader(inReplyTo);
+        String refs = cleanHeader(references);
 
         ParsedBody pb = parseBody(body == null ? "" : body);
         byte[] qp = encodeQuotedPrintable(pb.text());
@@ -91,6 +96,14 @@ public final class MimeBuilder {
         writeSubject(out, s);
         writeHeader(out, "Date", MessageNormalizer.formatDate(ZonedDateTime.now()));
         writeHeader(out, "Message-ID", MessageNormalizer.newMessageId(hostname));
+        if (!irt.isEmpty()) {
+            writeHeader(out, "In-Reply-To", irt);
+        }
+        if (!refs.isEmpty()) {
+            writeHeader(out, "References", refs);
+        } else if (!irt.isEmpty()) {
+            writeHeader(out, "References", irt);
+        }
         writeHeader(out, "MIME-Version", "1.0");
 
         if (pb.attachments().isEmpty()) {
@@ -104,7 +117,6 @@ public final class MimeBuilder {
             return out.toByteArray();
         }
 
-        // boundary ngẫu nhiên, bảo đảm không xuất hiện trong phần chữ (base64 không chứa '-' nên an toàn)
         String boundary;
         do {
             boundary = "----=_Part_" + UUID.randomUUID().toString().replace("-", "");
@@ -128,11 +140,6 @@ public final class MimeBuilder {
         return out.toByteArray();
     }
 
-    // ------------------------------------------------------------------------------------------
-    // Header
-    // ------------------------------------------------------------------------------------------
-
-    /** Loại CR/LF (thành khoảng trắng) và ký tự điều khiển khác; chặn header injection. */
     static String cleanHeader(String v) {
         if (v == null) {
             return "";
@@ -141,7 +148,7 @@ public final class MimeBuilder {
         for (int i = 0; i < v.length(); i++) {
             char c = v.charAt(i);
             if (c == '\r' && i + 1 < v.length() && v.charAt(i + 1) == '\n') {
-                continue; // cặp CRLF chỉ thành một khoảng trắng (do '\n' kế tiếp)
+                continue;
             }
             if (c == '\r' || c == '\n' || c == '\t' || c == '\u0085' || c == '\u2028' || c == '\u2029') {
                 sb.append(' ');
@@ -160,13 +167,11 @@ public final class MimeBuilder {
         writeCrlf(out);
     }
 
-    /** Subject: ASCII thì ghi thẳng (gấp tại khoảng trắng); có non-ASCII thì RFC 2047 B-encoding. */
     private static void writeSubject(ByteArrayOutputStream out, String s) {
         if (isAscii(s) && longestToken(s) <= 900) {
             writeHeader(out, "Subject", s);
             return;
         }
-        // dòng đầu "Subject: " (9 ký tự) + word <= 76 -> tối đa 39 byte/word; các dòng sau " " + word <= 76 -> 45 byte
         List<String> words = encodeWords(s, 39, 45);
         StringBuilder sb = new StringBuilder("Subject:");
         for (int i = 0; i < words.size(); i++) {
@@ -175,10 +180,6 @@ public final class MimeBuilder {
         writeAscii(out, sb.append("\r\n").toString());
     }
 
-    /**
-     * Mã hóa chuỗi thành các encoded-word {@code =?UTF-8?B?...?=}, mỗi word &le; 75 ký tự,
-     * không cắt giữa một ký tự UTF-8 (cắt theo code point).
-     */
     static List<String> encodeWords(String s, int firstMaxBytes, int restMaxBytes) {
         List<String> words = new ArrayList<>();
         ByteArrayOutputStream cur = new ByteArrayOutputStream();
@@ -204,11 +205,6 @@ public final class MimeBuilder {
         return "=?UTF-8?B?" + Base64.getEncoder().encodeToString(utf8) + "?=";
     }
 
-    /**
-     * From/To: tách theo dấu phẩy (bỏ qua phẩy trong ngoặc kép/ngoặc nhọn), chuẩn hóa thành "a, b".
-     * Tên hiển thị có non-ASCII được mã hóa RFC 2047; địa chỉ non-ASCII (không có chuẩn thay thế
-     * nếu không dùng SMTPUTF8) được giữ nguyên.
-     */
     static String encodeAddresses(String value) {
         if (value.isEmpty()) {
             return value;
@@ -259,10 +255,6 @@ public final class MimeBuilder {
         return String.join(", ", result);
     }
 
-    // ------------------------------------------------------------------------------------------
-    // Tách tag đính kèm
-    // ------------------------------------------------------------------------------------------
-
     private record Attachment(String name, byte[] base64) {
     }
 
@@ -277,11 +269,6 @@ public final class MimeBuilder {
         return (int) Math.min(total, 64L * 1024 * 1024);
     }
 
-    /**
-     * Tách phần chữ (trước tag đầu tiên) và các đính kèm. Tên file là phần nằm trước dấu ']' CUỐI CÙNG
-     * của mỗi cặp tag, nên tên chứa ']' vẫn đúng (base64 không bao giờ chứa ']').
-     * Thân không có tag hợp lệ nào thì giữ nguyên toàn bộ làm phần chữ.
-     */
     private static ParsedBody parseBody(String body) {
         int firstOpen = body.indexOf(OPEN);
         if (firstOpen < 0 || body.indexOf(CLOSE, firstOpen) < 0) {
@@ -327,11 +314,6 @@ public final class MimeBuilder {
         return new ParsedBody(text, atts);
     }
 
-    /**
-     * Làm sạch base64 trong [from, to): bỏ khoảng trắng/xuống dòng, bỏ tiền tố "data:...;base64,".
-     * Trả về mảng ASCII base64 đã đủ padding (độ dài chia hết cho 4), hoặc null nếu không hợp lệ
-     * (ký tự lạ, dấu '=' không ở cuối, độ dài vô lý). Thiếu padding thì được bù.
-     */
     private static byte[] cleanBase64(String s, int from, int to) {
         int i = from;
         while (i < to && isAsciiWhitespace(s.charAt(i))) {
@@ -396,11 +378,6 @@ public final class MimeBuilder {
         }
     }
 
-    // ------------------------------------------------------------------------------------------
-    // Tên file đính kèm
-    // ------------------------------------------------------------------------------------------
-
-    /** Bỏ đường dẫn, ký tự điều khiển, dấu ngoặc kép; giới hạn độ dài (giữ đuôi). Rỗng thì "attachment". */
     static String safeFileName(String raw) {
         int slash = Math.max(raw.lastIndexOf('/'), raw.lastIndexOf('\\'));
         String n = slash >= 0 ? raw.substring(slash + 1) : raw;
@@ -473,7 +450,6 @@ public final class MimeBuilder {
         return "application/octet-stream";
     }
 
-    /** Tên ASCII thay thế: bỏ dấu tiếng Việt ("Báo cáo.pdf" -> "Bao cao.pdf"), ký tự còn lại ngoài ASCII thành '_'. */
     private static String asciiFallback(String name) {
         String d = Normalizer.normalize(name.replace('đ', 'd').replace('Đ', 'D'), Normalizer.Form.NFD);
         StringBuilder sb = new StringBuilder(d.length());
@@ -487,7 +463,6 @@ public final class MimeBuilder {
         return sb.toString();
     }
 
-    /** Percent-encode theo RFC 5987/2231 (attr-char giữ nguyên, còn lại %XX trên byte UTF-8). */
     private static String rfc5987(String s) {
         StringBuilder sb = new StringBuilder();
         for (byte b : s.getBytes(StandardCharsets.UTF_8)) {
@@ -502,18 +477,8 @@ public final class MimeBuilder {
         return sb.toString();
     }
 
-    // ------------------------------------------------------------------------------------------
-    // Quoted-printable (RFC 2045)
-    // ------------------------------------------------------------------------------------------
-
     private static final char[] HEX = "0123456789ABCDEF".toCharArray();
 
-    /**
-     * Mã hóa UTF-8 thành quoted-printable. Mọi kiểu xuống dòng trong text (CRLF, LF, CR) thành CRLF cứng;
-     * dòng mã hóa &le; 76 ký tự (kể cả '=' nối dòng mềm). Khoảng trắng cuối dòng được mã hóa;
-     * '.' ở đầu mỗi dòng vật lý và "From " ở đầu dòng logic được mã hóa.
-     * Không thêm CRLF cuối nếu text không kết thúc bằng xuống dòng.
-     */
     static byte[] encodeQuotedPrintable(String text) {
         byte[] d = text.getBytes(StandardCharsets.UTF_8);
         ByteArrayOutputStream out = new ByteArrayOutputStream(d.length + d.length / 3 + 16);
@@ -560,7 +525,7 @@ public final class MimeBuilder {
                 out.write('=');
                 writeCrlf(out);
                 col = 0;
-                if (c == '.') { // đầu dòng vật lý mới: không để dấu '.' trần
+                if (c == '.') {
                     literal = false;
                     len = 3;
                 }
@@ -575,10 +540,6 @@ public final class MimeBuilder {
             col += len;
         }
     }
-
-    // ------------------------------------------------------------------------------------------
-    // Tiện ích nhỏ
-    // ------------------------------------------------------------------------------------------
 
     private static boolean isAscii(String s) {
         for (int i = 0; i < s.length(); i++) {

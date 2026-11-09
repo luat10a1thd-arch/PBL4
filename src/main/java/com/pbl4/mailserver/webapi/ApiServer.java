@@ -29,10 +29,9 @@ public class ApiServer {
 
     public static void startServer() {
         try {
-            // Đặt cấu hình Timeout cho Server HTTP
+
             System.setProperty("sun.net.httpserver.maxReqTime", String.valueOf(ServerConfig.HTTP_MAX_REQ_TIME_SECONDS));
-            // LƯU Ý: KHÔNG đặt "sun.net.httpserver.maxRspTime" (tên đúng; trước đây ghi sai thành maxRespTime nên không có tác dụng).
-            // Nếu đặt, JDK sẽ cắt mọi response chạy quá thời gian đó - kể cả luồng SSE sống lâu. Mặc định (-1) = không giới hạn.
+
             System.setProperty("sun.net.httpserver.idleInterval", "30");
 
             HttpServer server = HttpServer.create(new InetSocketAddress(PORT), 256);
@@ -42,7 +41,6 @@ public class ApiServer {
             server.createContext("/api/mails", new CorsHandlerWrapper(new MailHandler()));
             server.createContext("/api/admin", new CorsHandlerWrapper(new AdminHandler()));
 
-            // Tạo ThreadPool riêng cho HTTP với tên http-worker-N (Daemon Threads)
             AtomicInteger threadNumber = new AtomicInteger(1);
             ThreadFactory daemonThreadFactory = runnable -> {
                 Thread t = new Thread(runnable, "http-worker-" + threadNumber.getAndIncrement());
@@ -61,15 +59,12 @@ public class ApiServer {
 
     private static final String CSP = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com https://fonts.googleapis.com; font-src 'self' https://cdnjs.cloudflare.com https://fonts.gstatic.com; img-src 'self' data:;";
 
-    // Header bảo mật dùng chung cho cả /api/* và trang tĩnh (HTML/JS/CSS)
     static void applySecurityHeaders(HttpExchange exchange) {
         exchange.getResponseHeaders().set("Content-Security-Policy", CSP);
         exchange.getResponseHeaders().set("X-Content-Type-Options", "nosniff");
         exchange.getResponseHeaders().set("X-Frame-Options", "DENY");
         exchange.getResponseHeaders().set("X-XSS-Protection", "1; mode=block");
     }
-
-    // ===================== Đọc body HTTP có giới hạn =====================
 
     static final class BodyTooLargeException extends IOException {
         BodyTooLargeException(String m) { super(m); }
@@ -79,7 +74,6 @@ public class ApiServer {
         BodyTimeoutException(String m) { super(m); }
     }
 
-    // Watchdog dùng chung: đóng kết nối của client gửi body quá chậm để không giữ luồng worker
     private static final ScheduledThreadPoolExecutor BODY_WATCHDOG = new ScheduledThreadPoolExecutor(1, r -> {
         Thread t = new Thread(r, "http-body-watchdog");
         t.setDaemon(true);
@@ -118,17 +112,13 @@ public class ApiServer {
             long totalLeft = totalMs - (now - start);
             if (idleLeft <= 0 || totalLeft <= 0) {
                 timedOut = true;
-                try { exchange.close(); } catch (Exception ignored) {} // đóng socket => read() đang chờ sẽ ném IOException
+                try { exchange.close(); } catch (Exception ignored) {}
             } else {
                 schedule(Math.min(idleLeft, totalLeft));
             }
         }
     }
 
-    /**
-     * Đọc body với giới hạn byte (kiểm tra Content-Length trước, rồi đếm khi đọc - áp dụng cả chunked)
-     * và timeout đọc. Ném BodyTooLargeException / BodyTimeoutException.
-     */
     static String readBody(HttpExchange exchange, int maxBytes, long totalTimeoutMs) throws IOException {
         String cl = exchange.getRequestHeaders().getFirst("Content-Length");
         if (cl != null) {
@@ -143,7 +133,7 @@ public class ApiServer {
 
         BodyWatch watch = new BodyWatch(exchange, ServerConfig.BODY_READ_IDLE_TIMEOUT_MS, totalTimeoutMs);
         watch.schedule(Math.min(ServerConfig.BODY_READ_IDLE_TIMEOUT_MS, totalTimeoutMs));
-        // Không đóng InputStream ở đây: đóng sẽ cố "xả" phần body còn lại (có thể chặn với client chậm / body quá lớn)
+
         try {
             InputStream in = exchange.getRequestBody();
             ByteArrayOutputStream out = new ByteArrayOutputStream(1024);
@@ -169,10 +159,6 @@ public class ApiServer {
         }
     }
 
-    /**
-     * Đọc body; nếu quá lớn trả 413, quá chậm trả 408 (đã phản hồi) và trả về null -
-     * handler gọi xong chỉ cần `if (body == null) return;`.
-     */
     static String readBodyOrReply(HttpExchange exchange, int maxBytes, long totalTimeoutMs) throws IOException {
         try {
             return readBody(exchange, maxBytes, totalTimeoutMs);
@@ -180,13 +166,12 @@ public class ApiServer {
             sendJson(exchange, 413, "{\"success\": false, \"message\": \"Dữ liệu gửi lên quá lớn!\"}", true);
             return null;
         } catch (BodyTimeoutException e) {
-            // Kết nối đã bị đóng; thử trả 408 cho đủ lễ nghi, lỗi thì bỏ qua
+
             try { sendJson(exchange, 408, "{\"success\": false, \"message\": \"Hết thời gian chờ dữ liệu!\"}", true); } catch (Exception ignored) {}
             return null;
         }
     }
 
-    // Gửi JSON; closeConn=true thì yêu cầu đóng kết nối (khi body chưa đọc hết, không dùng lại keep-alive)
     static void sendJson(HttpExchange exchange, int statusCode, String json, boolean closeConn) throws IOException {
         byte[] bytes = json.getBytes(StandardCharsets.UTF_8);
         exchange.getResponseHeaders().set("Content-Type", "application/json; charset=UTF-8");
@@ -243,7 +228,7 @@ public class ApiServer {
 
         @Override
         public void handle(HttpExchange exchange) throws IOException {
-            applySecurityHeaders(exchange); // CSP / nosniff / X-Frame-Options cho cả trang HTML tĩnh
+            applySecurityHeaders(exchange);
             String method = exchange.getRequestMethod();
             if (!"GET".equalsIgnoreCase(method) && !"HEAD".equalsIgnoreCase(method)) {
                 sendError(exchange, 405, "Method Not Allowed");
@@ -252,7 +237,6 @@ public class ApiServer {
 
             String path = exchange.getRequestURI().getPath();
 
-            // Chống truy cập trái phép (Path Traversal Protection)
             if (path.contains("..") || path.contains("\\") || path.contains("//")) {
                 sendError(exchange, 400, "Bad Request");
                 return;
@@ -266,14 +250,12 @@ public class ApiServer {
                 path = "/admin.html";
             }
 
-            // Chỉ phục vụ tệp có phần mở rộng
             int lastDot = path.lastIndexOf('.');
             if (lastDot == -1 || lastDot == path.length() - 1) {
                 sendError(exchange, 404, "Not Found");
                 return;
             }
 
-            // Đọc trực tiếp từ src/main/resources/static nếu tồn tại trên đĩa để luôn lấy bản mới nhất (không bị kẹt cache)
             java.nio.file.Path diskFile = java.nio.file.Paths.get("src/main/resources/static" + path).normalize();
             if (!java.nio.file.Files.isRegularFile(diskFile) && path.endsWith("/dut_mail_features.js")) {
                 java.nio.file.Path alt1 = java.nio.file.Paths.get("src/main/resources/static/dut_mail_features.js");
@@ -302,15 +284,14 @@ public class ApiServer {
                     is.close();
                 }
 
-                // Thay domain mặc định bằng domain cấu hình (PBL4_MAIL_DOMAIN) trong tệp văn bản tĩnh
                 if (path.endsWith(".html") || path.endsWith(".js")) {
                     String text = new String(raw, StandardCharsets.UTF_8);
                     String domain = ServerConfig.MAIL_DOMAIN.toLowerCase(Locale.ROOT);
                     if (!"pbl4.com".equals(domain)) {
                         text = text.replace("pbl4.com", domain);
                     }
-                    // Luôn gắn tham số chống cache (?v=...) cho dut_mail_features.js trong main.html
-                    if ("/main.html".equals(path)) {
+
+                    if ("/main.html".equals(path) || "/index.html".equals(path) || "/admin.html".equals(path)) {
                         String bustUrl = "/dut_mail_features.js?v=" + System.currentTimeMillis();
                         if (text.contains("dut_mail_features.js")) {
                             text = text.replaceAll("(?i)[/a-z0-9_.-]*dut_mail_features\\.js(\\?[^\"'<>\\s]*)?", bustUrl);

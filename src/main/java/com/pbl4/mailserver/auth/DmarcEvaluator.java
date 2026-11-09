@@ -8,7 +8,6 @@ import java.util.List;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.IntSupplier;
 
-/** Đánh giá DMARC (RFC 7489): tìm bản ghi, căn chỉnh SPF/DKIM, áp pct. */
 public final class DmarcEvaluator {
 
     private DmarcEvaluator() {}
@@ -18,7 +17,6 @@ public final class DmarcEvaluator {
                 () -> ThreadLocalRandom.current().nextInt(100));
     }
 
-    /** roll trả về số 0..99; thư bị áp chính sách khi roll &lt; pct. */
     static DmarcResult evaluate(String fromDomain, SpfResult spf, String spfDomain, List<DkimResult> dkim,
                                 DnsLookup dns, IntSupplier roll) {
         String from = DmarcOrgDomain.normalize(fromDomain);
@@ -67,7 +65,7 @@ public final class DmarcEvaluator {
         }
         String disp = policy;
         if (!policy.equals("none") && rec.pct() < 100 && roll.getAsInt() >= rec.pct()) {
-            disp = policy.equals("reject") ? "quarantine" : "none";   // pct: hạ một bậc
+            disp = policy.equals("reject") ? "quarantine" : "none";
         }
         return new DmarcResult("fail", disp, from, rec.domain(), policy, false, false, "không căn chỉnh được SPF/DKIM");
     }
@@ -81,7 +79,6 @@ public final class DmarcEvaluator {
         return strict ? x.equals(y) : DmarcOrgDomain.of(x).equals(DmarcOrgDomain.of(y));
     }
 
-    /** null nếu không có bản ghi hợp lệ hoặc có nhiều hơn một bản ghi DMARC (RFC: bỏ hết). */
     private static DmarcRecord find(DnsLookup dns, String name, String recordDomain) throws DnsException {
         List<String> txts;
         try {

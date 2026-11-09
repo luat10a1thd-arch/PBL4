@@ -23,14 +23,10 @@ public class Pop3ServerManager {
 
     private static final AtomicInteger workerSeq = new AtomicInteger(0);
 
-    // Pool có giới hạn: core = max, hàng đợi nhỏ có giới hạn. Đầy thì từ chối bằng "-ERR Server busy"
-    // (thay cho newFixedThreadPool(20) với hàng đợi vô hạn).
     private static final ThreadPoolExecutor threadPool = createPool();
 
-    // Số kết nối đang mở theo IP (tự xóa khi về 0)
     private static final ConcurrentHashMap<String, Integer> connectionsPerIp = new ConcurrentHashMap<>();
 
-    // Socket đang mở (kể cả đang chờ trong hàng đợi) để đóng khi dừng server
     private static final Set<Socket> activeSockets = ConcurrentHashMap.newKeySet();
 
     private static final AtomicLong rejectedCount = new AtomicLong(0);
@@ -51,7 +47,7 @@ public class Pop3ServerManager {
                     return t;
                 }
         );
-        // Worker rảnh quá 60s thì thoát, không giữ sẵn hàng trăm thread khi server vắng
+
         executor.allowCoreThreadTimeOut(true);
         return executor;
     }
@@ -70,7 +66,7 @@ public class Pop3ServerManager {
                         dispatch(clientSocket);
                     } catch (IOException e) {
                         if (!isRunning || serverSocket.isClosed()) break;
-                        // Lỗi accept tạm thời (vd. hết file descriptor): nghỉ ngắn, tránh vòng lặp quay vòng
+
                         try {
                             Thread.sleep(50);
                         } catch (InterruptedException ie) {
@@ -90,7 +86,6 @@ public class Pop3ServerManager {
         acceptor.start();
     }
 
-    /** Kiểm tra giới hạn theo IP rồi giao cho pool; quá tải thì từ chối lịch sự và đóng socket. */
     private static void dispatch(Socket client) {
         String ip = client.getInetAddress().getHostAddress();
 
@@ -157,7 +152,6 @@ public class Pop3ServerManager {
         }
     }
 
-    // Ghi log tối đa 1 lần / 10 giây để khi bị flood không làm đầy log
     private static void noteRejected(String reason) {
         long total = rejectedCount.incrementAndGet();
         long now = System.currentTimeMillis();
@@ -175,12 +169,12 @@ public class Pop3ServerManager {
                 ss.close();
             } catch (IOException ignored) {}
         }
-        // Chỉ tắt pool POP3 của chính class này
+
         threadPool.shutdown();
         try {
             if (!threadPool.awaitTermination(3, TimeUnit.SECONDS)) {
                 threadPool.shutdownNow();
-                // Thread đang chặn trong socket.read không bị interrupt: phải đóng socket để chúng thoát
+
                 for (Socket s : activeSockets) {
                     try {
                         s.close();

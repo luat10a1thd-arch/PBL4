@@ -21,29 +21,18 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Supplier;
 
-/**
- * Máy chủ lắng nghe SMTP dùng pool thật sự theo cấu hình (SMTP_POOL_SIZE, SMTP_QUEUE_SIZE,
- * SOCKET_BACKLOG, SMTP_MAX_CONN_PER_IP). Mỗi kết nối: bọc thành SmtpConnection rồi giao cho
- * SessionHandler mới (factory.get()) trong một worker.
- *
- * Từ chối bằng "421 ..." (rồi đóng): quá số kết nối/IP, IP bị AbuseGuard chặn, hàng đợi đầy
- * ("421 4.3.2 Service busy"). Với implicitTls, các trường hợp từ chối chỉ đóng kết nối
- * (không thể gửi văn bản thường qua kênh TLS).
- * start() KHÔNG ném exception khi bind lỗi: ghi log và isRunning() = false.
- */
 public final class SmtpListener {
 
     public interface SessionHandler {
         void handle(SmtpConnection c) throws Exception;
     }
 
-    /** Tham số vận hành; mặc định lấy từ ServerConfig, test truyền giá trị riêng. */
     public static final class Options {
         public final int poolSize;
         public final int queueSize;
         public final int backlog;
-        public final int maxConnPerIp;      // 0 = không giới hạn
-        public final AbuseGuard.Engine guard; // null = không dùng AbuseGuard
+        public final int maxConnPerIp;
+        public final AbuseGuard.Engine guard;
 
         public Options(int poolSize, int queueSize, int backlog, int maxConnPerIp, AbuseGuard.Engine guard) {
             this.poolSize = Math.max(1, poolSize);
@@ -152,13 +141,10 @@ public final class SmtpListener {
         return running;
     }
 
-    /** Cổng thực sự đang lắng nghe (hữu ích khi port = 0); -1 nếu chưa chạy. */
     public int getLocalPort() {
         ServerSocket ss = server;
         return (ss != null && running) ? ss.getLocalPort() : -1;
     }
-
-    // ------------------------------------------------------------------ accept
 
     private void acceptLoop() {
         while (running) {
@@ -245,7 +231,7 @@ public final class SmtpListener {
                 o.flush();
             }
         } catch (IOException ignored) {
-            // client đã đi: không sao
+
         } finally {
             closeQuietly(s);
         }
@@ -256,8 +242,6 @@ public final class SmtpListener {
             s.close();
         } catch (IOException ignored) {}
     }
-
-    // ------------------------------------------------------------------ phiên
 
     private final class Session implements Runnable {
         private final Socket socket;
@@ -282,7 +266,7 @@ public final class SmtpListener {
                     } catch (Exception ignored) {}
                 }
             } catch (IOException e) {
-                // Client ngắt, TLS lỗi, dòng quá dài... là chuyện bình thường, không log.
+
             } catch (Throwable t) {
                 System.err.println("[SMTP:" + name + "] Lỗi handler (client " + ip + "): " + t);
                 t.printStackTrace();

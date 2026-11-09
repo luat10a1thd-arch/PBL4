@@ -13,32 +13,20 @@ import java.util.Base64;
 import java.util.List;
 import java.util.logging.Logger;
 
-/**
- * Ký DKIM (RFC 6376): rsa-sha256, canonicalization relaxed/relaxed, không dùng l=.
- * Chỉ thêm đúng một header DKIM-Signature ở đầu thư; thân và các header khác giữ nguyên từng byte.
- * Mọi lỗi (không tạo được khóa, thư không có From, ...) => trả lại raw nguyên vẹn.
- */
 public final class DkimSigner {
 
     private static final Logger LOG = Logger.getLogger(DkimSigner.class.getName());
 
-    /** Các header được ký, theo thứ tự trong h=. "from" được oversign (thêm một lần nữa so với số có mặt). */
     private static final String[] SIGNED_HEADERS = {
         "from", "to", "cc", "subject", "date", "message-id", "mime-version", "content-type", "reply-to"
     };
 
     private DkimSigner() {}
 
-    /**
-     * Ký thư bằng cấu hình hiện tại: d=MAIL_DOMAIN, s=DKIM_SELECTOR, khóa trong DKIM_KEY_DIR.
-     * Tham số domain được giữ để khớp CONTRACT nhưng KHÔNG quyết định d=: chữ ký luôn dùng MAIL_DOMAIN
-     * (người gọi có thể truyền nhầm domain người nhận mà không gây sai chữ ký).
-     */
     public static byte[] sign(byte[] raw, String domain) {
         return sign(raw, ServerConfig.MAIL_DOMAIN, ServerConfig.DKIM_SELECTOR, Paths.get(ServerConfig.DKIM_KEY_DIR));
     }
 
-    /** Biến thể tường minh (dùng cho test và công cụ): ký với đúng domain/selector/thư mục khóa được chỉ định. */
     public static byte[] sign(byte[] raw, String domain, String selector, Path keyDir) {
         if (raw == null) {
             return null;
@@ -51,7 +39,6 @@ public final class DkimSigner {
         }
     }
 
-    /** Bản ghi TXT khóa công khai ("v=DKIM1; k=rsa; p=..."); tự sinh khóa nếu chưa có. */
     public static String publicKeyRecord(String domain, String selector, Path keyDir) {
         try {
             RSAPrivateCrtKey key = DkimKeys.loadOrCreate(keyDir, domain, selector);
@@ -61,15 +48,10 @@ public final class DkimSigner {
         }
     }
 
-    /** Như trên nhưng theo cấu hình hiện tại. */
     public static String publicKeyRecord() {
         return publicKeyRecord(ServerConfig.MAIL_DOMAIN, ServerConfig.DKIM_SELECTOR, Paths.get(ServerConfig.DKIM_KEY_DIR));
     }
 
-    /**
-     * Lõi ký. hRelaxed/bRelaxed chọn canonicalization (đường công khai luôn relaxed/relaxed;
-     * simple chỉ để test bộ xác thực). Ném exception khi lỗi; trả raw nếu thư không có From.
-     */
     static byte[] signCore(byte[] raw, String domain, String selector, Path keyDir,
                            boolean hRelaxed, boolean bRelaxed, long nowSec) throws Exception {
         Parsed p = DkimCommon.parse(raw);
@@ -82,9 +64,9 @@ public final class DkimSigner {
             }
             if (nm.equals("from")) {
                 if (count == 0) {
-                    return raw; // thư không có From: không ký
+                    return raw;
                 }
-                hnames.add(nm); // oversign: chặn việc chèn thêm From giả
+                hnames.add(nm);
             }
         }
 
@@ -92,7 +74,6 @@ public final class DkimSigner {
         String bh = Base64.getEncoder().encodeToString(DkimCommon.sha256(body));
         String canon = (hRelaxed ? "relaxed" : "simple") + "/" + (bRelaxed ? "relaxed" : "simple");
 
-        // Trường chữ ký với b= rỗng; phần gấp dòng giống hệt bản cuối cùng (chỉ thêm giá trị b sau đó)
         String sigField = "DKIM-Signature: v=1; a=rsa-sha256; c=" + canon + "; d=" + domain + ";\r\n"
                 + "\ts=" + selector + "; t=" + nowSec + ";\r\n"
                 + "\th=" + String.join(":", hnames) + ";\r\n"

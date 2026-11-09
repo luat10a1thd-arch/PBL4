@@ -48,20 +48,12 @@ import java.util.function.Supplier;
 import java.util.function.UnaryOperator;
 import java.util.regex.Pattern;
 
-/**
- * Hàng đợi gửi thư ra ngoài (A6). Lớp static như cũ; toàn bộ logic nằm trong {@link Engine}
- * để test được bằng đồng hồ giả / Deliverer giả.
- *
- * Mô hình: mỗi (thư, domain đích) là một job. Thư lưu 1 file {@code <msgId>.msg} (byte nguyên vẹn, dùng chung
- * cho mọi job của thư), mỗi job lưu 1 file {@code <msgId>.<n>.job}. RAM chỉ giữ lịch (id + domain + thời điểm).
- */
 public class OutboundQueue {
 
     private OutboundQueue() {}
 
-    /** Lịch thử lại (phút) sau lần thất bại thứ 1, 2, ...; sau mục cuối lặp lại mỗi 12 giờ. */
     static final long[] RETRY_MINUTES = {5, 15, 30, 60, 120, 240, 480, 720};
-    /** Jitter: cộng thêm ngẫu nhiên 0..10% (không bao giờ ngắn hơn lịch gốc). */
+
     static final double JITTER = 0.10;
 
     private static final String DIR_PATH = "data/outbound";
@@ -91,12 +83,10 @@ public class OutboundQueue {
         return defaultEngine;
     }
 
-    /** Khởi động hàng đợi: nạp lại job còn dang dở. MainApplication nên gọi khi khởi động. */
     public static void start() {
         engine();
     }
 
-    /** false CHỈ khi không ghi được xuống đĩa. */
     public static boolean enqueue(String envelopeFrom, Set<String> externalRcpts, byte[] raw) {
         return engine().enqueue(envelopeFrom, externalRcpts, raw);
     }
@@ -105,27 +95,19 @@ public class OutboundQueue {
         return engine().snapshot();
     }
 
-    /** Thử lại ngay. false nếu không có job, hoặc job đang được giao. */
     public static boolean retryNow(String id) {
         return engine().retryNow(id);
     }
 
-    /** Xóa job (không sinh bounce). Job đang giao sẽ bị bỏ ngay khi lần giao hiện tại kết thúc. */
     public static boolean delete(String id) {
         return engine().delete(id);
     }
 
-    /** Thời gian chờ cơ sở (chưa jitter) sau lần thất bại thứ {@code attempts} (>=1). */
     static long baseDelayMs(int attempts) {
         int idx = Math.min(Math.max(attempts, 1), RETRY_MINUTES.length) - 1;
         return RETRY_MINUTES[idx] * 60_000L;
     }
 
-    // =====================================================================================================
-    //  ENGINE
-    // =====================================================================================================
-
-    /** Nơi gửi bounce; trả true nếu đã giao được vào hộp thư. */
     interface BounceSink {
         boolean send(String sender, byte[] bounceBytes);
     }
@@ -138,7 +120,6 @@ public class OutboundQueue {
         }
     }
 
-    /** Trạng thái bền vững của một job. */
     private static final class Job {
         String id = "", msgId = "", from = "", domain = "", lastError = "";
         long created, next;
@@ -230,7 +211,6 @@ public class OutboundQueue {
             this.hostname = hostname;
         }
 
-        /** Nạp job cũ và bật bộ định thời nền (1 luồng daemon, quét mỗi giây). */
         void start() {
             loadPersisted();
             ticker = Executors.newSingleThreadScheduledExecutor(r -> {
@@ -246,8 +226,6 @@ public class OutboundQueue {
                 }
             }, 1, 1, TimeUnit.SECONDS);
         }
-
-        // ---------------------------------------------------------------- API
 
         boolean enqueue(String from, Set<String> rcpts, byte[] raw) {
             if (raw == null || rcpts == null || rcpts.isEmpty()) return false;
@@ -317,7 +295,7 @@ public class OutboundQueue {
                         }
                         list.add(new QueueEntry(j.id, j.from, j.domain, j.rcpts, j.attempts, next, j.lastError));
                     } catch (IOException | RuntimeException ignored) {
-                        // job đang được ghi lại hoặc hỏng: bỏ qua trong snapshot
+
                     }
                 }
             } catch (IOException e) {
@@ -347,7 +325,7 @@ public class OutboundQueue {
                 Sched s = byId.remove(id);
                 if (s != null) schedule.remove(s);
                 if (running.contains(id)) {
-                    cancelled.add(id); // sẽ dọn khi lần giao hiện tại kết thúc
+                    cancelled.add(id);
                     return true;
                 }
                 try {
@@ -361,9 +339,6 @@ public class OutboundQueue {
             }
         }
 
-        // ---------------------------------------------------------------- lập lịch
-
-        /** Đưa các job đến hạn (và domain còn chỗ) cho worker. Gọi được từ mọi luồng. */
         void tick() {
             List<Sched> toRun = new ArrayList<>();
             synchronized (lock) {
@@ -403,8 +378,6 @@ public class OutboundQueue {
             domainActive.remove(s.domain(), 0);
         }
 
-        // ---------------------------------------------------------------- giao thư
-
         private void runJob(Sched s) {
             try {
                 process(s);
@@ -423,14 +396,14 @@ public class OutboundQueue {
                 synchronized (lock) {
                     finishRun(s);
                 }
-                tick(); // domain vừa rảnh chỗ
+                tick();
             }
         }
 
         private void process(Sched s) throws IOException {
             String id = s.id();
             Path jp = jobPath(id);
-            if (!Files.exists(jp)) return; // đã bị xóa
+            if (!Files.exists(jp)) return;
 
             Job job = Job.parse(Files.readAllBytes(jp));
             Path mp = dir.resolve(job.msgId + ".msg");
@@ -456,7 +429,7 @@ public class OutboundQueue {
             try {
                 List<RcptResult> rs = deliverers.get().deliver(job.from, job.domain, List.copyOf(job.rcpts), signed);
                 if (rs != null) for (RcptResult r : rs) if (r != null) results.putIfAbsent(r.rcpt(), r);
-            } catch (Throwable t) { // hợp đồng cấm ném, nhưng phòng thủ
+            } catch (Throwable t) {
                 failNote = "Deliverer ném ngoại lệ: " + t;
                 log(failNote);
             }
@@ -495,7 +468,6 @@ public class OutboundQueue {
                 pending.clear();
             }
 
-            // Bounce TRƯỚC khi ghi trạng thái: nếu sập giữa chừng thì tệ nhất là bounce trùng, không mất bounce.
             if (!failures.isEmpty()) sendBounce(job, failures, raw, now);
 
             boolean dropped;
@@ -509,7 +481,7 @@ public class OutboundQueue {
             }
 
             long delay = jitter(baseDelayMs(job.attempts));
-            long next = Math.min(now + delay, job.created + maxAgeMs); // lần cuối đúng hạn để hết hạn kịp thời
+            long next = Math.min(now + delay, job.created + maxAgeMs);
             job.rcpts = pending;
             job.lastError = lastErr == null ? "" : lastErr;
             job.next = next;
@@ -536,8 +508,6 @@ public class OutboundQueue {
         private long jitter(long baseMs) {
             return baseMs + (long) (baseMs * JITTER * rnd.nextDouble());
         }
-
-        // ---------------------------------------------------------------- nạp lại sau khởi động
 
         void loadPersisted() {
             try {
@@ -571,7 +541,6 @@ public class OutboundQueue {
                 log("Không liệt kê được job khi nạp lại: " + e.getMessage());
             }
 
-            // Thư mồ côi (không còn job nào) -> xóa; chỉ đụng file đặt tên theo định dạng mới.
             try (DirectoryStream<Path> ds = Files.newDirectoryStream(dir, "*.msg")) {
                 for (Path p : ds) {
                     String name = p.getFileName().toString();
@@ -595,8 +564,6 @@ public class OutboundQueue {
             } catch (IOException ignored) { }
         }
 
-        // ---------------------------------------------------------------- tiện ích
-
         private Path jobPath(String id) {
             return dir.resolve(id + ".job");
         }
@@ -610,7 +577,6 @@ public class OutboundQueue {
             return at < 0 ? "" : rcpt.substring(at + 1).toLowerCase();
         }
 
-        /** Giảm tham chiếu thư; hết job thì xóa file thư. */
         private void releaseMsg(String msgId) {
             synchronized (lock) {
                 Integer c = msgRefs.merge(msgId, -1, Integer::sum);
@@ -625,7 +591,6 @@ public class OutboundQueue {
             }
         }
 
-        /** Ghi file tạm + fsync rồi rename nguyên tử. */
         static void writeAtomic(Path target, byte[] data) throws IOException {
             Path tmp = target.resolveSibling(target.getFileName() + ".tmp");
             try (FileChannel ch = FileChannel.open(tmp, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING,

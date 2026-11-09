@@ -21,12 +21,6 @@ import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-/**
- * Phiên SMTP "submission" (cổng 587 STARTTLS, 465 TLS ngay, 2525 dev): người dùng đã đăng nhập gửi thư đi.
- * Mỗi phiên dùng một instance mới (SmtpListener gọi factory.get()), nên trạng thái để ở field.
- *
- * Không nhận thư từ ngoài (việc của MxHandler), không tự giao/bounce (việc của MailService/OutboundQueue).
- */
 public class SubmissionHandler implements SmtpListener.SessionHandler {
 
     private static final int MAX_AUTH_FAILS_PER_SESSION = 5;
@@ -35,7 +29,6 @@ public class SubmissionHandler implements SmtpListener.SessionHandler {
     private static final int MAX_PASS_LEN = 1024;
     private static final int MAX_ADDR_LEN = 254;
 
-    /** Hash giả để vẫn tốn một lần bcrypt khi user không tồn tại (chống dò tài khoản qua thời gian phản hồi). */
     private static final String DUMMY_HASH = SecurityUtils.hashPassword("pbl4-dummy-password");
 
     private static final Pattern MAIL_FROM = Pattern.compile("^FROM\\s*:(.*)$", Pattern.CASE_INSENSITIVE);
@@ -45,9 +38,8 @@ public class SubmissionHandler implements SmtpListener.SessionHandler {
 
     private final boolean requireTls;
 
-    // ---- trạng thái phiên ----
-    private String authUser = null;          // tài khoản canonical sau AUTH
-    private String mailFrom = null;          // null = chưa có giao dịch
+    private String authUser = null;
+    private String mailFrom = null;
     private final Set<String> rcpts = new LinkedHashSet<>();
     private int authFails = 0;
     private int badCommands = 0;
@@ -57,12 +49,9 @@ public class SubmissionHandler implements SmtpListener.SessionHandler {
         this(ServerConfig.SMTP_REQUIRE_TLS);
     }
 
-    /** Dùng cho test: ép chế độ bắt buộc TLS bất kể cấu hình. */
     public SubmissionHandler(boolean requireTls) {
         this.requireTls = requireTls;
     }
-
-    // ------------------------------------------------------------------ vòng lệnh
 
     @Override
     public void handle(SmtpConnection c) throws Exception {
@@ -146,12 +135,10 @@ public class SubmissionHandler implements SmtpListener.SessionHandler {
         return tlsAvail;
     }
 
-    /** Được phép AUTH khi: không bắt buộc TLS, hoặc đã có TLS (cổng implicit TLS cũng có isTls() = true). */
     private boolean authAllowed(SmtpConnection c) {
         return !requireTls || c.isTls();
     }
 
-    /** Trả false + đã gửi lời từ chối nếu chưa đăng nhập. */
     private boolean requireAuth(SmtpConnection c) throws IOException {
         if (authUser != null) return true;
         c.reply(authAllowed(c)
@@ -159,8 +146,6 @@ public class SubmissionHandler implements SmtpListener.SessionHandler {
                 : "530 5.7.0 Must issue a STARTTLS command first");
         return false;
     }
-
-    // ------------------------------------------------------------------ EHLO / STARTTLS
 
     private boolean hello(SmtpConnection c, String args, boolean extended) throws IOException {
         if (args.isEmpty()) {
@@ -199,15 +184,13 @@ public class SubmissionHandler implements SmtpListener.SessionHandler {
         }
         c.reply("220 2.0.0 Ready to start TLS");
         if (!c.startTls()) {
-            return false; // kết nối đã bị đóng
+            return false;
         }
-        // RFC 3207: bỏ mọi trạng thái đã biết trước TLS
+
         authUser = null;
         resetTransaction();
         return true;
     }
-
-    // ------------------------------------------------------------------ AUTH
 
     private record AuthOutcome(String user, boolean throttled) {}
 
@@ -233,7 +216,7 @@ public class SubmissionHandler implements SmtpListener.SessionHandler {
         String pass;
 
         if (mech.equals("LOGIN")) {
-            String uLine = initial != null ? initial : prompt(c, "VXNlcm5hbWU6"); // "Username:"
+            String uLine = initial != null ? initial : prompt(c, "VXNlcm5hbWU6");
             if (uLine == null) return false;
             if (uLine.trim().equals("*")) return cancelled(c);
             byte[] ub = decodeB64(uLine.trim());
@@ -241,7 +224,7 @@ public class SubmissionHandler implements SmtpListener.SessionHandler {
                 c.reply("501 5.5.4 Cannot decode Base64 username");
                 return true;
             }
-            String pLine = prompt(c, "UGFzc3dvcmQ6"); // "Password:"
+            String pLine = prompt(c, "UGFzc3dvcmQ6");
             if (pLine == null) return false;
             if (pLine.trim().equals("*")) return cancelled(c);
             byte[] pb = decodeB64(pLine.trim());
@@ -263,7 +246,7 @@ public class SubmissionHandler implements SmtpListener.SessionHandler {
             String[] parts = new String(b, StandardCharsets.UTF_8).split("\0", -1);
             if (parts.length == 3) {
                 if (!parts[0].isEmpty() && !parts[0].equalsIgnoreCase(parts[1])) {
-                    return authFailed(c); // không hỗ trợ authzid khác authcid
+                    return authFailed(c);
                 }
                 user = parts[1];
                 pass = parts[2];
@@ -280,7 +263,7 @@ public class SubmissionHandler implements SmtpListener.SessionHandler {
         }
 
         if (user.length() > MAX_USER_LEN || pass.length() > MAX_PASS_LEN || user.isEmpty()) {
-            LoginThrottle.recordFailedAttempt(c.remoteIp(), null); // không dùng user rác làm key
+            LoginThrottle.recordFailedAttempt(c.remoteIp(), null);
             return authFailed(c);
         }
 
@@ -316,7 +299,6 @@ public class SubmissionHandler implements SmtpListener.SessionHandler {
         return true;
     }
 
-    /** Base64 chặt; "=" nghĩa là chuỗi rỗng (RFC 4954). null nếu sai định dạng. */
     private static byte[] decodeB64(String s) {
         if (s.equals("=")) return new byte[0];
         try {
@@ -332,7 +314,7 @@ public class SubmissionHandler implements SmtpListener.SessionHandler {
         }
         String hash = UserStore.findHash(username);
         boolean locked = "LOCKED".equalsIgnoreCase(UserStore.getStatus(username));
-        // Luôn chạy đúng một lần bcrypt để thời gian không lộ user có tồn tại hay không
+
         boolean passOk = SecurityUtils.checkPassword(password, hash != null ? hash : DUMMY_HASH);
         String canon = (hash != null && !locked && passOk) ? UserStore.canonical(username) : null;
         if (canon != null) {
@@ -342,8 +324,6 @@ public class SubmissionHandler implements SmtpListener.SessionHandler {
         LoginThrottle.recordFailedAttempt(ip, username);
         return new AuthOutcome(null, false);
     }
-
-    // ------------------------------------------------------------------ MAIL / RCPT
 
     private boolean mail(SmtpConnection c, String args) throws IOException {
         if (!requireAuth(c)) return true;
@@ -361,7 +341,7 @@ public class SubmissionHandler implements SmtpListener.SessionHandler {
             c.reply("501 5.1.7 Bad sender address syntax");
             return true;
         }
-        // Tham số mở rộng: chỉ xử lý SIZE, bỏ qua BODY/SMTPUTF8...
+
         for (String param : path[1].split("\\s+")) {
             if (param.toUpperCase(Locale.ROOT).startsWith("SIZE=")) {
                 try {
@@ -439,10 +419,6 @@ public class SubmissionHandler implements SmtpListener.SessionHandler {
         return domain.equalsIgnoreCase(ServerConfig.MAIL_DOMAIN) || domain.equalsIgnoreCase("localhost");
     }
 
-    /**
-     * Tách "<addr> params" hoặc "addr params". Trả {addr, params} hoặc null nếu thiếu '>'.
-     * "<>" cho addr rỗng. Bỏ source route kiểu "@a,@b:user@x".
-     */
     static String[] parsePath(String raw) {
         String s = raw.trim();
         if (s.startsWith("<")) {
@@ -458,8 +434,6 @@ public class SubmissionHandler implements SmtpListener.SessionHandler {
         int sp = s.indexOf(' ');
         return sp < 0 ? new String[]{s, ""} : new String[]{s.substring(0, sp), s.substring(sp + 1).trim()};
     }
-
-    // ------------------------------------------------------------------ DATA
 
     private boolean data(SmtpConnection c, String args) throws IOException {
         if (!requireAuth(c)) return true;
@@ -494,7 +468,6 @@ public class SubmissionHandler implements SmtpListener.SessionHandler {
             c.reply("552 5.3.4 Message size exceeds fixed limit");
             return true;
         }
-        // IOException khác (EOF, nuốt quá nhiều) lan ra ngoài: SmtpListener đóng kết nối.
 
         String from = mailFrom;
         Set<String> to = new LinkedHashSet<>(rcpts);
@@ -518,11 +491,6 @@ public class SubmissionHandler implements SmtpListener.SessionHandler {
         return true;
     }
 
-    /**
-     * Lỗi vĩnh viễn nếu message do MailService bắt đầu bằng mã 5xx ("554 ...", "5.1.1 ...").
-     * Mọi trường hợp khác (hàng đợi đầy, lỗi đĩa...) coi là tạm thời -> 451 để client gửi lại.
-     * Xem REQUESTS.md: nên có cờ rõ ràng thay vì đoán theo chuỗi.
-     */
     static boolean isPermanent(String message) {
         if (message == null) return false;
         return message.trim().matches("^5(\\.\\d+\\.\\d+|\\d\\d)\\b.*");

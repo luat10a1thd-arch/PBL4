@@ -4,7 +4,6 @@ import java.util.HashMap;
 import java.util.Locale;
 import java.util.Map;
 
-/** Bản ghi DMARC đã phân tích. domain = tên miền nơi tìm thấy bản ghi. */
 public record DmarcRecord(String domain, String p, String sp, boolean adkimStrict, boolean aspfStrict, int pct) {
 
     static boolean looksLikeDmarc(String txt) {
@@ -16,7 +15,6 @@ public record DmarcRecord(String domain, String p, String sp, boolean adkimStric
                 && (t.length() == 8 || t.charAt(8) == ';' || Character.isWhitespace(t.charAt(8)));
     }
 
-    /** Trả null nếu không phải bản ghi DMARC hợp lệ (thiếu p= và không có rua= thì bỏ qua, RFC 7489 6.6.3). */
     static DmarcRecord parse(String txt, String domain) {
         if (!looksLikeDmarc(txt)) {
             return null;
@@ -50,7 +48,7 @@ public record DmarcRecord(String domain, String p, String sp, boolean adkimStric
                     pct = v;
                 }
             } catch (NumberFormatException ignored) {
-                // pct sai: dùng 100
+
             }
         }
         return new DmarcRecord(domain, p, sp, "s".equalsIgnoreCase(tags.get("adkim")),

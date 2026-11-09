@@ -23,21 +23,12 @@ import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
-/**
- * Một phiên POP3. Thư được xử lý theo BYTE (MailMeta.sizeBytes, StoredMail.rawBytes()):
- * RETR/TOP gửi nguyên byte, chỉ chuẩn hóa LF trần -> CRLF khi gửi và dot-stuffing (xem {@link Pop3Wire}).
- */
 public class Pop3Handler implements Runnable {
 
     private static final Logger LOG = Logger.getLogger(Pop3Handler.class.getName());
 
-    // Mọi dòng trả về POP3 phải kết thúc bằng CRLF tường minh (println dùng "\n" trên Linux)
     private static final byte[] CRLF = {'\r', '\n'};
 
-    /**
-     * Điểm tựa phía lưu trữ/xác thực. Mặc định chuyển tiếp sang UserStore, LoginThrottle, MailStorageEngine;
-     * test thay bằng bản giả (constructor package-private bên dưới).
-     */
     interface Backend {
         boolean isThrottled(String ip, String user);
 
@@ -45,7 +36,6 @@ public class Pop3Handler implements Runnable {
 
         void resetFailures(String ip, String user);
 
-        /** Trả tên người dùng chuẩn hóa nếu đúng mật khẩu và tài khoản không bị khóa; ngược lại null. */
         String authenticate(String user, String password);
 
         List<MailStorageEngine.MailMeta> listMetas(String mailbox);
@@ -134,8 +124,6 @@ public class Pop3Handler implements Runnable {
             boolean isAuthenticated = false;
             boolean isTlsActive = false;
 
-            // PASS chỉ lấy metadata (id + kích thước byte thật), KHÔNG giải mã cả hòm thư.
-            // Nội dung thư chỉ được giải mã lười, từng thư một, khi RETR/TOP.
             List<MailStorageEngine.MailMeta> metas = new ArrayList<>();
             long[] sizes = new long[0];
             Set<Integer> deletedIndices = new HashSet<>();
@@ -164,7 +152,6 @@ public class Pop3Handler implements Runnable {
                         continue;
                     }
 
-                    // Còn dữ liệu thô đã đọc sẵn = client chen lệnh trước khi bắt tay TLS -> đóng
                     if (in.hasBufferedData()) {
                         send(out, "-ERR Unexpected data before TLS negotiation");
                         break;
@@ -232,7 +219,6 @@ public class Pop3Handler implements Runnable {
 
                         pendingUser = null;
 
-                        // Chỉ liệt kê metadata, không giải mã nội dung
                         List<MailStorageEngine.MailMeta> loaded = backend.listMetas(currentUser);
                         metas = (loaded != null) ? loaded : new ArrayList<>();
                         sizes = new long[metas.size()];
@@ -294,7 +280,7 @@ public class Pop3Handler implements Runnable {
                         send(out, "-ERR Please authenticate first");
                         continue;
                     }
-                    // UIDL = tên file .enc của thư (msg_<thời gian>_<uuid>.enc): bất biến, không đổi giữa các phiên
+
                     if (!argument.isEmpty()) {
                         try {
                             int idx = Integer.parseInt(argument);
@@ -336,7 +322,7 @@ public class Pop3Handler implements Runnable {
                         }
 
                         if (idx >= 0 && idx < metas.size() && !deletedIndices.contains(idx + 1)) {
-                            // Giải mã lười đúng một thư
+
                             MailStorageEngine.StoredMail mail = backend.getMail(currentUser, metas.get(idx).id);
                             if (mail == null) {
                                 send(out, "-ERR Message not available");
@@ -366,7 +352,7 @@ public class Pop3Handler implements Runnable {
                     try {
                         int index = Integer.parseInt(argument) - 1;
                         if (index >= 0 && index < metas.size() && !deletedIndices.contains(index + 1)) {
-                            // Giải mã lười đúng một thư
+
                             MailStorageEngine.StoredMail mail = backend.getMail(currentUser, metas.get(index).id);
                             if (mail == null) {
                                 send(out, "-ERR Message not available");
@@ -378,9 +364,6 @@ public class Pop3Handler implements Runnable {
                                 continue;
                             }
 
-                            // Số octet THỰC SỰ sẽ gửi (đã chuẩn hóa CRLF, chưa tính dấu '.' dot-stuffing và dòng ".").
-                            // Với thư lưu bằng CRLF thì bằng đúng raw.length. Nếu meta lệch (thư lưu LF trần...)
-                            // thì cập nhật để LIST/STAT sau đó trong phiên nhất quán.
                             long octets = Pop3Wire.octetCount(raw);
                             if (octets != sizes[index]) {
                                 LOG.log(Level.FINE, "[POP3] Kích thước meta lệch RETR: id={0} meta={1} thực={2}",
@@ -445,14 +428,14 @@ public class Pop3Handler implements Runnable {
                 }
             }
         } catch (LimitedLineReader.LineTooLongException e) {
-            // Dòng quá dài: báo lỗi rồi đóng kết nối
+
             try {
                 if (out != null) send(out, "-ERR Line too long");
             } catch (IOException ignored) {}
         } catch (SocketTimeoutException e) {
             System.err.println("[POP3] Timeout: " + clientSocket.getInetAddress());
         } catch (IOException e) {
-            // Client ngắt kết nối đột ngột: không cần in cả stack trace
+
             System.err.println("[POP3] Connection error: " + e.getMessage());
         } catch (Exception e) {
             e.printStackTrace();
@@ -462,8 +445,6 @@ public class Pop3Handler implements Runnable {
             } catch (Exception ignored) {}
         }
     }
-
-    // ---- Hàm phụ ----
 
     private LimitedLineReader newReader(Socket socket, long sessionDeadlineNanos) throws IOException {
         LimitedLineReader reader = new LimitedLineReader(socket.getInputStream(), ServerConfig.MAX_COMMAND_LINE_BYTES);
@@ -475,10 +456,6 @@ public class Pop3Handler implements Runnable {
         return new BufferedOutputStream(socket.getOutputStream(), 8192);
     }
 
-    /**
-     * Đặt timeout đọc: ngắn trước khi xác thực, dài hơn sau xác thực, và không vượt quá
-     * thời gian còn lại của phiên.
-     */
     private void applyReadTimeout(boolean authenticated, long sessionDeadlineNanos) throws IOException {
         long phaseMs = authenticated ? ServerConfig.POSTAUTH_TIMEOUT_MS : ServerConfig.PREAUTH_TIMEOUT_MS;
         long remainingMs = TimeUnit.NANOSECONDS.toMillis(sessionDeadlineNanos - System.nanoTime());
@@ -488,13 +465,11 @@ public class Pop3Handler implements Runnable {
         clientSocket.setSoTimeout((int) Math.max(1L, Math.min(phaseMs, remainingMs)));
     }
 
-    /** Gửi một dòng phản hồi đơn (kết thúc CRLF) và flush ngay. */
     private void send(OutputStream out, String line) throws IOException {
         writeLine(out, line);
         out.flush();
     }
 
-    /** Ghi một dòng kết thúc CRLF vào bộ đệm (chưa flush) - dùng cho phản hồi nhiều dòng. */
     private void writeLine(OutputStream out, String line) throws IOException {
         out.write(line.getBytes(StandardCharsets.UTF_8));
         out.write(CRLF);

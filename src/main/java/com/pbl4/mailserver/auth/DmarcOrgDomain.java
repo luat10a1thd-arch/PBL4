@@ -5,13 +5,6 @@ import java.util.HashSet;
 import java.util.Locale;
 import java.util.Set;
 
-/**
- * Tên miền gốc (organizational domain) cho DMARC.
- *
- * GIỚI HẠN: không dùng Public Suffix List đầy đủ. Quy tắc: lấy 2 nhãn cuối; nếu 2 nhãn cuối nằm trong
- * danh sách suffix hai nhãn rút gọn bên dưới (co.uk, com.au, com.vn, ...) thì lấy 3 nhãn cuối.
- * Suffix không có trong danh sách (ví dụ *.pvt.k12.ma.us, tên miền nền tảng như github.io) sẽ được coi sai.
- */
 public final class DmarcOrgDomain {
 
     private static final Set<String> TWO_LABEL_SUFFIXES = new HashSet<>(Arrays.asList(

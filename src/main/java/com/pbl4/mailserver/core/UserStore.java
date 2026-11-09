@@ -26,11 +26,11 @@ import java.util.regex.Pattern;
 public class UserStore {
 
     private static final String DEFAULT_USERS_FILE_PATH = "data/users.json";
-    // Đường dẫn file người dùng (mặc định data/users.json; chỉ test mới đổi qua resetForTest)
+
     private static volatile String usersFilePath = DEFAULT_USERS_FILE_PATH;
     private static final ConcurrentHashMap<String, User> userMap = new ConcurrentHashMap<>();
     private static volatile boolean isLoaded = false;
-    // false khi users.json đang hỏng và chưa khôi phục được: tuyệt đối không chép nó đè lên bản .bak
+
     private static volatile boolean mainFileTrusted = true;
 
     private static void ensureLoaded() {
@@ -45,9 +45,9 @@ public class UserStore {
     }
 
     public static synchronized void initDefaultUsers() {
-        // Ném lỗi (dừng khởi động) nếu users.json hỏng và không có bản .bak đọc được
+
         ensureLoaded();
-        // Chỉ tạo admin mặc định khi chưa có người dùng nào (file chưa tồn tại hoặc rỗng hợp lệ)
+
         if (userMap.isEmpty()) {
             byte[] salt = SecurityUtils.generateSalt();
             String saltBase64 = Base64.getEncoder().encodeToString(salt);
@@ -58,7 +58,6 @@ public class UserStore {
         }
     }
 
-    // Chỉ dùng cho test: trỏ UserStore sang file khác (null = về mặc định) và buộc nạp lại từ file đó
     static synchronized void resetForTest(String path) {
         usersFilePath = (path != null) ? path : DEFAULT_USERS_FILE_PATH;
         userMap.clear();
@@ -88,7 +87,7 @@ public class UserStore {
         File backup = new File(usersFilePath + ".bak");
 
         if (!file.exists()) {
-            // Lần chạy đầu tiên (chưa có file): để trống, initDefaultUsers sẽ tạo admin mặc định
+
             userMap.clear();
             mainFileTrusted = true;
             if (backup.exists()) {
@@ -141,12 +140,10 @@ public class UserStore {
         }
     }
 
-    // Đọc và kiểm tra một file users.json; ném lỗi nếu không phải mảng JSON hoàn chỉnh hoặc có bản ghi hỏng.
-    // File rỗng (chỉ có khoảng trắng) được coi là hợp lệ và không có người dùng nào.
     private static Map<String, User> parseUsersFile(File file) throws IOException {
         String json = new String(Files.readAllBytes(file.toPath()), StandardCharsets.UTF_8);
         if (json.startsWith("\uFEFF")) {
-            json = json.substring(1); // bỏ BOM (Notepad trên Windows hay thêm)
+            json = json.substring(1);
         }
         json = json.trim();
 
@@ -176,14 +173,12 @@ public class UserStore {
             result.put(user.getUsername().toLowerCase(Locale.ROOT).trim(), user);
         }
 
-        // Số cặp ngoặc không khớp số bản ghi đọc được => file bị cắt dở/hỏng, không được nạp một phần
         if (openBraces != closeBraces || openBraces != objects) {
             throw new IllegalStateException("Cấu trúc " + file.getName() + " bị hỏng (ngoặc không khớp)");
         }
         return result;
     }
 
-    // Giữ lại file hỏng (đổi tên .corrupt-<thời gian>) rồi chép .bak thành users.json. KHÔNG đụng tới .bak.
     private static void restoreMainFileFromBackup(File main, File backup) {
         try {
             Path corrupt = Paths.get(usersFilePath + ".corrupt-" + System.currentTimeMillis());
@@ -193,7 +188,7 @@ public class UserStore {
             mainFileTrusted = true;
             System.err.println("[USERSTORE] File hỏng được giữ lại tại " + corrupt.getFileName());
         } catch (Exception e) {
-            // Vẫn dùng dữ liệu trong RAM; mainFileTrusted=false để lần ghi sau không chép file hỏng đè lên .bak
+
             System.err.println("[USERSTORE] Không khôi phục được users.json từ .bak: " + e.getMessage());
         }
     }
@@ -263,24 +258,19 @@ public class UserStore {
         return resolveUser(username.toLowerCase(Locale.ROOT).trim()) != null;
     }
 
-    // ---- Alias bắt buộc theo RFC 5321/2142: postmaster@ và abuse@ chuyển về tài khoản admin ----
-    // Chỉ ảnh hưởng exists()/canonical() (để MxHandler nhận thư và MailService giao vào hòm admin).
-    // KHÔNG nằm trong userMap: không xuất hiện trong getAllUsers() (trang admin), không đăng nhập được,
-    // không ghi vào users.json. Nếu có tài khoản THẬT trùng tên thì tài khoản thật được ưu tiên.
     private static final String ADMIN_USERNAME = ServerConfig.ADMIN_EMAIL;
     private static final Set<String> ALIAS_LOCAL_PARTS = Set.of("postmaster", "abuse");
 
     private static boolean isAliasName(String lowerName) {
         if (lowerName == null) return false;
         int at = lowerName.indexOf('@');
-        if (at <= 0) return false; // chỉ nhận dạng đầy đủ local@domain, tránh nuốt tên trần "postmaster"
+        if (at <= 0) return false;
         if (!ALIAS_LOCAL_PARTS.contains(lowerName.substring(0, at))) return false;
         String domain = lowerName.substring(at + 1);
         return domain.equals(ServerConfig.MAIL_DOMAIN.toLowerCase(Locale.ROOT))
                 || domain.equals("localhost");
     }
 
-    // Tài khoản thật ứng với tên (đã trim + lower-case): chính nó, hoặc admin nếu là alias; null nếu không có.
     private static User resolveUser(String lowerName) {
         User direct = userMap.get(lowerName);
         if (direct != null) return direct;
@@ -313,7 +303,7 @@ public class UserStore {
         ensureLoaded();
         String key = username.toLowerCase(Locale.ROOT).trim();
         if (userMap.containsKey(key) || isAliasName(key)) {
-            return false; // đã có người dùng, hoặc là tên alias dành riêng (postmaster@/abuse@)
+            return false;
         }
         byte[] saltBytes = SecurityUtils.generateSalt();
         String saltBase64 = Base64.getEncoder().encodeToString(saltBytes);
@@ -365,8 +355,6 @@ public class UserStore {
             saveUsersToFile();
         }
 
-        // Dọn index/cache/lock của hòm thư trong RAM NGOÀI monitor của UserStore (tránh bế tắc với lock hòm thư).
-        // Nhờ vậy đăng ký lại cùng tên không bị dính quota/danh sách thư của người dùng cũ.
         MailStorageEngine.evictUser(key(username));
         if (storedName != null && !storedName.trim().equalsIgnoreCase(username.trim())) {
             MailStorageEngine.evictUser(storedName);

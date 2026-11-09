@@ -7,6 +7,8 @@ import com.pbl4.mailserver.core.OutboundQueue;
 import com.pbl4.mailserver.core.User;
 import com.pbl4.mailserver.core.UserStore;
 import com.pbl4.mailserver.outbound.QueueEntry;
+import com.pbl4.mailserver.ratelimit.AbuseGuard;
+import com.pbl4.mailserver.core.LoginThrottle;
 
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
@@ -37,7 +39,6 @@ public class AdminHandler implements HttpHandler {
 
     private static final String SYSTEM_LOG_PATH = "data/system.log";
 
-    // Broadcast chạy nền trên executor riêng (1 luồng, tối đa 2 job chờ) để không giữ luồng HTTP
     private static final ThreadPoolExecutor BROADCAST_EXECUTOR = new ThreadPoolExecutor(
             1, 1, 0L, TimeUnit.MILLISECONDS, new ArrayBlockingQueue<>(2),
             r -> {
@@ -46,7 +47,6 @@ public class AdminHandler implements HttpHandler {
                 return t;
             });
 
-    // Cache /stats: việc duyệt toàn bộ hòm thư rất tốn I/O
     private static final Object STATS_LOCK = new Object();
     private static volatile long statsCachedAt = 0;
     private static volatile long cachedTotalMails;
@@ -54,22 +54,17 @@ public class AdminHandler implements HttpHandler {
     private static volatile long cachedSentMails;
     private static volatile long cachedSpamMails;
 
-    // Mã job trong hàng đợi dạng "<msgId>.<n>": chỉ chữ/số/._- (chặn ký tự lạ và "..")
     private static final Pattern QUEUE_ID = Pattern.compile("[A-Za-z0-9._-]{1,128}");
     private static final int QUEUE_MAX_ROWS = 1000;
     private static final String DNS_PLACEHOLDER_IP = "203.0.113.10";
     private static final Object DNS_LOCK = new Object();
 
-    // ---- Điểm móc (package-private) để test thay phần phụ thuộc bằng bản giả ----
-
-    /** Xác thực phiên: token -> tên người dùng (null nếu sai/hết hạn) và kiểm tra quyền ADMIN. */
     interface Gate {
         String validate(String token);
 
         boolean isAdmin(String user);
     }
 
-    /** Truy cập hàng đợi gửi ra (A6: core/OutboundQueue). */
     interface QueueAccess {
         List<QueueEntry> snapshot();
 
@@ -78,12 +73,10 @@ public class AdminHandler implements HttpHandler {
         boolean delete(String id);
     }
 
-    /** Dựng bản hướng dẫn bản ghi DNS (A7: auth/DnsRecordPrinter). */
     interface DnsRenderer {
         String render(String ip, String domain, String hostname, String selector, String keyDir);
     }
 
-    /** Số liệu thư toàn hệ thống. */
     static final class MailStats {
         final long inbox, sent, spam, totalBytes;
 
@@ -132,8 +125,6 @@ public class AdminHandler implements HttpHandler {
     private static final DnsRenderer DEFAULT_DNS = (ip, domain, hostname, selector, keyDir) ->
             DnsRecordPrinter.render(ip, domain, hostname, selector, Paths.get(keyDir));
 
-    // Thư vào = số thư các inbox (hàm sẵn có); thư ra/rác = đếm file .enc của các thư mục *_sent / *_spam (chỉ đọc).
-    // Tạm thời: cần A9 bổ sung hàm đếm theo loại hòm trong MailStorageEngine (xem GHI CHÚ TÍCH HỢP).
     private static final StatsSource DEFAULT_STATS = () -> new MailStats(
             MailStorageEngine.getTotalMailCount(),
             countEncFiles("_sent"),
@@ -218,6 +209,11 @@ public class AdminHandler implements HttpHandler {
             return;
         }
 
+        if ("GET".equalsIgnoreCase(method) && path.endsWith("/security")) {
+            handleGetSecurity(exchange);
+            return;
+        }
+
         if ("DELETE".equalsIgnoreCase(method) && path.endsWith("/queue")) {
             handleDeleteQueueJob(exchange, queryParam(exchange, "id"));
             return;
@@ -244,6 +240,10 @@ public class AdminHandler implements HttpHandler {
                 handleRetryQueueJob(exchange, getParamValue(body, "id"));
             } else if (path.endsWith("/queue/delete")) {
                 handleDeleteQueueJob(exchange, getParamValue(body, "id"));
+            } else if (path.endsWith("/security/ban")) {
+                handleBanIp(exchange, getParamValue(body, "ip"), getParamValue(body, "minutes"));
+            } else if (path.endsWith("/security/unban")) {
+                handleUnbanIp(exchange, getParamValue(body, "ip"));
             } else {
                 sendResponse(exchange, 404, "{\"success\": false, \"message\": \"Endpoint không tồn tại!\"}");
             }
@@ -273,7 +273,7 @@ public class AdminHandler implements HttpHandler {
         long now = System.currentTimeMillis();
         if (now - statsCachedAt > ServerConfig.ADMIN_STATS_CACHE_MS) {
             synchronized (STATS_LOCK) {
-                // Kiểm tra lại trong khóa: chỉ một luồng tính lại, các luồng khác dùng kết quả mới
+
                 if (System.currentTimeMillis() - statsCachedAt > ServerConfig.ADMIN_STATS_CACHE_MS) {
                     MailStats st = statsSource.read();
                     cachedTotalMails = st.inbox;
@@ -288,8 +288,6 @@ public class AdminHandler implements HttpHandler {
         long totalBytes = cachedTotalBytes;
         String formattedSize = formatBytes(totalBytes);
 
-        // quotaMb luôn lấy giá trị hiện tại (không cache) vì admin có thể vừa đổi
-        // Hàng đợi gửi ra không cache (rẻ, và admin muốn thấy số liệu mới); lỗi thì báo -1
         long queueSize;
         try {
             queueSize = queueAccess.snapshot().size();
@@ -297,7 +295,6 @@ public class AdminHandler implements HttpHandler {
             queueSize = -1;
         }
 
-        // Giữ nguyên 4 khóa cũ; các khóa mới (inbox/sent/spam/queue) chỉ là bổ sung
         String json = String.format(
             "{\"success\": true, \"totalMails\": %d, \"totalSizeBytes\": %d, \"formattedSize\": \"%s\", \"quotaMb\": %d"
             + ", \"inboxMails\": %d, \"sentMails\": %d, \"spamMails\": %d, \"queueSize\": %d}",
@@ -311,10 +308,6 @@ public class AdminHandler implements HttpHandler {
         statsCachedAt = 0;
     }
 
-    // ------------------------------------------------------------------------------------------
-    // Hàng đợi gửi ra
-    // ------------------------------------------------------------------------------------------
-
     private void handleGetQueue(HttpExchange exchange) throws IOException {
         List<QueueEntry> entries;
         try {
@@ -323,7 +316,7 @@ public class AdminHandler implements HttpHandler {
             sendResponse(exchange, 500, "{\"success\": false, \"message\": \"Không đọc được hàng đợi gửi thư!\"}");
             return;
         }
-        // Job sắp được thử lại nhất lên đầu
+
         entries.sort(Comparator.comparingLong(QueueEntry::nextAttemptEpochMs));
 
         int total = entries.size();
@@ -397,10 +390,6 @@ public class AdminHandler implements HttpHandler {
         }
     }
 
-    // ------------------------------------------------------------------------------------------
-    // Bản ghi DNS cần khai (KHÔNG bao giờ trả private key)
-    // ------------------------------------------------------------------------------------------
-
     private void handleGetDns(HttpExchange exchange) throws IOException {
         String ip = queryParam(exchange, "ip");
         boolean ipAssumed = false;
@@ -422,12 +411,12 @@ public class AdminHandler implements HttpHandler {
         String text;
         boolean dkimAvailable = true;
         try {
-            // render có thể tự sinh khóa DKIM lần đầu: chỉ cho một luồng chạy tại một thời điểm
+
             synchronized (DNS_LOCK) {
                 text = dnsRenderer.render(ip, domain, hostname, selector, ServerConfig.DKIM_KEY_DIR);
             }
         } catch (RuntimeException e) {
-            // Không có/không tạo được khóa DKIM: vẫn trả MX/A/SPF/DMARC mẫu, bỏ phần DKIM
+
             dkimAvailable = false;
             appendLog("DNS: không dựng được bản ghi DKIM: " + sanitizeLogMessage(e.getMessage()));
             text = fallbackDnsText(ip, domain, hostname, selector);
@@ -453,7 +442,6 @@ public class AdminHandler implements HttpHandler {
                 + "  (chưa tạo được khóa DKIM: kiểm tra thư mục PBL4_DKIM_KEY_DIR và quyền ghi)\n";
     }
 
-    // IPv4/IPv6 dạng literal (không phát sinh truy vấn DNS)
     private static boolean isIpLiteral(String s) {
         if (s.length() > 45) return false;
         if (s.matches("\\d{1,3}(\\.\\d{1,3}){3}")) {
@@ -465,7 +453,6 @@ public class AdminHandler implements HttpHandler {
         return s.indexOf(':') >= 0 && s.matches("[0-9A-Fa-f:.]+");
     }
 
-    // Giá trị một tham số trong query string (đã giải mã URL); null nếu không có
     private static String queryParam(HttpExchange exchange, String name) {
         String query = exchange.getRequestURI().getRawQuery();
         if (query == null) return null;
@@ -539,12 +526,10 @@ public class AdminHandler implements HttpHandler {
         sendResponse(exchange, 200, "{\"success\": true, \"logs\": " + sb.toString() + "}");
     }
 
-    /** Đọc N dòng cuối của file từ cuối lên (không nạp cả file vào RAM). Giữ nguyên thứ tự cũ -> mới. */
     static List<String> tailLines(File file, int n) {
         List<String> result = new ArrayList<>();
         if (!file.exists() || n <= 0) return result;
 
-        // Trần byte đọc: tránh dòng log dài bất thường làm phình bộ nhớ
         final long maxBytes = Math.max(64 * 1024L, (long) n * 1024L);
         try (RandomAccessFile raf = new RandomAccessFile(file, "r")) {
             long len = raf.length();
@@ -554,7 +539,7 @@ public class AdminHandler implements HttpHandler {
             int newlines = 0;
             byte[] buf = new byte[8192];
 
-            while (pos > stopAt && newlines <= n) { // cần n+1 dấu xuống dòng để chắc chắn đủ n dòng nguyên
+            while (pos > stopAt && newlines <= n) {
                 int toRead = (int) Math.min(buf.length, pos - stopAt);
                 pos -= toRead;
                 raf.seek(pos);
@@ -571,10 +556,10 @@ public class AdminHandler implements HttpHandler {
             String[] lines = text.split("\r?\n", -1);
 
             int first = 0;
-            // Nếu chưa đọc tới đầu file, dòng đầu có thể bị cắt dở -> bỏ
+
             if (pos > 0 && lines.length > 0) first = 1;
             int last = lines.length;
-            if (last > first && lines[last - 1].isEmpty()) last--; // phần tử rỗng sau '\n' cuối file
+            if (last > first && lines[last - 1].isEmpty()) last--;
 
             int from = Math.max(first, last - n);
             for (int i = from; i < last; i++) result.add(lines[i]);
@@ -598,7 +583,7 @@ public class AdminHandler implements HttpHandler {
             return;
         }
         String newStatus = "lock".equalsIgnoreCase(action) ? "LOCKED" : "ACTIVE";
-        
+
         boolean updated = UserStore.setStatus(targetUser, newStatus);
 
         if (updated) {
@@ -632,9 +617,9 @@ public class AdminHandler implements HttpHandler {
         boolean removed = UserStore.deleteUser(targetUser);
 
         if (removed) {
-            SessionManager.invalidateUser(targetUser); // đóng cả SSE của user
+            SessionManager.invalidateUser(targetUser);
             try {
-                // Xóa inbox + _sent an toàn dưới khóa của MailStorageEngine
+
                 MailStorageEngine.deleteMailbox(targetUser);
             } catch (Exception e) {
                 appendLog("Lỗi khi xóa hòm thư của " + targetUser + ": " + sanitizeLogMessage(e.getMessage()));
@@ -679,7 +664,7 @@ public class AdminHandler implements HttpHandler {
         }
 
         try {
-            // Chạy nền: không giữ luồng HTTP khi có hàng nghìn người nhận
+
             BROADCAST_EXECUTOR.execute(() -> runBroadcast(safeSubject, finalContent, recipients));
         } catch (RejectedExecutionException e) {
             sendResponse(exchange, 429,
@@ -695,7 +680,6 @@ public class AdminHandler implements HttpHandler {
                 + " tài khoản (kết quả được ghi vào nhật ký hệ thống).\"}");
     }
 
-    // Thực thi broadcast ở luồng nền, ghi kết quả vào system.log khi xong
     private static void runBroadcast(String safeSubject, String content, List<String> recipients) {
         int sent = 0;
         int failed = 0;
@@ -752,7 +736,6 @@ public class AdminHandler implements HttpHandler {
         }
     }
 
-    // Xoay vòng: system.log -> system.log.1 -> .2 -> ... (giữ ADMIN_LOG_KEEP_FILES file cũ, xóa file cũ nhất)
     private static void rotateLogIfNeeded(File logFile) {
         if (!logFile.exists() || logFile.length() < ServerConfig.ADMIN_LOG_MAX_BYTES) return;
         try {
@@ -766,7 +749,7 @@ public class AdminHandler implements HttpHandler {
             }
             Files.move(logFile.toPath(), new File(logFile.getPath() + ".1").toPath(), StandardCopyOption.REPLACE_EXISTING);
         } catch (IOException ignored) {
-            // Không xoay được thì vẫn tiếp tục ghi vào file hiện tại
+
         }
     }
 
@@ -818,5 +801,48 @@ public class AdminHandler implements HttpHandler {
         OutputStream os = exchange.getResponseBody();
         os.write(bytes);
         os.close();
+    }
+
+    private void handleGetSecurity(HttpExchange exchange) throws IOException {
+        int tracked = AbuseGuard.defaultEngine().trackedIps();
+        java.util.Map<String, Long> banned = AbuseGuard.defaultEngine().bannedIps();
+        StringBuilder sb = new StringBuilder("[");
+        int i = 0;
+        for (java.util.Map.Entry<String, Long> e : banned.entrySet()) {
+            if (i++ > 0) sb.append(",");
+            sb.append("{\"ip\":\"").append(escapeJson(e.getKey()))
+              .append("\",\"remainingSeconds\":").append(e.getValue()).append("}");
+        }
+        sb.append("]");
+        sendResponse(exchange, 200, "{\"success\": true, \"trackedIps\": " + tracked + ", \"bannedIps\": " + sb + "}");
+    }
+
+    private void handleBanIp(HttpExchange exchange, String ip, String minutesStr) throws IOException {
+        if (ip == null || !isIpLiteral(ip.trim())) {
+            sendResponse(exchange, 400, "{\"success\": false, \"message\": \"Địa chỉ IP không hợp lệ!\"}");
+            return;
+        }
+        long minutes = 30;
+        try {
+            if (minutesStr != null && !minutesStr.trim().isEmpty()) {
+                minutes = Math.max(1, Math.min(10080, Long.parseLong(minutesStr.trim())));
+            }
+        } catch (NumberFormatException ignored) {}
+        String cleanIp = ip.trim();
+        AbuseGuard.defaultEngine().ban(cleanIp, minutes * 60_000L);
+        appendLog("Bảo mật: Admin đã chặn IP " + cleanIp + " trong " + minutes + " phút");
+        sendResponse(exchange, 200, "{\"success\": true, \"message\": \"Đã chặn IP " + escapeJson(cleanIp) + " trong " + minutes + " phút!\"}");
+    }
+
+    private void handleUnbanIp(HttpExchange exchange, String ip) throws IOException {
+        if (ip == null || ip.trim().isEmpty()) {
+            sendResponse(exchange, 400, "{\"success\": false, \"message\": \"Thiếu địa chỉ IP cần mở khóa!\"}");
+            return;
+        }
+        String cleanIp = ip.trim();
+        AbuseGuard.defaultEngine().unban(cleanIp);
+        LoginThrottle.resetAttempts(cleanIp, null);
+        appendLog("Bảo mật: Admin đã mở khóa IP " + cleanIp);
+        sendResponse(exchange, 200, "{\"success\": true, \"message\": \"Đã mở khóa cho IP " + escapeJson(cleanIp) + "!\"}");
     }
 }

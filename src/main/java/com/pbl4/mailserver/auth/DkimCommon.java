@@ -13,27 +13,19 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 
-/**
- * Phần dùng chung của DkimSigner / DkimVerifier (RFC 6376): tách header, canonicalization, tag-list.
- * Header được đọc bằng ISO-8859-1 để ánh xạ 1-1 giữa byte và ký tự (không làm hỏng byte nào).
- */
 final class DkimCommon {
 
     static final Charset L1 = StandardCharsets.ISO_8859_1;
 
     private DkimCommon() {}
 
-    /** Một trường header: raw = toàn bộ trường (kể cả các dòng gấp CRLF+WSP), không gồm CRLF cuối. */
     record Hdr(String name, String raw) {
         String lc() {
             return name.toLowerCase(Locale.ROOT);
         }
     }
 
-    /** headerBytes: số byte của phần header (đến hết dòng trống/hết dữ liệu); bodyStart: vị trí bắt đầu thân thư. */
     record Parsed(List<Hdr> headers, int bodyStart, int headerBytes) {}
-
-    // ------------------------------------------------------------ tách header
 
     static Parsed parse(byte[] raw) {
         List<Hdr> list = new ArrayList<>();
@@ -46,7 +38,7 @@ final class DkimCommon {
             int e = indexOfCrlf(raw, pos);
             int lineEnd = e < 0 ? n : e;
             int next = e < 0 ? n : e + 2;
-            if (lineEnd == pos) { // dòng trống: hết header
+            if (lineEnd == pos) {
                 bodyStart = next;
                 headerBytes = pos;
                 break;
@@ -72,7 +64,7 @@ final class DkimCommon {
         String s = cur.toString();
         int colon = s.indexOf(':');
         if (colon <= 0) {
-            return; // dòng không phải header hợp lệ: bỏ qua
+            return;
         }
         list.add(new Hdr(s.substring(0, colon).trim(), s));
     }
@@ -96,10 +88,6 @@ final class DkimCommon {
         return c;
     }
 
-    /**
-     * Chọn header theo danh sách h=: lần xuất hiện thứ k của một tên trong h= ứng với trường thứ k tính từ DƯỚI lên.
-     * Tên không còn trường tương ứng thì bỏ qua (không đóng góp gì vào hash) - đây chính là cơ chế "oversign".
-     */
     static List<Hdr> selectHeaders(List<Hdr> all, List<String> names) {
         Map<String, Integer> used = new HashMap<>();
         List<Hdr> out = new ArrayList<>();
@@ -121,9 +109,6 @@ final class DkimCommon {
         return out;
     }
 
-    // ------------------------------------------------------ canonicalization
-
-    /** Relaxed header (RFC 6376 3.4.2): tên chữ thường, bỏ gấp dòng, gộp WSP, bỏ WSP quanh dấu ':' và cuối giá trị. Không có CRLF cuối. */
     static String canonHeaderRelaxed(String raw) {
         int c = raw.indexOf(':');
         String name = raw.substring(0, c).trim().toLowerCase(Locale.ROOT);
@@ -145,7 +130,6 @@ final class DkimCommon {
         return name + ":" + sb;
     }
 
-    /** Dữ liệu header đưa vào hash: mỗi header đã canonical + CRLF. */
     static byte[] headerHashInput(List<Hdr> selected, boolean relaxed) {
         StringBuilder sb = new StringBuilder();
         for (Hdr h : selected) {
@@ -154,12 +138,6 @@ final class DkimCommon {
         return sb.toString().getBytes(L1);
     }
 
-    /**
-     * Canonicalization thân thư. Chỉ tách dòng theo CRLF.
-     * - relaxed: bỏ WSP cuối dòng, gộp WSP trong dòng; thân rỗng => rỗng.
-     * - simple: giữ nguyên; thân rỗng => "\r\n".
-     * Cả hai: bỏ mọi dòng trống ở cuối; nếu còn nội dung thì bảo đảm kết thúc bằng CRLF.
-     */
     static byte[] canonBody(byte[] raw, int start, boolean relaxed) {
         int n = raw.length;
         ByteArrayOutputStream out = new ByteArrayOutputStream(Math.max(16, n - start));
@@ -230,9 +208,6 @@ final class DkimCommon {
         }
     }
 
-    // ------------------------------------------------------------ tag-list
-
-    /** Phân tích "tag=value; tag=value". Ném IllegalArgumentException nếu sai cú pháp hoặc trùng thẻ. */
     static Map<String, String> parseTags(String value) {
         Map<String, String> tags = new LinkedHashMap<>();
         for (String seg : value.split(";", -1)) {
@@ -253,7 +228,6 @@ final class DkimCommon {
         return tags;
     }
 
-    /** Xóa mọi khoảng trắng (dùng cho giá trị b=, bh=, p=). */
     static String stripWs(String s) {
         StringBuilder sb = new StringBuilder(s.length());
         for (int i = 0; i < s.length(); i++) {
@@ -265,7 +239,6 @@ final class DkimCommon {
         return sb.toString();
     }
 
-    /** Giữ nguyên trường DKIM-Signature nhưng xóa giá trị của thẻ b= (để tính hash chữ ký). */
     static String stripBValue(String rawHeader) {
         int c = rawHeader.indexOf(':');
         String head = rawHeader.substring(0, c + 1);

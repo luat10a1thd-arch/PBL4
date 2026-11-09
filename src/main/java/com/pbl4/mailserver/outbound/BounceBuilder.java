@@ -11,16 +11,10 @@ import java.util.List;
 import java.util.UUID;
 import java.util.regex.Pattern;
 
-/**
- * Dựng thư báo lỗi (DSN, RFC 3464): multipart/report; report-type=delivery-status.
- * Ba phần: (1) text/plain dễ đọc, (2) message/delivery-status, (3) text/rfc822-headers (header thư gốc).
- * Toàn bộ xuống dòng là CRLF; header thư gốc được chép NGUYÊN byte, không qua String.
- */
 public final class BounceBuilder {
 
     private BounceBuilder() {}
 
-    /** Một người nhận không giao được. expired=true: bị bỏ vì quá thời hạn lưu hàng đợi. */
     public record Failure(String rcpt, String diagnostic, boolean expired) {
         public Failure {
             if (rcpt == null) rcpt = "";
@@ -33,7 +27,6 @@ public final class BounceBuilder {
     private static final int MAX_ORIG_HEADER_BYTES = 32 * 1024;
     private static final int MAX_DIAG_CHARS = 900;
 
-    /** Không bao giờ bounce cho null sender hoặc MAILER-DAEMON (tránh vòng lặp bounce). */
     public static boolean shouldBounce(String envelopeFrom) {
         String s = stripAngle(envelopeFrom);
         if (s.isEmpty()) return false;
@@ -42,15 +35,6 @@ public final class BounceBuilder {
         return !local.trim().equalsIgnoreCase("MAILER-DAEMON");
     }
 
-    /**
-     * @param mailDomain   domain của hệ thống (From = MAILER-DAEMON@mailDomain)
-     * @param reportingHost FQDN ghi vào Reporting-MTA
-     * @param envelopeFrom người gửi gốc (nơi nhận DSN)
-     * @param destDomain   domain đích đã thất bại
-     * @param failures     các người nhận thất bại (không rỗng)
-     * @param origRaw      thư gốc (chỉ dùng phần header)
-     * @param nowMs        thời điểm hiện tại (epoch ms)
-     */
     public static byte[] build(String mailDomain, String reportingHost, String envelopeFrom, String destDomain,
                                List<Failure> failures, byte[] origRaw, long nowMs) {
         String sender = stripAngle(envelopeFrom);
@@ -61,7 +45,6 @@ public final class BounceBuilder {
 
         ByteArrayOutputStream out = new ByteArrayOutputStream(4096);
 
-        // ---- Header thư ----
         w(out, "From: Mail Delivery System <MAILER-DAEMON@" + mailDomain + ">\r\n");
         w(out, "To: <" + sender + ">\r\n");
         w(out, "Subject: Mail Delivery Failure: Undelivered Mail Returned to Sender\r\n");
@@ -72,7 +55,6 @@ public final class BounceBuilder {
         w(out, "Content-Type: multipart/report; report-type=delivery-status; boundary=\"" + boundary + "\"\r\n");
         w(out, "\r\n");
 
-        // ---- Phần 1: dễ đọc ----
         w(out, "--" + boundary + "\r\n");
         w(out, "Content-Type: text/plain; charset=UTF-8\r\n");
         w(out, "Content-Transfer-Encoding: 8bit\r\n\r\n");
@@ -96,7 +78,6 @@ public final class BounceBuilder {
         human.append("Phần đầu (header) của thư gốc được đính kèm bên dưới.\r\n");
         w(out, human.toString());
 
-        // ---- Phần 2: message/delivery-status ----
         w(out, "--" + boundary + "\r\n");
         w(out, "Content-Type: message/delivery-status\r\n\r\n");
         w(out, "Reporting-MTA: dns; " + ascii(reportingHost) + "\r\n");
@@ -112,7 +93,6 @@ public final class BounceBuilder {
         }
         w(out, "\r\n");
 
-        // ---- Phần 3: header thư gốc (nguyên byte) ----
         w(out, "--" + boundary + "\r\n");
         w(out, "Content-Type: text/rfc822-headers\r\n\r\n");
         byte[] hdr = originalHeaders(origRaw);
@@ -123,10 +103,8 @@ public final class BounceBuilder {
         return out.toByteArray();
     }
 
-    // ------------------------------------------------------------------ nội bộ
-
     static String statusOf(Failure f) {
-        if (f.expired()) return "4.4.7"; // delivery time expired
+        if (f.expired()) return "4.4.7";
         var m = ENHANCED_5.matcher(f.diagnostic());
         if (m.find()) return m.group();
         return "5.0.0";
@@ -136,11 +114,10 @@ public final class BounceBuilder {
         String one = ascii(diag.replaceAll("[\\r\\n]+", " ").trim());
         if (one.length() > MAX_DIAG_CHARS) one = one.substring(0, MAX_DIAG_CHARS);
         if (one.isEmpty()) one = "no diagnostic";
-        // Phản hồi SMTP thật bắt đầu bằng mã 3 chữ số; còn lại là lỗi nội bộ (mạng, DNS...).
+
         return (SMTP_REPLY.matcher(one).matches() ? "smtp; " : "X-Internal; ") + one;
     }
 
-    /** Header DSN phải là ASCII: ký tự ngoài ASCII/điều khiển thành '?'. */
     private static String ascii(String s) {
         if (s == null) return "";
         StringBuilder sb = new StringBuilder(s.length());

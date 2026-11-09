@@ -9,13 +9,6 @@ import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.List;
 
-/**
- * In các bản ghi DNS cần khai để mail server hoạt động liên mạng.
- *
- * Cách chạy:  java -cp target/mailserver-1.0.0.jar com.pbl4.mailserver.auth.DnsRecordPrinter &lt;IP công khai&gt;
- * Tên domain/hostname/selector/thư mục khóa lấy từ cấu hình (PBL4_MAIL_DOMAIN, PBL4_MAIL_HOSTNAME, PBL4_DKIM_*).
- * Lần chạy đầu tiên sẽ tự sinh khóa DKIM nếu chưa có.
- */
 public final class DnsRecordPrinter {
 
     private static final int TXT_CHUNK = 255;
@@ -38,7 +31,6 @@ public final class DnsRecordPrinter {
                 ServerConfig.DKIM_SELECTOR, Paths.get(ServerConfig.DKIM_KEY_DIR)));
     }
 
-    /** Dựng toàn bộ nội dung hướng dẫn (tách riêng để test). Ném IllegalStateException nếu không tạo được khóa DKIM. */
     public static String render(String ip, String domain, String hostname, String selector, Path keyDir) {
         boolean v6 = ip.indexOf(':') >= 0;
         String dkim = DkimSigner.publicKeyRecord(domain, selector, keyDir);
@@ -84,7 +76,6 @@ public final class DnsRecordPrinter {
         return sb.toString();
     }
 
-    /** Cắt chuỗi thành các đoạn tối đa 255 byte (giới hạn của một character-string trong TXT). */
     public static List<String> splitTxt(String value) {
         byte[] bytes = value.getBytes(StandardCharsets.UTF_8);
         List<String> parts = new ArrayList<>();
@@ -98,7 +89,6 @@ public final class DnsRecordPrinter {
         return parts;
     }
 
-    /** "đoạn1" "đoạn2" ... đúng cú pháp file zone. */
     static String quoteTxt(String value) {
         StringBuilder sb = new StringBuilder();
         for (String p : splitTxt(value)) {
@@ -122,7 +112,6 @@ public final class DnsRecordPrinter {
         return s.indexOf(':') >= 0 && s.matches("[0-9A-Fa-f:.]+");
     }
 
-    /** Tên reverse (in-addr.arpa / ip6.arpa) của IP literal; không phát sinh truy vấn DNS. */
     static String reverseName(String ip) {
         try {
             byte[] a = InetAddress.getByName(ip).getAddress();

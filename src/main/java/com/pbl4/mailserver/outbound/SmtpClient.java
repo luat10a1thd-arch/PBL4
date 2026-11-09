@@ -31,29 +31,20 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 
-/**
- * Client SMTP mức thấp dùng chung cho MxDeliverer và RelayDeliverer (chỉ dùng trong package outbound).
- * Làm việc hoàn toàn trên byte: thân thư không bao giờ bị đổi sang String.
- */
 final class SmtpClient implements Closeable {
 
     static final int MAX_LINE_BYTES = 8192;
     static final int MAX_REPLY_LINES = 500;
 
-    // ------------------------------------------------------------------ kiểu dữ liệu
-
-    /** Một phản hồi SMTP (đã đọc hết mọi dòng "250-..." cho tới dòng "250 ..."). */
     record Reply(int code, List<String> lines) {
         boolean positive() { return code >= 200 && code < 300; }
 
-        /** 5xx = FAILED; mọi mã khác không thành công (4xx, 3xx bất ngờ...) = DEFERRED. */
         RcptStatus failureStatus() { return code >= 500 && code < 600 ? RcptStatus.FAILED : RcptStatus.DEFERRED; }
 
         String text() { return String.join("\n", lines); }
 
-        /** Tham số của phần mở rộng EHLO (vd "SIZE 35882577" -> "35882577"); null nếu không quảng cáo. */
         String extensionArgs(String name) {
-            for (int i = 1; i < lines.size(); i++) { // dòng đầu là lời chào, không phải extension
+            for (int i = 1; i < lines.size(); i++) {
                 String l = lines.get(i);
                 if (l.length() < 4) continue;
                 String ext = l.substring(4).trim();
@@ -72,18 +63,12 @@ final class SmtpClient implements Closeable {
         }
     }
 
-    /**
-     * Kết quả một lần thử giao: hoặc đã có kết luận cho từng người nhận (results != null, không thử MX khác),
-     * hoặc cần thử đích kế tiếp (retryReason != null). retryPlain = thử lại cùng IP nhưng không TLS.
-     */
     record Outcome(List<RcptResult> results, String retryReason, boolean retryPlain) {
         static Outcome done(List<RcptResult> r) { return new Outcome(r, null, false); }
         static Outcome retry(String reason) { return new Outcome(null, reason, false); }
         static Outcome retryPlain(String reason) { return new Outcome(null, reason, true); }
         boolean finished() { return results != null; }
     }
-
-    // ------------------------------------------------------------------ trạng thái
 
     private static final ScheduledExecutorService WATCHDOG = Executors.newSingleThreadScheduledExecutor(r -> {
         Thread t = new Thread(r, "outbound-watchdog");
@@ -127,8 +112,6 @@ final class SmtpClient implements Closeable {
 
     boolean isTls() { return tls; }
 
-    // ------------------------------------------------------------------ đọc / ghi lệnh
-
     private String readLine() throws IOException {
         byte[] buf = new byte[256];
         int n = 0;
@@ -144,7 +127,6 @@ final class SmtpClient implements Closeable {
         return new String(buf, 0, n, StandardCharsets.UTF_8);
     }
 
-    /** Đọc một phản hồi đầy đủ; phản hồi nhiều dòng ("250-") được đọc hết. */
     Reply readReply() throws IOException {
         List<String> lines = new ArrayList<>();
         int code = -1;
@@ -180,7 +162,6 @@ final class SmtpClient implements Closeable {
         return readReply();
     }
 
-    /** EHLO; nếu máy chủ trả 5xx thì lùi về HELO (khi đó không có phần mở rộng nào). */
     Reply ehlo(String name) throws IOException {
         Reply r = command("EHLO " + name);
         if (r.code() >= 500 && r.code() < 600) r = command("HELO " + name);
@@ -189,12 +170,6 @@ final class SmtpClient implements Closeable {
 
     void setSoTimeout(int ms) throws IOException { socket.setSoTimeout(ms); }
 
-    // ------------------------------------------------------------------ TLS
-
-    /**
-     * Nâng cấp kết nối hiện tại lên TLS (TLS 1.2+). verifyHostname=true bật kiểm tra tên máy chủ theo chứng chỉ.
-     * Lỗi: ném IOException (kết nối coi như hỏng, người gọi phải đóng).
-     */
     void upgradeTls(SSLContext ctx, boolean verifyHostname, String sniHost, int port) throws IOException {
         SSLSocket ss = (SSLSocket) ctx.getSocketFactory().createSocket(socket, sniHost, port, true);
         try {
@@ -221,7 +196,6 @@ final class SmtpClient implements Closeable {
         }
     }
 
-    /** Ngữ cảnh TLS không kiểm chứng chứng chỉ (chỉ dùng cho STARTTLS cơ hội, tương tự các MTA phổ biến). */
     static SSLContext trustAllContext() throws GeneralSecurityException {
         SSLContext ctx = SSLContext.getInstance("TLS");
         ctx.init(null, new TrustManager[]{new X509ExtendedTrustManager() {
@@ -236,12 +210,6 @@ final class SmtpClient implements Closeable {
         return ctx;
     }
 
-    // ------------------------------------------------------------------ DATA
-
-    /**
-     * Gửi thân thư: dot-stuffing trên byte (thêm '.' ở đầu mỗi dòng bắt đầu bằng '.'; "đầu dòng" = đầu thư hoặc ngay sau CRLF),
-     * bảo đảm kết thúc bằng CRLF (chỉ thêm khi thiếu) rồi ".\r\n". Không sửa bất kỳ byte nào khác.
-     */
     void sendData(byte[] raw) throws IOException {
         byte[] buf = new byte[16384];
         int n = 0;
@@ -256,7 +224,7 @@ final class SmtpClient implements Closeable {
             buf[n++] = b;
             lineStart = b == '\n' && i > 0 && raw[i - 1] == '\r';
         }
-        if (raw.length > 0 && !lineStart) { // thư không kết thúc bằng CRLF
+        if (raw.length > 0 && !lineStart) {
             buf[n++] = '\r';
             buf[n++] = '\n';
         }
@@ -280,12 +248,6 @@ final class SmtpClient implements Closeable {
         return () -> f.cancel(false);
     }
 
-    // ------------------------------------------------------------------ giao dịch MAIL/RCPT/DATA
-
-    /**
-     * Chạy MAIL FROM, RCPT TO từng người, DATA và phân loại kết quả theo TỪNG người nhận.
-     * Kết quả luôn cùng thứ tự/số lượng với rcpts (khi Outcome.finished()).
-     */
     static Outcome transact(SmtpClient c, String mailFrom, List<String> rcpts, byte[] raw, long sizeLimit) throws IOException {
         int n = rcpts.size();
         if (sizeLimit > 0 && raw.length > sizeLimit) {
@@ -305,7 +267,7 @@ final class SmtpClient implements Closeable {
         List<Integer> accepted = new ArrayList<>();
         for (int i = 0; i < n; i++) {
             r = c.command("RCPT TO:<" + rcpts.get(i) + ">");
-            if (r.code() == 421) return Outcome.retry("RCPT TO: " + r.text()); // chưa gửi DATA nên thử MX khác là an toàn
+            if (r.code() == 421) return Outcome.retry("RCPT TO: " + r.text());
             if (r.positive()) accepted.add(i);
             else res[i] = new RcptResult(rcpts.get(i), r.failureStatus(), r.text());
         }
@@ -329,7 +291,7 @@ final class SmtpClient implements Closeable {
             c.sendData(raw);
             fin = c.readReply();
         } catch (IOException e) {
-            // Đã (một phần) gửi DATA: không thử MX khác để tránh nhân đôi thư; hàng đợi sẽ thử lại sau.
+
             String why = c.watchdogFired
                     ? "quá hạn " + (c.dataTimeoutMs / 1000) + "s cho giai đoạn DATA"
                     : describe(e);
@@ -351,11 +313,9 @@ final class SmtpClient implements Closeable {
             socket.setSoTimeout(5000);
             readReply();
         } catch (IOException ignored) {
-            // không quan trọng: thư đã có kết luận
+
         }
     }
-
-    // ------------------------------------------------------------------ tiện ích
 
     private static void fill(RcptResult[] res, List<String> rcpts, List<Integer> idx, RcptStatus st, String diag) {
         for (int i : idx) res[i] = new RcptResult(rcpts.get(i), st, diag);
@@ -367,14 +327,12 @@ final class SmtpClient implements Closeable {
         return l;
     }
 
-    /** Cùng một kết quả cho mọi người nhận. */
     static List<RcptResult> all(List<String> rcpts, RcptStatus st, String diag) {
         List<RcptResult> l = new ArrayList<>(rcpts.size());
         for (String r : rcpts) l.add(new RcptResult(r, st, diag));
         return l;
     }
 
-    /** Địa chỉ phong bì an toàn để đưa vào lệnh SMTP (chặn chèn CRLF/lệnh, ký tự điều khiển, khoảng trắng, < >). */
     static boolean isSafeAddress(String a, boolean allowEmpty) {
         if (a == null) return false;
         if (a.isEmpty()) return allowEmpty;

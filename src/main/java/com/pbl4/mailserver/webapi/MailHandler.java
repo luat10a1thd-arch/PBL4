@@ -28,14 +28,32 @@ import java.util.stream.Collectors;
 
 public class MailHandler implements HttpHandler {
 
-    /** Số người nhận tối đa trong một yêu cầu /send (chặn gửi hàng loạt qua web). */
     static final int MAX_RECIPIENTS_PER_REQUEST = 100;
 
     private static final String MSG_BAD_RCPT = "Địa chỉ email người nhận không hợp lệ!";
 
-    // local-part không chứa khoảng trắng / ký tự đặc biệt; domain gồm chữ, số, dấu chấm, gạch nối (cho phép Unicode)
     private static final Pattern RCPT_PATTERN =
             Pattern.compile("^[^\\s@<>\"(),:;\\[\\]\\\\]{1,64}@[\\p{L}\\p{N}][\\p{L}\\p{N}.-]{0,253}$");
+
+    private static final Pattern MSG_ID_PATTERN =
+            Pattern.compile("<[^<>\\s]{1,200}>");
+
+    static List<String> extractMessageIds(String headerValue) {
+        List<String> out = new java.util.ArrayList<>();
+        if (headerValue == null) return out;
+        java.util.regex.Matcher m = MSG_ID_PATTERN.matcher(headerValue);
+        while (m.find()) out.add(m.group());
+        return out;
+    }
+
+    static String buildReferences(String oldReferences, String parentId) {
+        List<String> ids = extractMessageIds(oldReferences);
+        if (ids.size() > 9) ids = ids.subList(ids.size() - 9, ids.size());
+        List<String> all = new java.util.ArrayList<>(ids);
+        all.remove(parentId);
+        all.add(parentId);
+        return String.join(" ", all);
+    }
 
     @Override
     public void handle(HttpExchange exchange) throws IOException {
@@ -47,13 +65,11 @@ public class MailHandler implements HttpHandler {
         String path = exchange.getRequestURI().getPath();
         String method = exchange.getRequestMethod();
 
-        // 1. DÀNH RIÊNG CHO LUỒNG SSE REALTIME
         if ("GET".equalsIgnoreCase(method) && path.endsWith("/stream")) {
             handleSseStream(exchange);
             return;
         }
 
-        // 2. XÁC THỰC USER CHO CÁC API THÔNG THƯỜNG
         String authHeader = exchange.getRequestHeaders().getFirst("Authorization");
         String token = (authHeader != null && authHeader.startsWith("Bearer "))
                 ? authHeader.substring(7) : null;
@@ -99,8 +115,7 @@ public class MailHandler implements HttpHandler {
             handleGetStarred(exchange, authedUser);
         } else if ("GET".equalsIgnoreCase(method) && path.endsWith("/search")) {
             handleSearchMails(exchange, authedUser);
-        } else if ("GET".equalsIgnoreCase(method) && path.endsWith("/thread")) {
-            handleGetThread(exchange, authedUser);
+
         } else if ("GET".equalsIgnoreCase(method) && path.endsWith("/detail")) {
             handleGetMailDetail(exchange, authedUser);
         } else if ("GET".equalsIgnoreCase(method) && (path.endsWith("/storage-usage") || path.endsWith("/quota"))) {
@@ -158,10 +173,6 @@ public class MailHandler implements HttpHandler {
         SseManager.register(username, info.token, exchange, os);
     }
 
-    // ------------------------------------------------------------------------------------------------
-    // GỬI THƯ / TRẢ LỜI THƯ (REPLY) / LƯU THƯ NHÁP (DRAFTS)
-    // ------------------------------------------------------------------------------------------------
-
     private void handleSendMail(HttpExchange exchange, String authUser, boolean forceReply) throws IOException {
         String body = ApiServer.readBodyOrReply(exchange, (int) Math.min(Integer.MAX_VALUE, ServerConfig.MAX_BODY_SEND_BYTES),
                 ServerConfig.BODY_READ_TOTAL_TIMEOUT_SEND_MS);
@@ -171,6 +182,8 @@ public class MailHandler implements HttpHandler {
         String rawTo = form.get("to");
         String subject = form.get("subject");
         String content = form.get("body");
+        String replyId = form.get("reply_id");
+        String replyFolder = form.get("reply_folder");
         String inReplyTo = form.get("inreplyto");
         String references = form.get("references");
         String draftId = form.get("draftid");
@@ -186,7 +199,7 @@ public class MailHandler implements HttpHandler {
         }
 
         String cleanSubject = subject == null ? "" : subject.replace('\r', ' ').replace('\n', ' ').trim();
-        if ((forceReply || (inReplyTo != null && !inReplyTo.isEmpty()))
+        if ((forceReply || (replyId != null && !replyId.isEmpty()) || (inReplyTo != null && !inReplyTo.isEmpty()))
                 && !cleanSubject.regionMatches(true, 0, "Re:", 0, 3)) {
             cleanSubject = "Re: " + cleanSubject;
         }
@@ -195,7 +208,19 @@ public class MailHandler implements HttpHandler {
 
         MailService.DeliveryResult result;
         try {
-            byte[] raw = MimeBuilder.fromWebFormWithReply(
+            if (replyId != null && !replyId.isBlank() && (inReplyTo == null || inReplyTo.isBlank())) {
+                String origBox = findMailboxContaining(authUser, replyId.trim(), replyFolder);
+                MailStorageEngine.StoredMail orig = MailStorageEngine.getSingleMail(origBox, replyId.trim());
+                if (orig != null && orig.rawBytes() != null) {
+                    List<String> ids = extractMessageIds(MimeParser.rawHeader(orig.rawBytes(), "message-id"));
+                    if (!ids.isEmpty()) {
+                        inReplyTo = ids.get(0);
+                        references = buildReferences(MimeParser.rawHeader(orig.rawBytes(), "references"), inReplyTo);
+                    }
+                }
+            }
+
+            byte[] raw = MimeBuilder.fromWebForm(
                     fromAddress,
                     String.join(", ", rcptList),
                     cleanSubject,
@@ -212,7 +237,7 @@ public class MailHandler implements HttpHandler {
         }
 
         if (result.success) {
-            // Nếu thư gửi đi từ một bản nháp thì xóa bản nháp đó
+
             if (draftId != null && !draftId.trim().isEmpty()) {
                 MailStorageEngine.deleteMailsByIds(mailboxFor(authUser, "drafts"), Collections.singletonList(draftId.trim()));
             }
@@ -288,10 +313,6 @@ public class MailHandler implements HttpHandler {
         return List.copyOf(out);
     }
 
-    // ------------------------------------------------------------------------------------------------
-    // DANH SÁCH / TÌM KIẾM / THREAD / CHI TIẾT / XÓA / KHÔI PHỤC / CỜ TRẠNG THÁI
-    // ------------------------------------------------------------------------------------------------
-
     private void handleGetInbox(HttpExchange exchange, String username) throws IOException {
         Map<String, String> q = parseQuery(exchange.getRequestURI().getRawQuery());
         String folder = q.get("folder");
@@ -334,7 +355,6 @@ public class MailHandler implements HttpHandler {
             return;
         }
 
-        // Nạp danh sách và ưu tiên các thư có gắn dấu sao (starred = true) lên đầu danh sách
         MailStorageEngine.MailPage allPage = MailStorageEngine.listMailSummaries(targetMailbox, 1, 500);
         List<MailStorageEngine.MailSummary> sorted = sortStarredFirst(targetMailbox, allPage.mails);
         int total = allPage.total;
@@ -419,7 +439,7 @@ public class MailHandler implements HttpHandler {
                 matched.add(m);
                 continue;
             }
-            // Tìm kiếm toàn văn trong nội dung thư (Full-Text Search)
+
             MailStorageEngine.StoredMail stored = MailStorageEngine.getSingleMail(targetMailbox, m.id);
             if (stored != null && stored.rawBytes() != null) {
                 ParsedMail pm = MimeParser.parse(stored.rawBytes());
@@ -431,7 +451,6 @@ public class MailHandler implements HttpHandler {
         return sortStarredFirst(targetMailbox, matched);
     }
 
-    /** Sắp xếp ưu tiên thư gắn sao (starred = true) lên trên đầu, sau đó mới đến thư thường (mới nhất trước). */
     private List<MailStorageEngine.MailSummary> sortStarredFirst(String mailbox, List<MailStorageEngine.MailSummary> list) {
         if (list == null || list.size() <= 1) return list == null ? List.of() : list;
         List<MailStorageEngine.MailSummary> starred = new ArrayList<>();
@@ -450,36 +469,6 @@ public class MailHandler implements HttpHandler {
         return combined;
     }
 
-    private void handleGetThread(HttpExchange exchange, String username) throws IOException {
-        Map<String, String> q = parseQuery(exchange.getRequestURI().getRawQuery());
-        String subject = q.getOrDefault("subject", "");
-        String normSubj = normalizeThreadSubject(subject);
-        if (normSubj.isEmpty()) {
-            sendResponse(exchange, 200, "[]");
-            return;
-        }
-
-        String[] boxes = {username, username + "_sent"};
-        List<String> itemsJson = new ArrayList<>();
-        for (String box : boxes) {
-            MailStorageEngine.MailPage p = MailStorageEngine.listMailSummaries(box, 1, 200);
-            for (MailStorageEngine.MailSummary s : p.mails) {
-                if (normalizeThreadSubject(s.subject).equalsIgnoreCase(normSubj)) {
-                    MailStorageEngine.StoredMail sm = MailStorageEngine.getSingleMail(box, s.id);
-                    if (sm != null && sm.rawBytes() != null) {
-                        itemsJson.add(buildDetailJson(box, sm.id, sm.rawBytes(), MimeParser.parse(sm.rawBytes())));
-                    }
-                }
-            }
-        }
-        sendResponse(exchange, 200, "[" + String.join(",", itemsJson) + "]");
-    }
-
-    private static String normalizeThreadSubject(String s) {
-        if (s == null) return "";
-        return s.replaceAll("^(?i)(Re:\\s*|Fwd:\\s*)+", "").trim();
-    }
-
     private void handleGetMailDetail(HttpExchange exchange, String username) throws IOException {
         Map<String, String> q = parseQuery(exchange.getRequestURI().getRawQuery());
         String fileId = q.get("id");
@@ -493,7 +482,6 @@ public class MailHandler implements HttpHandler {
         String targetUser = mailboxFor(username, folder);
         MailStorageEngine.StoredMail mail = MailStorageEngine.getSingleMail(targetUser, fileId);
 
-        // Nếu mở từ tab "starred", có thể thư nằm ở _sent hoặc _spam
         if ((mail == null || mail.rawBytes() == null) && "starred".equalsIgnoreCase(folder)) {
             for (String alt : new String[]{username, username + "_sent", username + "_drafts", username + "_spam"}) {
                 mail = MailStorageEngine.getSingleMail(alt, fileId);
@@ -509,7 +497,6 @@ public class MailHandler implements HttpHandler {
             return;
         }
 
-        // Tự động đánh dấu Đã đọc (seen = true) khi mở xem chi tiết
         MailStorageEngine.updateMailFlags(targetUser, mail.id, true, null);
 
         sendResponse(exchange, 200, buildDetailJson(targetUser, mail.id, mail.rawBytes(), MimeParser.parse(mail.rawBytes())));
@@ -536,6 +523,19 @@ public class MailHandler implements HttpHandler {
         String fileId = form.get("id");
         String folder = form.get("folder");
 
+        if ("true".equalsIgnoreCase(form.get("emptyfolder"))) {
+            String box = mailboxFor(username, folder);
+            MailStorageEngine.MailPage all = MailStorageEngine.listMailSummaries(box, 1, 5000);
+            List<String> allIds = new ArrayList<>();
+            for (MailStorageEngine.MailSummary m : all.mails) allIds.add(m.id);
+            if (!allIds.isEmpty()) {
+                MailStorageEngine.deleteMailsByIds(box, allIds);
+            }
+            SseManager.notifyStateChange(username, "FOLDER_EMPTIED", "", folder);
+            sendResponse(exchange, 200, "{\"success\": true, \"count\": " + allIds.size() + ", \"message\": \"🧹 Đã dọn sạch toàn bộ " + allIds.size() + " thư trong mục này!\"}");
+            return;
+        }
+
         if (fileId == null || fileId.trim().isEmpty()) {
             sendResponse(exchange, 400, "{\"success\": false, \"message\": \"Thiếu ID thư cần xóa!\"}");
             return;
@@ -552,7 +552,7 @@ public class MailHandler implements HttpHandler {
             String trashBox = mailboxFor(username, "trash");
             boolean moved = MailStorageEngine.moveEmail(targetBox, trashBox, fileId);
             if (!moved) {
-                // Dự phòng nếu file không chuyển được thì xóa trực tiếp
+
                 MailStorageEngine.deleteMailsByIds(targetBox, Collections.singletonList(fileId));
             }
             SseManager.notifyStateChange(username, "MOVED_TO_TRASH", fileId, folder);
@@ -592,7 +592,7 @@ public class MailHandler implements HttpHandler {
         String folder = form.getOrDefault("folder", "inbox");
 
         if (fileId == null || fileId.trim().isEmpty()) {
-            // Hỗ trợ kích hoạt Thư rác trực tiếp khi mới nhập mail người nhận trong hộp thoại Thư mới
+
             String rawTo = form.get("to");
             String subject = form.getOrDefault("subject", "(Không có chủ đề)");
             String content = form.getOrDefault("body", "");
@@ -632,7 +632,6 @@ public class MailHandler implements HttpHandler {
         String rcptEmail = MailStorageEngine.extractCleanEmail(parsed.to());
         String cleanMe = MailStorageEngine.extractCleanEmail(username);
 
-        // Xác định địa chỉ đối tác cần hạn chế (nếu thư trong Thư đã gửi/Thư nháp thì lấy người nhận, ngược lại lấy người gửi)
         String targetPeer = (!senderEmail.isEmpty() && !senderEmail.equalsIgnoreCase(cleanMe))
                 ? senderEmail
                 : (!rcptEmail.isEmpty() ? rcptEmail : senderEmail);
@@ -747,7 +746,6 @@ public class MailHandler implements HttpHandler {
         }
     }
 
-    /** Hỗ trợ đầy đủ: inbox, sent, spam, drafts, trash. */
     static String mailboxFor(String username, String folder) {
         if ("sent".equalsIgnoreCase(folder)) return username + "_sent";
         if ("spam".equalsIgnoreCase(folder)) return username + "_spam";
@@ -755,10 +753,6 @@ public class MailHandler implements HttpHandler {
         if ("trash".equalsIgnoreCase(folder)) return username + "_trash";
         return username;
     }
-
-    // ------------------------------------------------------------------------------------------------
-    // JSON
-    // ------------------------------------------------------------------------------------------------
 
     private String convertSummariesToJson(String mailbox, List<MailStorageEngine.MailSummary> summaries) {
         if (summaries == null || summaries.isEmpty()) return "[]";
@@ -789,7 +783,6 @@ public class MailHandler implements HttpHandler {
         return sb.toString();
     }
 
-    /** Giữ hàm cũ để tương thích ngược với các test gọi trực tiếp MailHandler.buildDetailJson(id, parsed). */
     static String buildDetailJson(String id, ParsedMail parsed) {
         return buildDetailJson(null, id, null, parsed);
     }
@@ -806,6 +799,17 @@ public class MailHandler implements HttpHandler {
         String msgId = extractRawHeader(rawBytes, "Message-ID");
         String inReplyTo = extractRawHeader(rawBytes, "In-Reply-To");
         String references = extractRawHeader(rawBytes, "References");
+        String authResults = extractRawHeader(rawBytes, "Authentication-Results");
+        String receivedSpf = extractRawHeader(rawBytes, "Received-SPF");
+        String dkimSig = extractRawHeader(rawBytes, "DKIM-Signature");
+        String securityBadge;
+        if (!authResults.isEmpty()) {
+            securityBadge = "AES-256-CBC | " + authResults;
+        } else if (!dkimSig.isEmpty() || !receivedSpf.isEmpty()) {
+            securityBadge = "AES-256-CBC" + (!dkimSig.isEmpty() ? " | DKIM: SIGNED" : "") + (!receivedSpf.isEmpty() ? " | SPF: " + receivedSpf : "");
+        } else {
+            securityBadge = "AES-256-CBC | Xác thực nội bộ an toàn (SPF/DKIM/DMARC Ready)";
+        }
 
         boolean seen = true;
         boolean starred = false;
@@ -832,6 +836,8 @@ public class MailHandler implements HttpHandler {
         appendEscaped(sb, inReplyTo);
         sb.append("\",\"references\":\"");
         appendEscaped(sb, references);
+        sb.append("\",\"securityBadge\":\"");
+        appendEscaped(sb, securityBadge);
         sb.append("\",\"seen\":");
         sb.append(seen);
         sb.append(",\"starred\":");

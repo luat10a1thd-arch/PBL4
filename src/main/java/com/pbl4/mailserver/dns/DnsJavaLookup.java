@@ -35,13 +35,6 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.LongSupplier;
 
-/**
- * Cài đặt {@link DnsLookup} bằng dnsjava.
- * - DNS_SERVERS (PBL4_DNS_SERVERS) tùy chọn: "ip", "ip:port", "[ipv6]:port", phân tách bằng dấu phẩy; rỗng = dùng cấu hình hệ thống.
- * - Có timeout + thử lại; cache nhỏ (LRU) theo TTL, TTL tối đa 5 phút, cache âm 30 giây, KHÔNG cache lỗi tạm.
- * - NXDOMAIN / NODATA => danh sách rỗng. SERVFAIL, REFUSED, timeout, lỗi mạng => DnsException.temporary() = true.
- *   Tên không hợp lệ => temporary() = false.
- */
 public final class DnsJavaLookup implements DnsLookup {
 
     private static final int TIMEOUT_SECONDS = 3;
@@ -60,7 +53,6 @@ public final class DnsJavaLookup implements DnsLookup {
             return size() > CACHE_MAX_ENTRIES;
         }
     };
-    /** Số truy vấn thật sự gửi đi (không tính cache) - dùng cho test. */
     final AtomicInteger networkQueries = new AtomicInteger();
 
     private record CacheEntry(List<?> value, long expiresAtNanos) {}
@@ -78,7 +70,6 @@ public final class DnsJavaLookup implements DnsLookup {
         this(buildResolver(ServerConfig.DNS_SERVERS), System::nanoTime);
     }
 
-    /** Dùng cho test: tiêm resolver (ví dụ trỏ tới DNS server giả trên localhost). */
     public DnsJavaLookup(Resolver resolver) {
         this(resolver, System::nanoTime);
     }
@@ -87,8 +78,6 @@ public final class DnsJavaLookup implements DnsLookup {
         this.resolver = resolver;
         this.nanoClock = nanoClock;
     }
-
-    // ------------------------------------------------------------------ API
 
     @Override
     public List<MxRecord> mx(String domain) throws DnsException {
@@ -168,7 +157,6 @@ public final class DnsJavaLookup implements DnsLookup {
             if (out.isEmpty() && firstError != null) {
                 throw firstError;
             }
-            // Một trong hai loại bị lỗi tạm: vẫn trả kết quả có được nhưng không cache (TTL 0)
             long ttl = firstError != null ? 0 : (out.isEmpty() ? NEGATIVE_TTL_SEC : positiveTtl);
             return new Loaded<>(List.copyOf(out), ttl);
         });
@@ -193,14 +181,11 @@ public final class DnsJavaLookup implements DnsLookup {
         return r.isEmpty() ? null : r.get(0);
     }
 
-    /** Xóa cache (dùng cho test / quản trị). */
     public void clearCache() {
         synchronized (cache) {
             cache.clear();
         }
     }
-
-    // ------------------------------------------------------------ nội bộ
 
     private Answer query(Name name, int type) throws DnsException {
         Message q = Message.newQuery(Record.newRecord(name, type, DClass.IN));
@@ -293,8 +278,6 @@ public final class DnsJavaLookup implements DnsLookup {
         return s.indexOf(':') >= 0 && s.matches("[0-9A-Fa-f:.]+");
     }
 
-    // ----------------------------------------------------- dựng resolver
-
     private static Resolver buildResolver(String serversCsv) {
         try {
             List<InetSocketAddress> servers = parseServers(serversCsv);
@@ -318,7 +301,6 @@ public final class DnsJavaLookup implements DnsLookup {
         }
     }
 
-    /** Phân tích DNS_SERVERS. Mục không hợp lệ bị bỏ qua (có cảnh báo). */
     static List<InetSocketAddress> parseServers(String csv) {
         List<InetSocketAddress> out = new ArrayList<>();
         if (csv == null) {
@@ -334,7 +316,6 @@ public final class DnsJavaLookup implements DnsLookup {
             if (p.startsWith("[")) {
                 int close = p.indexOf(']');
                 if (close < 0) {
-                    warn(p);
                     continue;
                 }
                 host = p.substring(1, close);
@@ -350,13 +331,11 @@ public final class DnsJavaLookup implements DnsLookup {
                 port = parsePort(p.substring(c + 1));
             }
             if (port <= 0 || host.isEmpty()) {
-                warn(p);
                 continue;
             }
             try {
                 out.add(new InetSocketAddress(InetAddress.getByName(host), port));
             } catch (UnknownHostException e) {
-                warn(p);
             }
         }
         return out;
@@ -369,9 +348,5 @@ public final class DnsJavaLookup implements DnsLookup {
         } catch (NumberFormatException e) {
             return -1;
         }
-    }
-
-    private static void warn(String entry) {
-        System.err.println("[WARNING] PBL4_DNS_SERVERS: bỏ qua mục không hợp lệ \"" + entry + "\"");
     }
 }

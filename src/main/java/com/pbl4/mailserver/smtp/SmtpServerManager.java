@@ -2,10 +2,6 @@ package com.pbl4.mailserver.smtp;
 
 import com.pbl4.mailserver.config.ServerConfig;
 
-/**
- * Cổng SMTP dev/test cũ (SMTP_PORT, mặc định 2525) chạy SubmissionHandler qua SmtpListener.
- * Giữ nguyên tên startServer()/stopServer(). Có thể start lại sau khi stop.
- */
 public class SmtpServerManager {
 
     private static SmtpListener listener;

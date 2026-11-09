@@ -19,24 +19,12 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 
-/**
- * Xác thực DKIM (RFC 6376 + RFC 8301): rsa-sha256, canonicalization simple/relaxed cho cả header và thân.
- * Kiểm tra bh (băm thân) và b (chữ ký), lấy khóa công khai từ DNS TXT selector._domainkey.domain.
- *
- * Quy ước kết quả:
- *   none      - thư không có chữ ký DKIM nào
- *   pass      - chữ ký hợp lệ
- *   fail      - chữ ký có cú pháp đúng nhưng sai (băm thân/chữ ký không khớp, hết hạn, khóa bị thu hồi, rsa-sha1, khóa &lt; 1024 bit)
- *   temperror - lỗi tạm khi tra DNS
- *   permerror - chữ ký/khóa sai cú pháp, thiếu thẻ bắt buộc, không tìm thấy bản ghi khóa
- */
 public final class DkimVerifier {
 
-    /** Số chữ ký tối đa được xét (từ trên xuống); phần còn lại bị bỏ qua để chống lạm dụng CPU/DNS. */
     static final int MAX_SIGNATURES = 5;
-    /** Phần header lớn hơn mức này => permerror duy nhất. */
+
     static final int MAX_HEADER_BYTES = 256 * 1024;
-    /** Một header DKIM-Signature dài hơn mức này bị coi là không hợp lệ. */
+
     static final int MAX_SIGNATURE_HEADER_CHARS = 16 * 1024;
     static final int MIN_KEY_BITS = 1024;
 
@@ -175,7 +163,6 @@ public final class DkimVerifier {
             return res("permerror", d, s, "b= rỗng");
         }
 
-        // ---- băm thân thư
         byte[] body = bodyCache.computeIfAbsent(bc, k -> DkimCommon.canonBody(raw, p.bodyStart(), bRelaxed));
         String l = tags.get("l");
         if (l != null) {
@@ -197,7 +184,6 @@ public final class DkimVerifier {
             return res("fail", d, s, "băm thân thư (bh) không khớp");
         }
 
-        // ---- khóa công khai từ DNS
         String keyName = s + "._domainkey." + d;
         List<String> txts;
         try {
@@ -215,7 +201,7 @@ public final class DkimVerifier {
                     break;
                 }
             } catch (IllegalArgumentException ignored) {
-                // bản ghi TXT khác (không phải khóa DKIM): bỏ qua
+
             }
         }
         if (kt == null) {
@@ -256,7 +242,6 @@ public final class DkimVerifier {
             return res("fail", d, s, "khóa RSA quá ngắn (" + pub.getModulus().bitLength() + " bit)");
         }
 
-        // ---- kiểm tra chữ ký
         List<Hdr> selected = DkimCommon.selectHeaders(p.headers(), hnames);
         byte[] headerData = DkimCommon.headerHashInput(selected, hRelaxed);
         String sigText = DkimCommon.stripBValue(rawHeader);

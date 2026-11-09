@@ -21,33 +21,26 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
-/**
- * Quản lý các kết nối SSE (realtime).
- * - notifyUser KHÔNG chặn: việc ghi đẩy vào executor nhỏ có hàng đợi giới hạn (đầy thì bỏ thông báo).
- * - Mỗi kết nối chỉ đăng ký MỘT key (username đầy đủ, chữ thường); tối đa SSE_MAX_PER_USER kết nối/user.
- * - Heartbeat định kỳ để phát hiện và dọn client chết; watchdog đóng client ghi quá lâu (client treo).
- */
 public class SseManager {
 
     private static final long WRITE_TIMEOUT_MS = 5_000;
-    // MailStorageEngine hiện gọi notifyUser 2 lần cùng một nội dung (clean user == email đầy đủ với hộp thư đến);
-    // cùng payload tới cùng client trong khoảng này được coi là trùng và bỏ qua.
+
     private static final long DEDUPE_WINDOW_MS = 5_000;
     private static final byte[] HEARTBEAT = ": ping\n\n".getBytes(StandardCharsets.UTF_8);
     private static final byte[] EVICTED = "event: evicted\ndata: too_many_connections\n\n".getBytes(StandardCharsets.UTF_8);
 
     static final class SseClient {
-        final String username;      // key đã chuẩn hóa
-        final String token;         // token phiên đã xác thực kết nối này
+        final String username;
+        final String token;
         final OutputStream os;
-        final Runnable closer;      // đóng kết nối thật (exchange.close())
+        final Runnable closer;
         final long createdAt = System.currentTimeMillis();
         volatile boolean closed;
         final AtomicBoolean closeOnce = new AtomicBoolean();
-        final Object writeLock = new Object(); // tuần tự hóa ghi theo từng client
-        volatile long writeStartedAt;   // != 0 khi đang ghi (watchdog dùng)
+        final Object writeLock = new Object();
+        volatile long writeStartedAt;
         volatile long lastWriteAt = createdAt;
-        String lastEventJson;      // chống gửi trùng cùng một thông báo (bảo vệ bởi writeLock)
+        String lastEventJson;
         long lastEventAt;
 
         SseClient(String username, String token, OutputStream os, Runnable closer) {
@@ -69,7 +62,6 @@ public class SseManager {
         }
     }
 
-    /** Kết quả đổi ticket. */
     public static final class TicketInfo {
         public final String username;
         public final String token;
@@ -85,7 +77,6 @@ public class SseManager {
     private static final ConcurrentHashMap<String, Ticket> tickets = new ConcurrentHashMap<>();
     private static final AtomicLong droppedNotifications = new AtomicLong();
 
-    // Executor ghi dữ liệu: hàng đợi giới hạn, daemon
     private static final ThreadPoolExecutor writer = new ThreadPoolExecutor(
             ServerConfig.SSE_NOTIFY_THREADS, ServerConfig.SSE_NOTIFY_THREADS,
             0L, TimeUnit.MILLISECONDS,
@@ -96,7 +87,6 @@ public class SseManager {
                 return t;
             });
 
-    // Scheduler: heartbeat, watchdog, dọn ticket. Chỉ lên lịch/đóng socket, không ghi dữ liệu.
     private static final ScheduledExecutorService scheduler;
 
     static {
@@ -117,9 +107,6 @@ public class SseManager {
         return username == null ? null : username.trim().toLowerCase(Locale.ROOT);
     }
 
-    // ===================== Ticket một lần dùng (thay token trên URL) =====================
-
-    /** Cấp ticket sống ~30s, dùng được đúng 1 lần. Trả null nếu hệ thống đang giữ quá nhiều ticket. */
     public static String issueTicket(String username, String token) {
         if (username == null || token == null || tickets.size() >= MAX_TICKETS) return null;
         byte[] b = new byte[24];
@@ -129,7 +116,6 @@ public class SseManager {
         return id;
     }
 
-    /** Đổi ticket lấy thông tin phiên; ticket bị xóa ngay (một lần dùng). */
     public static TicketInfo consumeTicket(String ticketId) {
         if (ticketId == null) return null;
         Ticket t = tickets.remove(ticketId);
@@ -142,9 +128,6 @@ public class SseManager {
         tickets.entrySet().removeIf(e -> e.getValue().expiresAt < now);
     }
 
-    // ===================== Đăng ký / hủy =====================
-
-    /** Đăng ký kết nối SSE (chỉ MỘT key = username đầy đủ). Đóng kết nối cũ nhất nếu vượt giới hạn/user. */
     public static void register(String username, String token, HttpExchange exchange, OutputStream os) {
         register(username, token, os, () -> {
             try { exchange.close(); } catch (Exception ignored) {}
@@ -162,7 +145,7 @@ public class SseManager {
             l.removeIf(c -> c.closed);
             l.add(client);
             while (l.size() > ServerConfig.SSE_MAX_PER_USER) {
-                evicted.add(l.remove(0)); // list theo thứ tự đăng ký => phần tử đầu là cũ nhất
+                evicted.add(l.remove(0));
             }
             return l;
         });
@@ -180,17 +163,15 @@ public class SseManager {
         });
     }
 
-    /** Đóng một client: gỡ khỏi danh sách rồi đóng kết nối thật (idempotent). */
     static void close(SseClient client) {
         if (client == null) return;
-        // CAS thay vì synchronized: watchdog phải đóng được client dù luồng ghi đang kẹt trong writeLock
+
         if (!client.closeOnce.compareAndSet(false, true)) return;
         client.closed = true;
         unregister(client);
         try { client.closer.run(); } catch (Exception ignored) {}
     }
 
-    // Đóng kèm gửi một sự kiện cuối, làm trên writer để không chặn luồng gọi
     private static void closeAsync(SseClient client, byte[] lastEvent) {
         try {
             writer.execute(() -> {
@@ -202,7 +183,6 @@ public class SseManager {
         }
     }
 
-    /** Đóng mọi SSE gắn với đúng phiên (token) đó - gọi khi logout/hết hạn. */
     public static void closeByToken(String username, String token) {
         String key = normalize(username);
         if (key == null || token == null) return;
@@ -213,7 +193,6 @@ public class SseManager {
         }
     }
 
-    /** Đóng mọi SSE của user - gọi khi bị khóa/xóa. */
     public static void closeUser(String username) {
         String key = normalize(username);
         if (key == null) return;
@@ -222,9 +201,6 @@ public class SseManager {
         for (SseClient c : list) close(c);
     }
 
-    // ===================== Gửi dữ liệu =====================
-
-    /** Bắn sự kiện realtime tới đúng hòm thư nhận mail. KHÔNG chặn: chỉ đẩy việc ghi vào hàng đợi. */
     public static void notifyUser(String username, String mailSummaryJson) {
         String key = normalize(username);
         if (key == null) return;
@@ -239,11 +215,10 @@ public class SseManager {
                 for (SseClient c : current) writeEvent(c, mailSummaryJson, bytes);
             });
         } catch (RejectedExecutionException e) {
-            droppedNotifications.incrementAndGet(); // hàng đợi đầy: bỏ thông báo (client vẫn có thể tải lại danh sách)
+            droppedNotifications.incrementAndGet();
         }
     }
 
-    // Ghi sự kiện new_mail, bỏ qua nếu vừa gửi đúng payload này cho client (chống trùng)
     private static void writeEvent(SseClient c, String json, byte[] bytes) {
         synchronized (c.writeLock) {
             long now = System.currentTimeMillis();
@@ -254,7 +229,6 @@ public class SseManager {
         }
     }
 
-    // Ghi tuần tự theo từng client; lỗi => đóng client
     private static void write(SseClient c, byte[] data) {
         if (c.closed) return;
         synchronized (c.writeLock) {
@@ -283,17 +257,16 @@ public class SseManager {
         for (Map.Entry<String, List<SseClient>> e : userClients.entrySet()) {
             for (SseClient c : e.getValue()) {
                 if (c.closed) { unregister(c); continue; }
-                if (!force && now - c.lastWriteAt < minGap) continue; // vừa có dữ liệu, chưa cần ping
+                if (!force && now - c.lastWriteAt < minGap) continue;
                 try {
                     writer.execute(() -> write(c, HEARTBEAT));
                 } catch (RejectedExecutionException ignored) {
-                    // hàng đợi đầy: bỏ qua nhịp này
+
                 }
             }
         }
     }
 
-    // Client treo (không đọc dữ liệu) làm lệnh ghi bị kẹt quá WRITE_TIMEOUT_MS => đóng socket để giải phóng luồng
     private static void watchdog() {
         long now = System.currentTimeMillis();
         for (Map.Entry<String, List<SseClient>> e : userClients.entrySet()) {
@@ -306,8 +279,6 @@ public class SseManager {
         }
     }
 
-    // ===================== Phục vụ test =====================
-
     static int clientCount(String username) {
         List<SseClient> l = userClients.get(normalize(username));
         return l == null ? 0 : l.size();
@@ -317,7 +288,6 @@ public class SseManager {
         return droppedNotifications.get();
     }
 
-    /** Chờ hàng đợi ghi xử lý xong (test). */
     static boolean awaitIdle(long timeoutMs) throws InterruptedException {
         long end = System.currentTimeMillis() + timeoutMs;
         while (System.currentTimeMillis() < end) {
@@ -331,9 +301,6 @@ public class SseManager {
         heartbeatAll(true);
     }
 
-    /**
-     * Bắn sự kiện đồng bộ 2 chiều (state_sync) tới mọi kết nối SSE của user khi đọc/gắn sao/xóa/khôi phục/gửi thư.
-     */
     public static void notifyStateChange(String username, String eventType, String mailId, String folder) {
         String key = normalize(username);
         if (key == null) return;

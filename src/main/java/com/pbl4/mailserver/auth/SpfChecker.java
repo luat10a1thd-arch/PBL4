@@ -14,14 +14,6 @@ import java.util.Locale;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-/**
- * Kiểm tra SPF theo RFC 7208.
- * Hỗ trợ: all, a, mx, ip4, ip6, include, exists, redirect; qualifier + - ~ ?; CIDR; macro %{s l o d i h v p c}
- * kèm bộ biến đổi (số, r, dấu phân cách) và %% %_ %-.
- * Giới hạn: tối đa 10 lượt tra DNS (include/a/mx/ptr/exists/redirect), tối đa 2 lượt tra rỗng (void),
- * tối đa 10 tên MX mỗi mechanism mx. "ptr" được phân tích cú pháp nhưng luôn coi là KHÔNG khớp (không tra DNS);
- * "exp" bị bỏ qua. Lỗi DNS tạm = TEMPERROR; cú pháp sai / vượt giới hạn = PERMERROR.
- */
 public final class SpfChecker {
 
     static final int MAX_DNS_LOOKUPS = 10;
@@ -54,7 +46,7 @@ public final class SpfChecker {
             }
             String local;
             String domain;
-            if (from.isEmpty()) {                       // null sender: kiểm tra theo HELO (RFC 7208 2.4)
+            if (from.isEmpty()) {
                 local = "postmaster";
                 domain = helo;
             } else {
@@ -79,8 +71,6 @@ public final class SpfChecker {
         }
     }
 
-    // ------------------------------------------------------------------ tiện ích
-
     static InetAddress parseIp(String s) {
         if (s == null) {
             return null;
@@ -94,10 +84,10 @@ public final class SpfChecker {
         }
         try {
             if (IPV4.matcher(t).matches() || (t.indexOf(':') >= 0 && IPV6.matcher(t).matches())) {
-                return InetAddress.getByName(t);   // chỉ literal nên không gây tra DNS
+                return InetAddress.getByName(t);
             }
         } catch (UnknownHostException ignored) {
-            // không hợp lệ
+
         }
         return null;
     }
@@ -163,7 +153,6 @@ public final class SpfChecker {
         return new SpfError(SpfResult.PERMERROR);
     }
 
-    /** Lỗi điều khiển luồng, không có stack trace. */
     private static final class SpfError extends RuntimeException {
         private static final long serialVersionUID = 1L;
         final transient SpfResult result;
@@ -177,11 +166,11 @@ public final class SpfChecker {
     private static final class Term {
         final char qualifier;
         final String name;
-        final String arg;        // domain-spec (có thể chứa macro) hoặc null
-        final int c4;            // CIDR v4 cho a/mx
-        final int c6;            // CIDR v6 cho a/mx
-        final byte[] net;        // ip4/ip6
-        final int bits;          // độ dài tiền tố ip4/ip6
+        final String arg;
+        final int c4;
+        final int c6;
+        final byte[] net;
+        final int bits;
 
         Term(char q, String name, String arg, int c4, int c6, byte[] net, int bits) {
             this.qualifier = q;
@@ -198,8 +187,6 @@ public final class SpfChecker {
         final List<Term> terms = new ArrayList<>();
         String redirect;
     }
-
-    // ------------------------------------------------------------------ phân tích bản ghi
 
     private static Parsed parse(String record) {
         Parsed out = new Parsed();
@@ -223,7 +210,7 @@ public final class SpfChecker {
                     }
                     exp = true;
                 }
-                continue;    // modifier lạ: bỏ qua theo RFC
+                continue;
             }
             out.terms.add(parseMechanism(tok));
         }
@@ -334,8 +321,6 @@ public final class SpfChecker {
         return new Term(q, name, null, 32, 128, net, bits);
     }
 
-    // ------------------------------------------------------------------ đánh giá
-
     private static final class Eval {
         final DnsLookup dns;
         final byte[] ip;
@@ -381,7 +366,7 @@ public final class SpfChecker {
             if (count > 1) {
                 throw perm();
             }
-            Parsed p = parse(rec);       // phân tích toàn bộ trước: cú pháp sai ở đâu cũng là PERMERROR
+            Parsed p = parse(rec);
             for (Term t : p.terms) {
                 if (matches(t, domain)) {
                     return qualifierResult(t.qualifier);
@@ -425,7 +410,7 @@ public final class SpfChecker {
                             return false;
                         case TEMPERROR:
                             throw new SpfError(SpfResult.TEMPERROR);
-                        default:      // NONE, PERMERROR
+                        default:
                             throw perm();
                     }
                 }
@@ -460,7 +445,7 @@ public final class SpfChecker {
                     return false;
                 }
                 case "ptr":
-                    return false;    // theo yêu cầu: coi như không khớp
+                    return false;
                 default:
                     throw perm();
             }
@@ -483,7 +468,7 @@ public final class SpfChecker {
             int n = 0;
             for (MxRecord mx : mxs) {
                 if (mx.host() == null || mx.host().equals(".") || mx.host().isEmpty()) {
-                    continue;            // null-MX
+                    continue;
                 }
                 if (++n > MAX_MX_NAMES) {
                     throw perm();
@@ -506,7 +491,6 @@ public final class SpfChecker {
             return false;
         }
 
-        /** Tra A+AAAA; danh sách rỗng được tính là void lookup. */
         private List<InetAddress> addrs(String host) {
             List<InetAddress> l;
             try {
@@ -541,8 +525,6 @@ public final class SpfChecker {
             return validDomain(d) ? d : null;
         }
 
-        // -------------------------------------------------------------- macro
-
         String expand(String spec, String domain) {
             StringBuilder sb = new StringBuilder();
             for (int i = 0; i < spec.length(); i++) {
@@ -573,7 +555,7 @@ public final class SpfChecker {
                 }
             }
             String r = sb.toString();
-            while (r.length() > 253) {          // RFC 7208 7.3: cắt nhãn bên trái cho tới khi đủ ngắn
+            while (r.length() > 253) {
                 int dot = r.indexOf('.');
                 if (dot < 0) {
                     break;

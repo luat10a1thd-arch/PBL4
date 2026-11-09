@@ -13,9 +13,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
-/**
- * Dựng thư RFC 5322 (byte[], CRLF) từ dữ liệu form web. Hàm tĩnh thuần túy.
- */
 public final class MimeBuilder {
 
     private static final String OPEN = "[ATTACHMENT:";
@@ -52,39 +49,24 @@ public final class MimeBuilder {
     private MimeBuilder() {
     }
 
-    /**
-     * @param body nội dung form; có thể chứa các tag {@code [ATTACHMENT:tên]base64[/ATTACHMENT]}
-     * @return thư hoàn chỉnh (header + thân) dạng byte, CRLF, luôn kết thúc bằng CRLF
-     */
     public static byte[] fromWebForm(String from, String to, String subject, String body) {
-        return build(from, to, subject, body, null, null, ServerConfig.MAIL_HOSTNAME);
+        return build(from, to, subject, body, ServerConfig.MAIL_HOSTNAME, null, null);
     }
 
-    /**
-     * Dựng thư trả lời (Reply) kèm header In-Reply-To và References phục vụ gom luồng hội thoại (Threading).
-     */
-    public static byte[] fromWebFormWithReply(
-            String from,
-            String to,
-            String subject,
-            String body,
-            String inReplyTo,
-            String references) {
-        return build(from, to, subject, body, inReplyTo, references, ServerConfig.MAIL_HOSTNAME);
+    public static byte[] fromWebForm(String from, String to, String subject, String body,
+                                     String inReplyTo, String references) {
+        return build(from, to, subject, body, ServerConfig.MAIL_HOSTNAME, inReplyTo, references);
     }
 
-    /** Bản có hostname để test không phụ thuộc biến môi trường. */
     static byte[] build(String from, String to, String subject, String body, String hostname) {
-        return build(from, to, subject, body, null, null, hostname);
+        return build(from, to, subject, body, hostname, null, null);
     }
 
-    static byte[] build(String from, String to, String subject, String body,
-                        String inReplyTo, String references, String hostname) {
+    static byte[] build(String from, String to, String subject, String body, String hostname,
+                        String inReplyTo, String references) {
         String f = cleanHeader(from);
         String t = cleanHeader(to);
         String s = cleanHeader(subject);
-        String irt = cleanHeader(inReplyTo);
-        String refs = cleanHeader(references);
 
         ParsedBody pb = parseBody(body == null ? "" : body);
         byte[] qp = encodeQuotedPrintable(pb.text());
@@ -96,15 +78,16 @@ public final class MimeBuilder {
         writeSubject(out, s);
         writeHeader(out, "Date", MessageNormalizer.formatDate(ZonedDateTime.now()));
         writeHeader(out, "Message-ID", MessageNormalizer.newMessageId(hostname));
+        writeHeader(out, "MIME-Version", "1.0");
+
+        String irt = cleanHeader(inReplyTo);
         if (!irt.isEmpty()) {
             writeHeader(out, "In-Reply-To", irt);
         }
+        String refs = cleanHeader(references);
         if (!refs.isEmpty()) {
             writeHeader(out, "References", refs);
-        } else if (!irt.isEmpty()) {
-            writeHeader(out, "References", irt);
         }
-        writeHeader(out, "MIME-Version", "1.0");
 
         if (pb.attachments().isEmpty()) {
             writeHeader(out, "Content-Type", "text/plain; charset=UTF-8");
@@ -153,7 +136,7 @@ public final class MimeBuilder {
             if (c == '\r' || c == '\n' || c == '\t' || c == '\u0085' || c == '\u2028' || c == '\u2029') {
                 sb.append(' ');
             } else if (c < 0x20 || c == 0x7F) {
-                // bỏ hẳn ký tự điều khiển
+
             } else {
                 sb.append(c);
             }
@@ -172,6 +155,7 @@ public final class MimeBuilder {
             writeHeader(out, "Subject", s);
             return;
         }
+
         List<String> words = encodeWords(s, 39, 45);
         StringBuilder sb = new StringBuilder("Subject:");
         for (int i = 0; i < words.size(); i++) {

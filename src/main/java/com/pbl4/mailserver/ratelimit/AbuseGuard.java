@@ -7,18 +7,6 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.LongSupplier;
 
-/**
- * Chống lạm dụng theo IP cho cổng SMTP: kết nối đồng thời, số thư mỗi phút, RCPT lỗi liên tiếp
- * (chống dò tài khoản) và cấm tạm IP vi phạm. Tự dọn bộ nhớ.
- *
- * API tĩnh theo CONTRACT dùng một Engine mặc định (cấu hình từ ServerConfig). Lớp {@link Engine}
- * cho phép dựng bản riêng (test, đồng hồ giả). IP loopback (127.x, ::1) được MIỄN theo mặc định
- * để test/healthcheck nội bộ không bị chặn.
- *
- * Bổ sung ngoài CONTRACT: {@link #release(String)} (SmtpListener gọi khi đóng kết nối đã được
- * allowConnect cho qua) và {@link #recordGoodRcpt(String)}.
- * Env tùy chọn: PBL4_ABUSE_BAD_RCPT_LIMIT (mặc định 10), PBL4_ABUSE_BAN_MS (mặc định 600000).
- */
 public final class AbuseGuard {
 
     private static final int DEFAULT_BAD_RCPT_LIMIT = 10;
@@ -60,17 +48,14 @@ public final class AbuseGuard {
         return DEFAULT;
     }
 
-    /** SmtpListener tự gọi. false = từ chối kết nối. true = đã cộng 1 kết nối, phải {@link #release}. */
     public static boolean allowConnect(String ip) {
         return DEFAULT.allowConnect(ip);
     }
 
-    /** Gọi trước DATA. false = IP vượt số thư/phút hoặc đang bị cấm tạm. */
     public static boolean allowMessage(String ip) {
         return DEFAULT.allowMessage(ip);
     }
 
-    /** Ghi nhận RCPT bị từ chối (user không tồn tại...). false = IP vừa bị cấm tạm, handler phải ngắt phiên. */
     public static boolean recordBadRcpt(String ip) {
         return DEFAULT.recordBadRcpt(ip);
     }
@@ -82,8 +67,6 @@ public final class AbuseGuard {
     public static void release(String ip) {
         DEFAULT.release(ip);
     }
-
-    // ==================================================================
 
     public static final class Engine {
         private static final long IDLE_FORGET_MS = 10 * 60_000L;
@@ -114,14 +97,6 @@ public final class AbuseGuard {
             T apply(State s, long now);
         }
 
-        /**
-         * @param maxConnPerIp   kết nối đồng thời tối đa mỗi IP (0 = không giới hạn)
-         * @param msgsPerMin     số thư tối đa mỗi IP mỗi phút (0 = không giới hạn)
-         * @param badRcptLimit   số RCPT lỗi liên tiếp thì cấm tạm
-         * @param banMs          thời gian cấm cơ bản (lần vi phạm lặp lại nhân lên, tối đa 6 lần)
-         * @param exemptLoopback miễn mọi giới hạn cho 127.x / ::1
-         * @param clock          đồng hồ ms (test dùng đồng hồ giả)
-         */
         public Engine(int maxConnPerIp, int msgsPerMin, int badRcptLimit, long banMs,
                       boolean exemptLoopback, LongSupplier clock) {
             this.maxConnPerIp = maxConnPerIp;
@@ -145,7 +120,7 @@ public final class AbuseGuard {
                 State s = map.computeIfAbsent(ip, k -> new State());
                 synchronized (s) {
                     if (s.dead) {
-                        continue; // vừa bị dọn: tạo lại
+                        continue;
                     }
                     s.touch = now;
                     return op.apply(s, now);
@@ -184,7 +159,7 @@ public final class AbuseGuard {
                     if (s.msgs >= msgsPerMin) return false;
                     s.msgs++;
                 }
-                s.badRcpt = 0; // có thư hợp lệ đi qua: chuỗi RCPT lỗi bị ngắt
+                s.badRcpt = 0;
                 return true;
             });
         }
@@ -213,7 +188,6 @@ public final class AbuseGuard {
             }
         }
 
-        /** Cấm tạm thủ công (quản trị/test). */
         public void ban(String ip, long ms) {
             if (ip == null || ip.isEmpty()) return;
             with(ip, (s, now) -> {
@@ -231,7 +205,6 @@ public final class AbuseGuard {
             }
         }
 
-        /** Số IP đang được theo dõi (test/thống kê). */
         public int trackedIps() {
             return map.size();
         }
@@ -243,7 +216,6 @@ public final class AbuseGuard {
             }
         }
 
-        /** Dọn các IP nhàn rỗi (không kết nối, hết cấm, lâu không hoạt động). */
         public void sweep() {
             long now = clock.getAsLong();
             long idle = map.size() > MAX_TRACKED_IPS ? 30_000L : IDLE_FORGET_MS;
@@ -256,6 +228,31 @@ public final class AbuseGuard {
                     }
                 }
             }
+        }
+
+        public void unban(String ip) {
+            if (ip == null || ip.isEmpty()) return;
+            State s = map.get(ip);
+            if (s == null) return;
+            synchronized (s) {
+                s.bannedUntil = 0L;
+                s.badRcpt = 0;
+                s.strikes = 0;
+            }
+        }
+
+        public java.util.Map<String, Long> bannedIps() {
+            long now = clock.getAsLong();
+            java.util.Map<String, Long> out = new java.util.LinkedHashMap<>();
+            for (Map.Entry<String, State> e : map.entrySet()) {
+                State s = e.getValue();
+                synchronized (s) {
+                    if (!s.dead && s.bannedUntil > now) {
+                        out.put(e.getKey(), Math.max(1L, (s.bannedUntil - now) / 1000L));
+                    }
+                }
+            }
+            return out;
         }
     }
 }

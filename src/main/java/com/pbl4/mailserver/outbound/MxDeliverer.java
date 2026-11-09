@@ -16,13 +16,8 @@ import java.util.List;
 import java.util.Locale;
 import java.util.function.Supplier;
 
-/**
- * Giao thư THẲNG tới MX của domain đích (OUTBOUND_MODE=DIRECT).
- * Không bao giờ ném exception; luôn trả đúng một RcptResult cho mỗi người nhận, cùng thứ tự.
- */
 public final class MxDeliverer implements Deliverer {
 
-    /** Cấu hình tách khỏi ServerConfig (các hằng static final) để test được từng chế độ. */
     public record Settings(String ehloHostname, int remotePort, String tlsMode, boolean useIpv6,
                            int connectTimeoutMs, int commandTimeoutMs, int dataTimeoutMs,
                            SSLContext requiredTlsContext) {
@@ -30,7 +25,6 @@ public final class MxDeliverer implements Deliverer {
             tlsMode = tlsMode == null ? "OPPORTUNISTIC" : tlsMode.trim().toUpperCase(Locale.ROOT);
         }
 
-        /** requiredTlsContext = null nghĩa là dùng kho tin cậy mặc định của JVM. */
         public static Settings fromServerConfig() {
             return new Settings(ServerConfig.MAIL_HOSTNAME, ServerConfig.OUTBOUND_REMOTE_PORT, ServerConfig.OUTBOUND_TLS,
                     ServerConfig.OUTBOUND_USE_IPV6, 20_000, 5 * 60_000, 10 * 60_000, null);
@@ -73,7 +67,6 @@ public final class MxDeliverer implements Deliverer {
             return SmtpClient.all(all, RcptStatus.FAILED, "Địa chỉ người gửi phong bì không hợp lệ");
         }
 
-        // Người nhận không an toàn bị loại ngay (FAILED), phần còn lại mới đi gửi.
         RcptResult[] results = new RcptResult[all.size()];
         List<String> good = new ArrayList<>();
         List<Integer> goodIdx = new ArrayList<>();
@@ -96,7 +89,6 @@ public final class MxDeliverer implements Deliverer {
         return out;
     }
 
-    /** Giao cho các người nhận hợp lệ; trả đúng good.size() kết quả. */
     private List<RcptResult> deliverValid(String from, String domainIn, List<String> good, byte[] raw) {
         String domain = normalizeHost(domainIn);
         if (domain.isEmpty()) return SmtpClient.all(good, RcptStatus.FAILED, "Thiếu domain đích");
@@ -108,7 +100,6 @@ public final class MxDeliverer implements Deliverer {
 
         DnsLookup d = dns.get();
 
-        // 1) MX
         List<MxRecord> mx;
         try {
             mx = d.mx(domain);
@@ -121,19 +112,18 @@ public final class MxDeliverer implements Deliverer {
         List<String> hosts = new ArrayList<>();
         boolean implicitMx = false;
         if (mx.isEmpty()) {
-            hosts.add(domain); // RFC 5321 mục 5.1: không có MX thì dùng chính domain (bản ghi A/AAAA)
+            hosts.add(domain);
             implicitMx = true;
         } else {
             for (MxRecord m : mx) {
                 String h = normalizeHost(m.host());
                 if (!h.isEmpty() && !".".equals(h)) hosts.add(h);
             }
-            if (hosts.isEmpty()) { // chỉ có null-MX (RFC 7505)
+            if (hosts.isEmpty()) {
                 return SmtpClient.all(good, RcptStatus.FAILED, "Domain " + domain + " khai báo null MX (\".\"): không nhận thư");
             }
         }
 
-        // 2) Lần lượt từng MX, từng IP
         List<String> notes = new ArrayList<>();
         for (String host : hosts) {
             List<InetAddress> addrs;
@@ -173,7 +163,6 @@ public final class MxDeliverer implements Deliverer {
                 "Không giao được tới MX nào của " + domain + ": " + SmtpClient.abbreviate(String.join("; ", notes), 1500));
     }
 
-    /** IPv4 trước; IPv6 chỉ khi OUTBOUND_USE_IPV6. */
     private List<InetAddress> order(List<InetAddress> addrs) {
         List<InetAddress> v4 = new ArrayList<>();
         List<InetAddress> v6 = new ArrayList<>();
@@ -217,7 +206,7 @@ public final class MxDeliverer implements Deliverer {
                         if (!e.positive()) return SmtpClient.Outcome.retry("EHLO sau STARTTLS bị từ chối: " + e.text());
                     } else if (required) {
                         return SmtpClient.Outcome.retry("STARTTLS bị từ chối: " + t.text());
-                    } // cơ hội + bị từ chối: tiếp tục không TLS trên cùng kết nối
+                    }
                 } else if (required) {
                     return SmtpClient.Outcome.retry("máy chủ không quảng cáo STARTTLS (OUTBOUND_TLS=REQUIRED)");
                 }

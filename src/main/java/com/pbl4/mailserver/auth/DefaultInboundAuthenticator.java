@@ -15,19 +15,6 @@ import java.util.logging.Logger;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-/**
- * Xác thực thư đến: SPF + DKIM + DMARC, chèn Authentication-Results, ra quyết định.
- *
- * Chính sách (theo thứ tự):
- *  1. DMARC_ENFORCE và (nhiều header From) -> REJECT 550 5.7.1
- *  2. DMARC_ENFORCE và DMARC lỗi tạm mà chính sách có thể là quarantine/reject -> TEMPFAIL 451 4.7.1
- *  3. DMARC_ENFORCE và DMARC fail với p=reject -> REJECT 550 5.7.1
- *  4. SPF_MODE=ENFORCE: SPF fail -> REJECT 550 5.7.23; SPF temperror (DMARC không pass) -> TEMPFAIL 451 4.7.1
- *  5. DMARC_ENFORCE và DMARC fail với p=quarantine -> SPAM
- *  6. còn lại ACCEPT.
- * Mọi Authentication-Results có authserv-id trùng MAIL_HOSTNAME của mình trong thư đến đều bị gỡ (chống giả mạo).
- * Thông điệp SMTP chỉ dùng ASCII (RFC 5321).
- */
 public final class DefaultInboundAuthenticator implements InboundAuthenticator {
 
     private static final Logger LOG = Logger.getLogger(DefaultInboundAuthenticator.class.getName());
@@ -35,13 +22,8 @@ public final class DefaultInboundAuthenticator implements InboundAuthenticator {
     private static final Pattern COMMENT = Pattern.compile("\\([^)]*\\)");
     private static final Pattern QUOTED = Pattern.compile("\"(?:[^\"\\\\]|\\\\.)*\"");
 
-    /** Cấu hình lúc chạy. spfMode: OFF | MARK | ENFORCE. */
     public record Settings(String authservId, String spfMode, boolean dmarcEnforce) {
 
-        /**
-         * authservId lấy từ ServerConfig.MAIL_HOSTNAME (cùng nguồn với Received và HELO);
-         * spfMode và dmarcEnforce vẫn đọc từ biến môi trường PBL4_*.
-         */
         static Settings fromEnv() {
             String host = ServerConfig.MAIL_HOSTNAME;
             String spf = env("PBL4_SPF_MODE", "MARK").toUpperCase(Locale.ROOT);
@@ -85,7 +67,6 @@ public final class DefaultInboundAuthenticator implements InboundAuthenticator {
         boolean spfEnforce = spfMode.equals("ENFORCE");
         String authserv = st.authservId().toLowerCase(Locale.ROOT);
 
-        // ---- tách header / thân (header được xem là Latin-1 để không mất byte nào)
         int hdrEnd;
         if (raw.length >= 2 && raw[0] == '\r' && raw[1] == '\n') {
             hdrEnd = 0;
@@ -96,9 +77,9 @@ public final class DefaultInboundAuthenticator implements InboundAuthenticator {
         List<Field> fields = splitHeaders(new String(raw, 0, hdrEnd, StandardCharsets.ISO_8859_1));
         List<Field> kept = new ArrayList<>();
         List<String> fromValues = new ArrayList<>();
-                for (Field f : fields) {
+        for (Field f : fields) {
             if (f.name.equalsIgnoreCase("authentication-results")) {
-                continue;     // thư từ ngoài vào cổng MX: gỡ MỌI Authentication-Results có sẵn (người gửi có thể tự chèn giả)
+                continue;
             }
             if (f.name.equalsIgnoreCase("from")) {
                 fromValues.add(f.value());
@@ -106,7 +87,6 @@ public final class DefaultInboundAuthenticator implements InboundAuthenticator {
             kept.add(f);
         }
 
-        // ---- danh tính
         String helo = ctx.heloName() == null ? "" : ctx.heloName().trim();
         String env = ctx.envelopeFrom() == null ? "" : ctx.envelopeFrom().trim();
         if (env.startsWith("<") && env.endsWith(">")) {
@@ -114,14 +94,12 @@ public final class DefaultInboundAuthenticator implements InboundAuthenticator {
         }
         String spfDomain = env.isEmpty() ? helo : (env.indexOf('@') >= 0 ? env.substring(env.lastIndexOf('@') + 1) : env);
 
-        // ---- SPF, DKIM
         SpfResult spf = spfOff ? null : SpfChecker.check(ctx.clientIp(), helo, env);
         List<DkimResult> dkim = DkimVerifier.verify(raw);
         if (dkim == null) {
             dkim = List.of();
         }
 
-        // ---- DMARC
         Set<String> fromDomains = new LinkedHashSet<>();
         for (String v : fromValues) {
             fromDomains.addAll(extractDomains(v));
@@ -137,7 +115,6 @@ public final class DefaultInboundAuthenticator implements InboundAuthenticator {
                     spfDomain, dkim);
         }
 
-        // ---- quyết định
         boolean enforce = st.dmarcEnforce();
         InboundVerdict verdict = null;
         String fd = dmarc.fromDomain() == null ? "" : clean(dmarc.fromDomain());
@@ -160,7 +137,6 @@ public final class DefaultInboundAuthenticator implements InboundAuthenticator {
             return verdict;
         }
 
-        // ---- chèn Authentication-Results rồi ghép lại thư
         String ar = buildAuthResults(st.authservId(), spf, env, helo, dkim, dmarc, enforce);
         ByteArrayOutputStream out = new ByteArrayOutputStream(raw.length + ar.length() + 64);
         out.writeBytes(ar.getBytes(StandardCharsets.ISO_8859_1));
@@ -181,8 +157,6 @@ public final class DefaultInboundAuthenticator implements InboundAuthenticator {
         }
         return new InboundVerdict(Action.ACCEPT, 250, "2.0.0 OK", result);
     }
-
-    // ------------------------------------------------------------------ Authentication-Results
 
     private static String buildAuthResults(String authserv, SpfResult spf, String env, String helo,
                                            List<DkimResult> dkim, DmarcResult dmarc, boolean enforce) {
@@ -236,10 +210,7 @@ public final class DefaultInboundAuthenticator implements InboundAuthenticator {
         return token(s);
     }
 
-    // ------------------------------------------------------------------ header
-
     private record Field(String name, String text) {
-        /** Giá trị đã gỡ gấp dòng, bỏ phần "Tên:". */
         String value() {
             int c = text.indexOf(':');
             String v = c < 0 ? "" : text.substring(c + 1);
@@ -268,23 +239,6 @@ public final class DefaultInboundAuthenticator implements InboundAuthenticator {
             out.add(new Field(c < 0 ? "" : t.substring(0, c).trim(), t));
         }
         return out;
-    }
-
-    /** authserv-id (chữ thường) của một Authentication-Results; bỏ qua comment đứng đầu. */
-    private static String authservOf(String value) {
-        String v = value.trim();
-        while (v.startsWith("(")) {
-            int close = v.indexOf(')');
-            if (close < 0) {
-                return "";
-            }
-            v = v.substring(close + 1).trim();
-        }
-        int end = 0;
-        while (end < v.length() && !Character.isWhitespace(v.charAt(end)) && v.charAt(end) != ';') {
-            end++;
-        }
-        return v.substring(0, end).toLowerCase(Locale.ROOT);
     }
 
     private static Set<String> extractDomains(String fromValue) {

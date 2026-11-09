@@ -24,8 +24,8 @@ public class SessionManager {
 
     private static class Session {
         final String username;
-        final long seq; // thứ tự tạo (đơn điệu tăng) để xác định phiên cũ nhất, không phụ thuộc độ phân giải đồng hồ
-        // volatile: nhiều luồng HTTP cùng đọc/ghi lastAccess
+        final long seq;
+
         volatile long lastAccess;
 
         Session(String username) {
@@ -36,11 +36,11 @@ public class SessionManager {
     }
 
     private static final ConcurrentHashMap<String, Session> sessions = new ConcurrentHashMap<>();
-    // Khóa riêng cho thao tác tạo phiên để giới hạn số phiên/user không bị vượt khi đăng nhập song song
+
     private static final Object CREATE_LOCK = new Object();
 
     static {
-        // Daemon để không giữ JVM khi tắt server; quét mỗi phút để đóng SSE của phiên hết hạn kịp thời
+
         ScheduledExecutorService cleaner = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread t = new Thread(r, "session-cleaner");
             t.setDaemon(true);
@@ -53,7 +53,6 @@ public class SessionManager {
         return username == null ? "" : username.trim().toLowerCase(Locale.ROOT);
     }
 
-    /** Tạo phiên mới. Mỗi user tối đa SESSION_MAX_PER_USER phiên, vượt thì xóa phiên cũ nhất. */
     public static String createSession(String username) {
         byte[] bytes = new byte[32];
         RANDOM.nextBytes(bytes);
@@ -76,7 +75,7 @@ public class SessionManager {
             }
             sessions.put(token, new Session(user));
         }
-        // Đóng SSE gắn với phiên bị đẩy ra (ngoài khóa để không giữ lock khi I/O)
+
         for (String old : evicted) SseManager.closeByToken(user, old);
         return token;
     }
@@ -113,7 +112,7 @@ public class SessionManager {
     public static void invalidate(String token) {
         if (token == null) return;
         Session s = sessions.remove(token);
-        // Đăng xuất / bị khóa: đóng luôn kết nối SSE của phiên này
+
         if (s != null) SseManager.closeByToken(s.username, token);
     }
 

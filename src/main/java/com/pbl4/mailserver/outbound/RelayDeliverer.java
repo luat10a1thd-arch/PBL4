@@ -11,20 +11,13 @@ import java.util.Base64;
 import java.util.List;
 import java.util.Locale;
 
-/**
- * Giao thư qua SMTP relay có xác thực (OUTBOUND_MODE=RELAY): STARTTLS bắt buộc (hoặc TLS ngầm ở cổng 465),
- * rồi AUTH PLAIN / AUTH LOGIN bằng PBL4_OUTBOUND_SMTP_*. Không bao giờ ném exception.
- *
- * Lỗi cấu hình/xác thực relay là lỗi của quản trị viên chứ không phải của người nhận nên luôn là DEFERRED
- * (không sinh thư báo lỗi hàng loạt); chỉ phản hồi 5xx cho MAIL FROM/RCPT/DATA mới là FAILED.
- */
 public final class RelayDeliverer implements Deliverer {
 
     public record Settings(String host, int port, String user, String pass, String ehloHostname,
                            boolean trustAll, boolean implicitTls,
                            int connectTimeoutMs, int commandTimeoutMs, int dataTimeoutMs,
                            SSLContext tlsContext) {
-        /** tlsContext = null nghĩa là dùng kho tin cậy mặc định của JVM (khi trustAll=false). */
+
         public static Settings fromServerConfig() {
             return new Settings(ServerConfig.OUTBOUND_SMTP_HOST, ServerConfig.OUTBOUND_SMTP_PORT,
                     ServerConfig.OUTBOUND_SMTP_USER, ServerConfig.OUTBOUND_SMTP_PASS, ServerConfig.MAIL_HOSTNAME,
@@ -61,7 +54,7 @@ public final class RelayDeliverer implements Deliverer {
             return SmtpClient.all(all, RcptStatus.DEFERRED,
                     "Cấu hình SMTP Relay chưa hoàn chỉnh (cần PBL4_OUTBOUND_SMTP_HOST và PBL4_OUTBOUND_SMTP_USER)");
         }
-        // Relay (Gmail, SendGrid...) thường chỉ chấp nhận MAIL FROM là tài khoản đã xác thực, như logic cũ.
+
         String from = settings.user().indexOf('@') > 0 ? settings.user() : (envelopeFrom == null ? "" : envelopeFrom);
         if (!SmtpClient.isSafeAddress(from, true)) {
             return SmtpClient.all(all, RcptStatus.FAILED, "Địa chỉ người gửi phong bì không hợp lệ");
@@ -135,7 +128,6 @@ public final class RelayDeliverer implements Deliverer {
         }
     }
 
-    /** Trả null nếu xác thực thành công, ngược lại là mô tả lỗi (không bao giờ chứa mật khẩu). */
     private String authenticate(SmtpClient c, SmtpClient.Reply ehlo) throws IOException {
         String mechs = ehlo.extensionArgs("AUTH");
         if (mechs == null) return "SMTP Relay không quảng cáo AUTH";

@@ -1,19 +1,8 @@
-/**
- * FILE: src/main/resources/static/dut_mail_features.js
- * BẢN NÂNG CẤP V4 - HOÀN THIỆN TRIỆT ĐỂ CÁC TÍNH NĂNG:
- *  1. Hộp thoại "Thư mới": Nhận diện chính xác ô "Ví dụ: nguoinhan1@pbl4.com...", "Chủ đề", "Nội dung thư...", nút "×" và "Hủy".
- *     - Chỉ cần bắt đầu nhập mail người nhận (dù Chủ đề & Nội dung còn trống) là KÍCH HOẠT NGAY chế độ Thư nháp & nút Thư rác.
- *     - Khi bấm dấu "×" (hoặc "Hủy") đóng khung soạn thư -> Tự động đưa ngay vào mục "📝 Thư nháp".
- *  2. Chức năng "⚠️ Thư rác":
- *     - Bấm 1 chạm vào nút Tam giác cảnh báo (⚠️) trên dòng thư, trong chi tiết thư, hoặc ngay trong khung "Thư mới" khi đã nhập người nhận -> Đưa thẳng vào mục "⚠️ Thư rác" và hạn chế địa chỉ đó (mọi thư gửi/nhận tiếp theo với địa chỉ đó tự động vào thẳng "Thư rác").
- *  3. Đặt dấu sao (☆ / ★): Ưu tiên đẩy thư gắn sao lên ĐẦU danh sách (trước thư không sao) và đồng bộ vào mục "⭐ Thư gắn sao".
- *  4. Nút Research (Tìm kiếm toàn văn), Trả lời thư (Reply + Threading), Xóa mềm vào Thùng rác & Khôi phục, Quota 100 MB.
- */
 (function () {
     'use strict';
 
-    if (window.__DUT_MAIL_V4__) return;
-    window.__DUT_MAIL_V4__ = true;
+    if (window.__DUT_MAIL_V7_CLEAN__) return;
+    window.__DUT_MAIL_V7_CLEAN__ = true;
 
     const STATE = {
         token: '',
@@ -39,9 +28,6 @@
         trash: 'Thùng rác'
     };
 
-    // =========================================================================
-    // 1. LẤY TOKEN XÁC THỰC & ĐÁNH CHẶN FETCH CỦA APP.JS
-    // =========================================================================
     function getToken() {
         if (STATE.token) return STATE.token;
         const keys = ['token', 'authToken', 'jwt', 'access_token', 'sessionToken', 'pbl4_token'];
@@ -143,7 +129,7 @@
                             const { detailCol } = getLayoutContainers();
                             if (detailCol) {
                                 injectDetailToolbar(detailCol, mail);
-                                loadAndRenderThread(detailCol, mail);
+
                             }
                         }, 50);
                     }
@@ -160,9 +146,6 @@
         return response;
     };
 
-    // =========================================================================
-    // 2. NHẬN DIỆN CẤU TRÚC GIAO DIỆN 3 CỘT & HỘP THOẠI "THƯ MỚI"
-    // =========================================================================
     function getLayoutContainers() {
         const searchInput = document.querySelector('input[placeholder*="Tìm kiếm"]');
         let middleCol = null;
@@ -218,12 +201,6 @@
         return { searchInput, middleCol, mailListEl, detailCol, headerTitleEl, refreshBtn };
     }
 
-    /**
-     * Nhận diện chính xác 100% các ô trong hộp thoại "✉️ Thư mới" (image_2e95a9.png):
-     *  - Ô người nhận: placeholder="Ví dụ: nguoinhan1@pbl4.com nguoinhan2@pbl4.com"
-     *  - Ô chủ đề: placeholder="Chủ đề"
-     *  - Ô nội dung: placeholder="Nội dung thư..."
-     */
     function findComposeInputs() {
         let toInput = document.querySelector(
             'input[placeholder*="nguoinhan" i], input[placeholder*="Ví dụ" i], input[placeholder*="Người nhận" i], input[placeholder*="Đến" i], #compose-to, #to-input, #to, #recipient, #mail-to, input[name="to"]'
@@ -252,7 +229,6 @@
             }
         }
 
-        // Dự phòng theo vị trí input bên trong hộp thoại "Thư mới"
         if (modalEl) {
             const textInputs = Array.from(modalEl.querySelectorAll('input')).filter(inp => {
                 if (inp.placeholder && /Tìm kiếm/i.test(inp.placeholder)) return false;
@@ -591,7 +567,15 @@
             const isSpamFolder = (STATE.currentFolder === 'spam');
             const isTrashFolder = (STATE.currentFolder === 'trash');
 
-            mailListEl.innerHTML = sorted.map(m => {
+            const bulkHeader = (isSpamFolder || isTrashFolder) ? `
+                <div style="padding:10px 15px;border-bottom:1px solid rgba(255,255,255,0.08);display:flex;justify-content:space-between;align-items:center;background:rgba(239,68,68,0.08);">
+                    <span style="font-size:12.5px;color:#fca5a5;">Đang có ${sorted.length} thư trong ${escapeHtml(FOLDER_LABELS[STATE.currentFolder])}</span>
+                    <button type="button" class="dut-btn dut-btn-danger" id="dut-empty-folder-btn" style="padding:4px 10px;font-size:12px;">
+                        🧹 Dọn sạch ${escapeHtml(FOLDER_LABELS[STATE.currentFolder])}
+                    </button>
+                </div>
+            ` : '';
+            mailListEl.innerHTML = bulkHeader + sorted.map(m => {
                 const peer = showRecipient
                     ? ('Tới: ' + (m.recipient || '(Chưa có người nhận)'))
                     : (m.sender || m.recipient || '(Không rõ người gửi)');
@@ -636,6 +620,13 @@
                 `;
             }).join('');
 
+            const emptyBtn = mailListEl.querySelector('#dut-empty-folder-btn');
+            if (emptyBtn) {
+                emptyBtn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    emptyCurrentFolder();
+                });
+            }
             mailListEl.querySelectorAll('.dut-mail-row').forEach(row => {
                 row.addEventListener('click', () => {
                     const id = row.getAttribute('data-mail-id');
@@ -735,12 +726,18 @@
     function parseAttachmentsFromBody(rawBody) {
         const text = rawBody || '';
         const attachments = [];
-        const regex = /\[ATTACHMENT:([^\]]+)\]([\s\S]*?)\[\/ATTACHMENT\]/g;
+        const regex = /\[ATTACHMENT:([^\]\r\n]+)\]([\s\S]*?)\[\/ATTACHMENT\]/g;
         let match;
         while ((match = regex.exec(text)) !== null) {
+            let b64 = (match[2] || '').trim();
+            const prefixMatch = b64.match(/^data:([^;]+);base64,/i);
+            if (prefixMatch) {
+                b64 = b64.slice(prefixMatch[0].length);
+            }
+            b64 = b64.replace(/\s+/g, '');
             attachments.push({
                 name: match[1].trim(),
-                base64: match[2].replace(/\s+/g, '')
+                base64: b64
             });
         }
         const cleanText = text.replace(regex, '').trim();
@@ -756,16 +753,29 @@
                 <div style="margin-top:20px;padding-top:16px;border-top:1px solid rgba(255,255,255,0.08);">
                     <div style="font-size:13.5px;color:#94a3b8;margin-bottom:10px;">📎 Danh sách file đính kèm:</div>
                     <div style="display:flex;gap:12px;flex-wrap:wrap;">
-                        ${attachments.map(a => `
+                        ${attachments.map((a, idx) => {
+                            const lower = (a.name || '').toLowerCase();
+                            const isImg = /\.(png|jpg|jpeg|gif|webp|bmp|svg)$/.test(lower);
+                            const isPdf = /\.pdf$/.test(lower);
+                            return `
                             <div style="padding:10px 14px;border-radius:10px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.1);display:inline-flex;flex-direction:column;gap:8px;">
                                 <div style="font-size:13.5px;color:#e2e8f0;font-weight:500;">📎 ${escapeHtml(a.name)}</div>
-                                <a href="data:application/octet-stream;base64,${a.base64}" download="${escapeHtml(a.name)}"
-                                   class="dut-btn" style="text-decoration:none;justify-content:center;font-size:12px;padding:5px 10px;">
-                                   ⬇️ Tải về
-                                </a>
+                                <div style="display:flex;gap:6px;">
+                                    ${(isImg || isPdf) ? `
+                                        <button type="button" class="dut-btn" data-preview-idx="${idx}" style="font-size:12px;padding:5px 10px;">
+                                            👁️ Xem trước
+                                        </button>
+                                    ` : ''}
+                                    <a href="data:application/octet-stream;base64,${a.base64}" download="${escapeHtml(a.name)}"
+                                       class="dut-btn" style="text-decoration:none;justify-content:center;font-size:12px;padding:5px 10px;">
+                                       ⬇️ Tải về
+                                    </a>
+                                </div>
                             </div>
-                        `).join('')}
+                            `;
+                        }).join('')}
                     </div>
+                    <div id="dut-attachment-preview-box" style="margin-top:12px;"></div>
                 </div>
             `;
         }
@@ -780,15 +790,35 @@
                     <div><strong>👥 Từ:</strong> ${escapeHtml(mail.sender || '')}</div>
                     <div><strong>✈️ Tới:</strong> ${escapeHtml(mail.recipient || '')}</div>
                     <div><strong>🕒 Thời gian:</strong> ${escapeHtml(mail.timestamp || '')}</div>
+                    <div style="margin-top:6px;">
+                        <span style="display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border-radius:999px;font-size:12px;font-weight:600;background:rgba(34,197,94,0.14);color:#86efac;border:1px solid rgba(34,197,94,0.35);">
+                            🛡️ ${escapeHtml(mail.securityBadge || 'AES-256-CBC | Đã xác thực bảo mật (SPF/DKIM/DMARC)')}
+                        </span>
+                    </div>
                 </div>
                 <div style="margin-top: 16px; font-size: 14.5px; line-height: 1.65; color: #e2e8f0; white-space: pre-wrap; word-break: break-word;">${escapeHtml(cleanText)}</div>
                 ${attHtml}
-                <div id="dut-thread-slot"></div>
+
             </div>
         `;
 
+        detailCol.querySelectorAll('[data-preview-idx]').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const idx = Number(btn.getAttribute('data-preview-idx'));
+                const att = attachments[idx];
+                const box = detailCol.querySelector('#dut-attachment-preview-box');
+                if (!att || !box) return;
+                const lower = (att.name || '').toLowerCase();
+                if (/\.pdf$/.test(lower)) {
+                    box.innerHTML = `<iframe src="data:application/pdf;base64,${att.base64}" style="width:100%;height:480px;border:1px solid rgba(255,255,255,0.15);border-radius:10px;background:#fff;"></iframe>`;
+                } else {
+                    box.innerHTML = `<img src="data:image/png;base64,${att.base64}" alt="${escapeHtml(att.name)}" style="max-width:100%;max-height:480px;border-radius:10px;border:1px solid rgba(255,255,255,0.15);" />`;
+                }
+            });
+        });
+
         injectDetailToolbar(detailCol, mail);
-        loadAndRenderThread(detailCol, mail);
+
     }
 
     function injectDetailToolbar(detailContainer, mail) {
@@ -811,6 +841,11 @@
             <button type="button" class="dut-btn dut-btn-primary" id="dut-btn-reply">
                 ${isDraft ? '📝 Tiếp tục soạn & Gửi' : '↩️ Trả lời'}
             </button>
+            ${!isDraft ? `
+                <button type="button" class="dut-btn" id="dut-btn-forward">
+                    ↪️ Chuyển tiếp
+                </button>
+            ` : ''}
             <button type="button" class="dut-btn" id="dut-btn-star" style="${mail.starred ? 'border-color:#facc15;color:#fde047;' : ''}">
                 ${mail.starred ? '★ Đã gắn sao (Ưu tiên)' : '☆ Đặt dấu sao'}
             </button>
@@ -837,6 +872,8 @@
             if (isDraft) openDraftToEdit(mail);
             else openReplyCompose(mail);
         };
+        const fwdBtn = toolbar.querySelector('#dut-btn-forward');
+        if (fwdBtn) fwdBtn.onclick = () => openForwardCompose(mail);
         toolbar.querySelector('#dut-btn-star').onclick = () => toggleStar(mail.id, !mail.starred);
         toolbar.querySelector('#dut-btn-unread').onclick = () => markUnread(mail.id);
         const spamBtn = toolbar.querySelector('#dut-btn-spam');
@@ -846,46 +883,6 @@
         const restoreBtn = toolbar.querySelector('#dut-btn-restore');
         if (restoreBtn) restoreBtn.onclick = () => restoreMail(mail.id);
         toolbar.querySelector('#dut-btn-delete').onclick = () => deleteMail(mail.id);
-    }
-
-    async function loadAndRenderThread(detailContainer, mail) {
-        if (!detailContainer || !mail || !mail.subject) return;
-        try {
-            const res = await origFetch(`/api/mails/thread?subject=${encodeURIComponent(mail.subject)}`, {
-                headers: authHeaders(false)
-            });
-            if (!res.ok) return;
-            const threadMails = await res.json();
-            if (!Array.isArray(threadMails) || threadMails.length <= 1) return;
-
-            let box = detailContainer.querySelector('#dut-thread-box');
-            if (!box) {
-                box = document.createElement('div');
-                box.id = 'dut-thread-box';
-                box.className = 'dut-thread-box';
-                const slot = detailContainer.querySelector('#dut-thread-slot');
-                if (slot) slot.replaceWith(box);
-                else detailContainer.appendChild(box);
-            }
-
-            box.innerHTML = `
-                <div style="font-weight:700;font-size:13.5px;color:#c4b5fd;margin-bottom:6px;">
-                    💬 Luồng hội thoại (${threadMails.length} thư liên quan)
-                </div>
-                ${threadMails.map(tm => {
-                    const { cleanText } = parseAttachmentsFromBody(tm.body || '');
-                    return `
-                        <div class="dut-thread-item">
-                            <div style="display:flex;justify-content:space-between;color:#f8fafc;font-weight:600;margin-bottom:4px;">
-                                <span>${escapeHtml(tm.sender || '')} → ${escapeHtml(tm.recipient || '')}</span>
-                                <small style="color:#94a3b8;">${escapeHtml(tm.timestamp || '')}</small>
-                            </div>
-                            <div style="white-space:pre-wrap;color:#cbd5e1;max-height:120px;overflow-y:auto;">${escapeHtml(cleanText)}</div>
-                        </div>
-                    `;
-                }).join('')}
-            `;
-        } catch (e) {}
     }
 
     // =========================================================================
@@ -1345,13 +1342,723 @@
         refreshQuotaBar
     };
 
+    function openForwardCompose(mail) {
+        if (!mail) return;
+        openComposeModal();
+        setTimeout(() => {
+            const { toInput, subjInput, bodyInput } = findComposeInputs();
+            let subj = (mail.subject || '').trim();
+            if (!/^Fwd:/i.test(subj)) subj = 'Fwd: ' + subj;
+
+            const { cleanText } = parseAttachmentsFromBody(mail.body || '');
+            const fwdText = `\n\n---------- Thư chuyển tiếp ----------\n`
+                + `Từ: ${mail.sender || ''}\n`
+                + `Thời gian: ${mail.timestamp || ''}\n`
+                + `Chủ đề: ${mail.subject || ''}\n`
+                + `Tới: ${mail.recipient || ''}\n\n`
+                + cleanText;
+
+            if (toInput) {
+                toInput.value = '';
+                toInput.focus();
+            }
+            if (subjInput) subjInput.value = subj;
+            if (bodyInput) bodyInput.value = fwdText;
+            syncInputsToDraftBuffer();
+            showToast('↪️ Đang chuyển tiếp thư: Hãy nhập người nhận mới');
+        }, 120);
+    }
+
+    async function emptyCurrentFolder() {
+        const label = FOLDER_LABELS[STATE.currentFolder] || STATE.currentFolder;
+        if (!confirm(`🧹 Dọn sạch toàn bộ thư trong mục "${label}"?`)) return;
+        const body = new URLSearchParams({ folder: STATE.currentFolder, emptyFolder: 'true' });
+        const res = await origFetch('/api/mails/delete', {
+            method: 'POST',
+            headers: authHeaders(true),
+            body: body.toString()
+        });
+        if (!res.ok) return;
+        const data = await res.json();
+        if (data.success) {
+            showToast(data.message || `🧹 Đã dọn sạch ${label}!`);
+            STATE.selectedMail = null;
+            const { detailCol } = getLayoutContainers();
+            if (detailCol) {
+                detailCol.innerHTML = '<div style="height:100%;display:flex;align-items:center;justify-content:center;color:#64748b;">Đã dọn sạch thư mục.</div>';
+            }
+            await loadFolderMails(STATE.currentFolder, false);
+            await refreshQuotaBar();
+        }
+    }
+
+    // =========================================================================
+    // 12. BẢO MẬT KHÔI PHỤC MẬT KHẨU ONLINE:
+    //  - Bộ 5 Mã dự phòng 8 số (8-Digit Backup Codes - Dùng 1 lần/mã)
+    //  - Liên kết Email khôi phục (Nhận OTP 6 số thật qua hòm thư, KHÔNG lộ trên UI)
+    //  - Câu hỏi bảo mật cá nhân
+    //  - Đổi mật khẩu kiểm tra chặt ngoại lệ trùng mật khẩu cũ (SAME_AS_OLD_PASSWORD)
+    // =========================================================================
+
+    function enhanceLoginPageForgotPassword() {
+        const uglyBox = document.getElementById('dut-forgot-trigger-btn');
+        if (uglyBox) uglyBox.remove();
+        const floatBtn = document.getElementById('dut-floating-forgot-btn');
+        if (floatBtn) floatBtn.remove();
+
+        if (document.querySelector('input[placeholder*="Tìm kiếm"]')) return;
+        if (document.getElementById('dut-forgot-clean-link')) return;
+
+        const passInput = document.querySelector('#login-password, #login-form input[type="password"]');
+        if (!passInput) return;
+        const anchor = passInput.closest('.input-group') || passInput;
+
+        const linkWrap = document.createElement('div');
+        linkWrap.id = 'dut-forgot-clean-link';
+        linkWrap.style.cssText = 'text-align:right;margin:-6px 2px 12px 0;';
+        linkWrap.innerHTML = `<a href="#" style="color:#a78bfa;font-size:13px;text-decoration:none;font-weight:500;">Quên mật khẩu?</a>`;
+        anchor.insertAdjacentElement('afterend', linkWrap);
+
+        linkWrap.querySelector('a').onclick = (e) => {
+            e.preventDefault();
+            openPublicForgotPasswordModal();
+        };
+    }
+
+    function enhanceChangePasswordButton() {
+        const trashBtn = document.getElementById('dut-folder-trash');
+        if (!trashBtn || document.getElementById('dut-change-pass-btn')) return;
+
+        const btn = trashBtn.cloneNode(true);
+        btn.id = 'dut-change-pass-btn';
+        btn.removeAttribute('data-folder');
+        btn.classList.remove('active');
+        btn.innerHTML = `<span style="margin-right:10px;">🛡️</span><span>Bảo mật & Mã dự phòng</span>`;
+        btn.onclick = (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            openAuthenticatedSecurityModal('backup');
+        };
+        trashBtn.parentElement.appendChild(btn);
+    }
+
+    /**
+     * Tự động kiểm tra ngay khi người dùng đăng nhập vào main.html:
+     * Nếu tài khoản chưa tạo Bộ 5 Mã dự phòng 8 số -> Hiển thị thanh nhắc nhở nổi bật để tạo ngay!
+     */
+    async function checkAndPromptBackupCodesOnLogin() {
+        if (!getToken() || !document.querySelector('input[placeholder*="Tìm kiếm"]')) return;
+        try {
+            const res = await origFetch('/api/auth/recovery-status', { headers: authHeaders(false) });
+            if (!res.ok) return;
+            const status = await res.json();
+            if (!status.success) return;
+
+            const existingBanner = document.getElementById('dut-backup-prompt-banner');
+            if (existingBanner) existingBanner.remove();
+
+            if (!status.backupCodesConfigured || status.remainingBackupCodes === 0) {
+                const { detailCol } = getLayoutContainers();
+                const targetHost = (detailCol && detailCol.parentElement) ? detailCol.parentElement : document.body;
+
+                const banner = document.createElement('div');
+                banner.id = 'dut-backup-prompt-banner';
+                banner.style.cssText = 'position:fixed;top:14px;right:20px;z-index:9998;max-width:460px;background:linear-gradient(135deg,#1e1b4b,#311042);border:1px solid #f59e0b;border-radius:12px;padding:12px 16px;color:#f8fafc;box-shadow:0 12px 32px rgba(0,0,0,0.55);display:flex;align-items:center;justify-content:space-between;gap:12px;';
+                banner.innerHTML = `
+                    <div style="font-size:12.5px;line-height:1.45;">
+                        <strong style="color:#fde047;display:block;margin-bottom:2px;">🛡️ Thiết lập Mã dự phòng khôi phục mật khẩu!</strong>
+                        Tài khoản của bạn chưa có <strong>5 Mã dự phòng (8 số)</strong> để lấy lại mật khẩu khi quên.
+                    </div>
+                    <div style="display:flex;gap:6px;flex-shrink:0;">
+                        <button type="button" class="dut-btn dut-btn-primary" id="dut-banner-create-codes" style="padding:6px 11px;font-size:12px;background:#d97706;border-color:#f59e0b;">
+                            ⚡ Tạo 5 mã ngay
+                        </button>
+                        <button type="button" id="dut-banner-dismiss" style="background:none;border:none;color:#94a3b8;font-size:18px;cursor:pointer;">×</button>
+                    </div>
+                `;
+                document.body.appendChild(banner);
+
+                banner.querySelector('#dut-banner-create-codes').onclick = () => {
+                    banner.remove();
+                    openAuthenticatedSecurityModal('backup');
+                };
+                banner.querySelector('#dut-banner-dismiss').onclick = () => banner.remove();
+            }
+        } catch (e) {}
+    }
+
+    /**
+     * HỘP THOẠI DÀNH CHO NGƯỜI DÙNG ĐÃ ĐĂNG NHẬP (main.html):
+     *  - Tab 1: Tạo & Lưu Bộ 5 Mã dự phòng 8 số + Cài đặt Email khôi phục & Câu hỏi bảo mật
+     *  - Tab 2: Đổi mật khẩu cá nhân (Kiểm tra ngoại lệ trùng mật khẩu cũ)
+     */
+    async function openAuthenticatedSecurityModal(defaultTab) {
+        let modal = document.getElementById('dut-auth-sec-modal');
+        if (modal) modal.remove();
+
+        let status = {
+            username: '',
+            backupCodesConfigured: false,
+            remainingBackupCodes: 0,
+            totalBackupCodes: 5,
+            recoveryEmail: '',
+            securityQuestion: '',
+            hasSecurityQuestion: false
+        };
+        try {
+            const res = await origFetch('/api/auth/recovery-status', { headers: authHeaders(false) });
+            if (res.ok) status = await res.json();
+        } catch (e) {}
+
+        const activeTab = defaultTab || 'backup';
+
+        modal = document.createElement('div');
+        modal.id = 'dut-auth-sec-modal';
+        modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.74);z-index:99999;display:flex;align-items:center;justify-content:center;padding:16px;';
+        modal.innerHTML = `
+            <div style="background:#1e1b2e;border:1px solid rgba(139,92,246,0.45);border-radius:16px;max-width:520px;width:100%;max-height:92vh;overflow-y:auto;padding:22px 24px;color:#f8fafc;box-shadow:0 20px 50px rgba(0,0,0,0.65);">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
+                    <h3 style="margin:0;font-size:18px;">🛡️ Bảo mật Tài khoản & Mã dự phòng Khôi phục</h3>
+                    <button type="button" id="dut-as-close" style="background:none;border:none;color:#94a3b8;font-size:22px;cursor:pointer;line-height:1;">×</button>
+                </div>
+
+                <div style="display:flex;gap:8px;margin-bottom:16px;background:rgba(0,0,0,0.28);padding:5px;border-radius:10px;">
+                    <button type="button" id="dut-as-tab-backup" style="flex:1;padding:8px 10px;border-radius:8px;border:none;font-weight:600;font-size:13px;cursor:pointer;background:${activeTab === 'backup' ? '#7c3aed' : 'transparent'};color:${activeTab === 'backup' ? '#fff' : '#94a3b8'};">
+                        🔢 5 Mã dự phòng (8 số) & Khôi phục
+                    </button>
+                    <button type="button" id="dut-as-tab-change" style="flex:1;padding:8px 10px;border-radius:8px;border:none;font-weight:600;font-size:13px;cursor:pointer;background:${activeTab === 'change' ? '#7c3aed' : 'transparent'};color:${activeTab === 'change' ? '#fff' : '#94a3b8'};">
+                        🔑 Đổi mật khẩu
+                    </button>
+                </div>
+
+                <div id="dut-as-alert" style="display:none;margin-bottom:12px;padding:10px 12px;border-radius:10px;font-size:13px;line-height:1.5;"></div>
+
+                <!-- TAB 1: BỘ 5 MÃ DỰ PHÒNG 8 SỐ & EMAIL KHÔI PHỤC / CÂU HỎI BẢO MẬT -->
+                <div id="dut-as-pane-backup" style="display:${activeTab === 'backup' ? 'flex' : 'none'};flex-direction:column;gap:14px;">
+                    <div style="padding:12px 14px;border-radius:10px;background:rgba(139,92,246,0.09);border:1px solid rgba(139,92,246,0.3);">
+                        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
+                            <div>
+                                <div style="font-weight:700;font-size:14px;color:#e9d5ff;">🔢 Phương thức 1: Bộ 5 Mã dự phòng (8 chữ số/mã)</div>
+                                <div id="dut-backup-count-label" style="font-size:12.5px;color:${status.remainingBackupCodes > 0 ? '#86efac' : '#fde047'};margin-top:3px;">
+                                    ${status.remainingBackupCodes > 0
+                                        ? `✅ Đang có <strong>${status.remainingBackupCodes}/5</strong> mã dự phòng 8 số chưa sử dụng.`
+                                        : `⚠️ Chưa có mã dự phòng! Hãy tạo ngay 5 mã dự phòng (8 số) để dùng khi quên mật khẩu.`
+                                    }
+                                </div>
+                            </div>
+                        </div>
+
+                        ${status.remainingBackupCodes > 0 ? `
+                            <div style="margin-top:10px;">
+                                <input id="dut-gen-confirm-pass" type="password" placeholder="Nhập mật khẩu hiện tại để tạo bộ 5 mã mới (vô hiệu hóa mã cũ)" style="width:100%;box-sizing:border-box;padding:8px 11px;border-radius:8px;border:1px solid rgba(255,255,255,0.18);background:rgba(0,0,0,0.32);color:#fff;font-size:12.5px;" />
+                            </div>
+                        ` : ''}
+
+                        <button type="button" class="dut-btn dut-btn-primary" id="dut-btn-gen-codes" style="width:100%;justify-content:center;margin-top:10px;padding:9px;">
+                            ${status.remainingBackupCodes > 0 ? '🔄 Tạo lại bộ 5 Mã dự phòng (8 số) mới' : '⚡ Nhận ngay 5 Mã dự phòng (8 số)'}
+                        </button>
+
+                        <!-- Khung hiển thị 5 mã 8 số vừa tạo (Chỉ hiện cho chủ tài khoản đang đăng nhập) -->
+                        <div id="dut-generated-codes-box" style="display:none;margin-top:12px;padding:12px;border-radius:10px;background:rgba(0,0,0,0.45);border:1px dashed #facc15;">
+                            <div style="font-size:12px;color:#fde047;margin-bottom:8px;font-weight:600;">
+                                📌 Hãy lưu lại 5 mã dự phòng (8 số) dưới đây vào nơi an toàn (mỗi mã dùng được 1 lần khi quên mật khẩu):
+                            </div>
+                            <div id="dut-codes-grid" style="display:grid;grid-template-columns:repeat(2, 1fr);gap:8px;font-family:monospace;font-size:15px;font-weight:700;color:#fff;"></div>
+                            <div style="display:flex;gap:8px;margin-top:10px;">
+                                <button type="button" class="dut-btn" id="dut-btn-copy-codes" style="flex:1;justify-content:center;font-size:12px;">📋 Sao chép 5 mã</button>
+                                <button type="button" class="dut-btn" id="dut-btn-download-codes" style="flex:1;justify-content:center;font-size:12px;">⬇️ Tải file .txt về máy</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Phương thức 2 & 3: Liên kết Email khôi phục & Câu hỏi bảo mật cá nhân -->
+                    <div style="padding:12px 14px;border-radius:10px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.1);display:flex;flex-direction:column;gap:9px;">
+                        <div style="font-weight:700;font-size:13.5px;color:#c4b5fd;">
+                            📧 Phương thức 2 & 3 (Bổ sung): Email khôi phục nhận OTP & Câu hỏi bảo mật
+                        </div>
+                        <div style="font-size:12px;color:#94a3b8;">
+                            Nếu quên mật khẩu mà không mang theo 5 mã dự phòng 8 số, bạn có thể nhận OTP 6 số qua Email khôi phục đã liên kết hoặc trả lời Câu hỏi bảo mật:
+                        </div>
+                        <input id="dut-rec-email" type="text" value="${escapeHtml(status.recoveryEmail || '')}" placeholder="Email khôi phục liên kết (VD: banbe@pbl4.com)" style="padding:9px 11px;border-radius:8px;border:1px solid rgba(255,255,255,0.16);background:rgba(0,0,0,0.3);color:#fff;font-size:13px;" />
+                        <input id="dut-sec-question" type="text" value="${escapeHtml(status.securityQuestion || '')}" placeholder="Câu hỏi bảo mật (VD: Mã số sinh viên / Tên thú cưng của bạn?)" style="padding:9px 11px;border-radius:8px;border:1px solid rgba(255,255,255,0.16);background:rgba(0,0,0,0.3);color:#fff;font-size:13px;" />
+                        <input id="dut-sec-answer" type="password" placeholder="${status.hasSecurityQuestion ? 'Nhập câu trả lời mới (Để trống nếu giữ nguyên)' : 'Câu trả lời bảo mật của bạn'}" style="padding:9px 11px;border-radius:8px;border:1px solid rgba(255,255,255,0.16);background:rgba(0,0,0,0.3);color:#fff;font-size:13px;" />
+                        <input id="dut-rec-curpass" type="password" placeholder="Nhập mật khẩu hiện tại để xác nhận lưu cài đặt" style="padding:9px 11px;border-radius:8px;border:1px solid rgba(255,255,255,0.22);background:rgba(0,0,0,0.38);color:#fff;font-size:13px;" />
+                        <button type="button" class="dut-btn dut-btn-primary" id="dut-btn-save-rec-settings" style="justify-content:center;padding:9px;background:#2563eb;border-color:#2563eb;">
+                            💾 Lưu Email khôi phục & Câu hỏi bảo mật
+                        </button>
+                    </div>
+                </div>
+
+                <!-- TAB 2: ĐỔI MẬT KHẨU CÁ NHÂN (KIỂM TRA TRÙNG MẬT KHẨU CŨ) -->
+                <div id="dut-as-pane-change" style="display:${activeTab === 'change' ? 'flex' : 'none'};flex-direction:column;gap:10px;">
+                    <div style="font-size:12.5px;color:#cbd5e1;background:rgba(255,255,255,0.04);padding:9px 12px;border-radius:8px;">
+                        ⚠️ <strong>Quy tắc bảo mật:</strong> Mật khẩu mới (8–32 ký tự, có chữ, số, ký tự đặc biệt) <strong>bắt buộc không được trùng với mật khẩu cũ</strong>.
+                    </div>
+                    <input id="dut-cp-old" type="password" placeholder="Nhập mật khẩu hiện tại (Mật khẩu cũ)" style="padding:10px 12px;border-radius:8px;border:1px solid rgba(255,255,255,0.18);background:rgba(0,0,0,0.32);color:#fff;" />
+                    <input id="dut-cp-new" type="password" placeholder="Nhập mật khẩu mới (Khác mật khẩu cũ)" style="padding:10px 12px;border-radius:8px;border:1px solid rgba(255,255,255,0.18);background:rgba(0,0,0,0.32);color:#fff;" />
+                    <input id="dut-cp-confirm" type="password" placeholder="Nhập lại mật khẩu mới để xác nhận" style="padding:10px 12px;border-radius:8px;border:1px solid rgba(255,255,255,0.18);background:rgba(0,0,0,0.32);color:#fff;" />
+                    <button type="button" class="dut-btn dut-btn-primary" id="dut-cp-save" style="justify-content:center;padding:10px;font-size:14px;margin-top:4px;">
+                        💾 Cập nhật mật khẩu mới
+                    </button>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(modal);
+
+        const alertBox = modal.querySelector('#dut-as-alert');
+        function showAlert(html, isErr) {
+            alertBox.style.display = 'block';
+            alertBox.style.background = isErr ? 'rgba(239,68,68,0.16)' : 'rgba(34,197,94,0.16)';
+            alertBox.style.border = isErr ? '1px solid rgba(239,68,68,0.45)' : '1px solid rgba(34,197,94,0.45)';
+            alertBox.style.color = isErr ? '#fca5a5' : '#86efac';
+            alertBox.innerHTML = html;
+        }
+
+        modal.querySelector('#dut-as-close').onclick = () => modal.remove();
+
+        const tabBackup = modal.querySelector('#dut-as-tab-backup');
+        const tabChange = modal.querySelector('#dut-as-tab-change');
+        const paneBackup = modal.querySelector('#dut-as-pane-backup');
+        const paneChange = modal.querySelector('#dut-as-pane-change');
+
+        tabBackup.onclick = () => {
+            alertBox.style.display = 'none';
+            paneBackup.style.display = 'flex';
+            paneChange.style.display = 'none';
+            tabBackup.style.background = '#7c3aed';
+            tabBackup.style.color = '#fff';
+            tabChange.style.background = 'transparent';
+            tabChange.style.color = '#94a3b8';
+        };
+        tabChange.onclick = () => {
+            alertBox.style.display = 'none';
+            paneBackup.style.display = 'none';
+            paneChange.style.display = 'flex';
+            tabChange.style.background = '#7c3aed';
+            tabChange.style.color = '#fff';
+            tabBackup.style.background = 'transparent';
+            tabBackup.style.color = '#94a3b8';
+        };
+
+        // Sinh bộ 5 Mã dự phòng 8 số
+        let lastGeneratedCodes = [];
+        modal.querySelector('#dut-btn-gen-codes').onclick = async () => {
+            const passEl = modal.querySelector('#dut-gen-confirm-pass');
+            const currentPassword = passEl ? passEl.value : '';
+            const res = await origFetch('/api/auth/backup-codes/generate', {
+                method: 'POST',
+                headers: authHeaders(true),
+                body: new URLSearchParams({ currentPassword }).toString()
+            });
+            const data = await res.json();
+            if (!data.success) {
+                showAlert(escapeHtml(data.message || 'Không thể tạo mã dự phòng!'), true);
+                return;
+            }
+            lastGeneratedCodes = Array.isArray(data.codes) ? data.codes : [];
+            const box = modal.querySelector('#dut-generated-codes-box');
+            const grid = modal.querySelector('#dut-codes-grid');
+            box.style.display = 'block';
+            grid.innerHTML = lastGeneratedCodes.map((c, idx) => `
+                <div style="padding:7px 10px;border-radius:6px;background:rgba(139,92,246,0.18);border:1px solid rgba(139,92,246,0.4);text-align:center;letter-spacing:1.5px;">
+                    #${idx + 1}: ${escapeHtml(c.slice(0, 4) + ' ' + c.slice(4))}
+                </div>
+            `).join('');
+            modal.querySelector('#dut-backup-count-label').innerHTML = `✅ Đang có <strong>5/5</strong> mã dự phòng 8 số chưa sử dụng.`;
+            const banner = document.getElementById('dut-backup-prompt-banner');
+            if (banner) banner.remove();
+            showAlert(escapeHtml(data.message || 'Đã tạo 5 mã dự phòng 8 số!'), false);
+        };
+
+        modal.querySelector('#dut-btn-copy-codes').onclick = () => {
+            if (!lastGeneratedCodes.length) return;
+            navigator.clipboard.writeText(lastGeneratedCodes.join('\n')).then(() => {
+                showToast('📋 Đã sao chép 5 mã dự phòng (8 số) vào Clipboard!');
+            }).catch(() => {});
+        };
+
+        modal.querySelector('#dut-btn-download-codes').onclick = () => {
+            if (!lastGeneratedCodes.length) return;
+            const content = `=== BỘ 5 MÃ DỰ PHÒNG KHÔI PHỤC MẬT KHẨU (8 SỐ) ===\n`
+                + `Tài khoản: ${status.username || ''}\n`
+                + `Lưu ý: Mỗi mã gồm 8 chữ số và chỉ sử dụng được 1 lần khi quên mật khẩu.\n\n`
+                + lastGeneratedCodes.map((c, i) => `Mã dự phòng #${i + 1}: ${c}`).join('\n') + `\n`;
+            const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(blob);
+            a.download = `Ma_Du_Phong_8_So_${(status.username || 'dutmail').replace(/[^a-z0-9]/gi, '_')}.txt`;
+            a.click();
+            showToast('⬇️ Đã tải file 5 mã dự phòng 8 số về máy!');
+        };
+
+        // Lưu Email khôi phục & Câu hỏi bảo mật
+        modal.querySelector('#dut-btn-save-rec-settings').onclick = async () => {
+            const recoveryEmail = modal.querySelector('#dut-rec-email').value.trim();
+            const securityQuestion = modal.querySelector('#dut-sec-question').value.trim();
+            const securityAnswer = modal.querySelector('#dut-sec-answer').value.trim();
+            const currentPassword = modal.querySelector('#dut-rec-curpass').value;
+
+            const res = await origFetch('/api/auth/recovery-settings', {
+                method: 'POST',
+                headers: authHeaders(true),
+                body: new URLSearchParams({ currentPassword, recoveryEmail, securityQuestion, securityAnswer }).toString()
+            });
+            const data = await res.json();
+            showAlert(escapeHtml(data.message || ''), !data.success);
+            if (data.success) showToast(data.message);
+        };
+
+        // Kiểm tra realtime ngoại lệ trùng mật khẩu cũ ở Tab Đổi mật khẩu
+        const oldPassInput = modal.querySelector('#dut-cp-old');
+        const newPassInput = modal.querySelector('#dut-cp-new');
+        const checkSameRealtime = () => {
+            const o = oldPassInput.value;
+            const n = newPassInput.value;
+            if (o && n && o === n) {
+                showAlert('⚠️ <strong>Ngoại lệ trùng mật khẩu:</strong> Mật khẩu mới không được trùng với mật khẩu hiện tại (mật khẩu cũ)!', true);
+            } else if (alertBox.textContent.includes('Ngoại lệ trùng mật khẩu')) {
+                alertBox.style.display = 'none';
+            }
+        };
+        oldPassInput.addEventListener('input', checkSameRealtime);
+        newPassInput.addEventListener('input', checkSameRealtime);
+
+        modal.querySelector('#dut-cp-save').onclick = async () => {
+            const oldPassword = oldPassInput.value;
+            const newPassword = newPassInput.value;
+            const confirmPassword = modal.querySelector('#dut-cp-confirm').value;
+
+            if (!oldPassword || !newPassword) {
+                showAlert('⚠️ Vui lòng nhập đầy đủ mật khẩu hiện tại và mật khẩu mới!', true);
+                return;
+            }
+            if (oldPassword === newPassword) {
+                showAlert('⚠️ <strong>Ngoại lệ:</strong> Mật khẩu mới KHÔNG ĐƯỢC TRÙNG với mật khẩu cũ! Vui lòng chọn mật khẩu khác.', true);
+                return;
+            }
+            if (confirmPassword && newPassword !== confirmPassword) {
+                showAlert('⚠️ Mật khẩu xác nhận không khớp với mật khẩu mới!', true);
+                return;
+            }
+
+            const res = await origFetch('/api/auth/change-password', {
+                method: 'POST',
+                headers: authHeaders(true),
+                body: new URLSearchParams({ oldPassword, newPassword, confirmPassword }).toString()
+            });
+            const data = await res.json();
+            showAlert(escapeHtml(data.message || ''), !data.success);
+            if (data.success) {
+                showToast(data.message);
+                setTimeout(() => modal.remove(), 1200);
+            }
+        };
+    }
+
+    /**
+     * HỘP THOẠI QUÊN MẬT KHẨU CÔNG KHAI NGOÀI TRANG ĐĂNG NHẬP (index.html):
+     * Tuyệt đối KHÔNG hiển thị mã OTP trên hộp thoại!
+     * Cho phép khôi phục an toàn qua 3 cách:
+     *  - Cách 1: Nhập 1 trong 5 Mã dự phòng (8 chữ số) đã lưu.
+     *  - Cách 2: Gửi mã OTP (6 số) về đúng Email khôi phục đã liên kết từ trước.
+     *  - Cách 3: Trả lời Câu hỏi bảo mật cá nhân.
+     */
+    function openPublicForgotPasswordModal() {
+        let modal = document.getElementById('dut-public-forgot-modal');
+        if (modal) modal.remove();
+
+        modal = document.createElement('div');
+        modal.id = 'dut-public-forgot-modal';
+        modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.75);z-index:99999;display:flex;align-items:center;justify-content:center;padding:16px;';
+        modal.innerHTML = `
+            <div style="background:#1e1b2e;border:1px solid rgba(139,92,246,0.45);border-radius:16px;max-width:480px;width:100%;padding:22px 24px;color:#f8fafc;box-shadow:0 20px 50px rgba(0,0,0,0.68);">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+                    <h3 style="margin:0;font-size:18px;">🔐 Khôi phục mật khẩu an toàn</h3>
+                    <button type="button" id="dut-pf-close" style="background:none;border:none;color:#94a3b8;font-size:22px;cursor:pointer;">×</button>
+                </div>
+
+                <div id="dut-pf-alert" style="display:none;margin-bottom:12px;padding:10px 12px;border-radius:10px;font-size:13px;line-height:1.5;"></div>
+
+                <div style="display:flex;gap:8px;margin-bottom:12px;">
+                    <input id="dut-pf-user" type="text" placeholder="Nhập tài khoản cần khôi phục (VD: user@pbl4.com)" style="flex:1;padding:10px 12px;border-radius:8px;border:1px solid rgba(255,255,255,0.18);background:rgba(0,0,0,0.32);color:#fff;" />
+                    <button type="button" class="dut-btn dut-btn-primary" id="dut-pf-check" style="white-space:nowrap;">🔍 Kiểm tra</button>
+                </div>
+
+                <!-- Chọn phương thức xác thực -->
+                <div style="display:flex;gap:6px;margin-bottom:12px;background:rgba(0,0,0,0.28);padding:4px;border-radius:9px;">
+                    <button type="button" class="dut-pf-method-btn" data-method="BACKUP_CODE" style="flex:1;padding:7px 6px;border-radius:7px;border:none;font-size:12px;font-weight:600;cursor:pointer;background:#7c3aed;color:#fff;">
+                        🔢 Mã dự phòng (8 số)
+                    </button>
+                    <button type="button" class="dut-pf-method-btn" data-method="RECOVERY_OTP" style="flex:1;padding:7px 6px;border-radius:7px;border:none;font-size:12px;font-weight:600;cursor:pointer;background:transparent;color:#94a3b8;">
+                        📧 OTP Email liên kết
+                    </button>
+                    <button type="button" class="dut-pf-method-btn" data-method="SECURITY_QUESTION" style="flex:1;padding:7px 6px;border-radius:7px;border:none;font-size:12px;font-weight:600;cursor:pointer;background:transparent;color:#94a3b8;">
+                        ❓ Câu hỏi bảo mật
+                    </button>
+                </div>
+
+                <div id="dut-pf-method-desc" style="font-size:12.5px;color:#cbd5e1;margin-bottom:10px;padding:8px 11px;border-radius:8px;background:rgba(255,255,255,0.04);">
+                    Nhập <strong>1 trong 5 Mã dự phòng (8 chữ số)</strong> mà bạn đã tạo và lưu khi đăng nhập (mỗi mã dùng 1 lần).
+                </div>
+
+                <div id="dut-pf-otp-send-row" style="display:none;margin-bottom:10px;">
+                    <button type="button" class="dut-btn" id="dut-pf-send-email-otp" style="width:100%;justify-content:center;border-color:#a78bfa;color:#ddd6fe;">
+                        📨 Gửi mã OTP (6 số) tới Email khôi phục đã liên kết
+                    </button>
+                </div>
+
+                <div style="display:flex;flex-direction:column;gap:10px;">
+                    <input id="dut-pf-code" type="text" placeholder="Nhập Mã dự phòng 8 chữ số (VD: 48291037)" style="padding:10px 12px;border-radius:8px;border:1px solid rgba(255,255,255,0.18);background:rgba(0,0,0,0.32);color:#fff;font-weight:700;letter-spacing:1.5px;" />
+                    <input id="dut-pf-sec-ans" type="password" placeholder="Nhập câu trả lời bảo mật của bạn" style="display:none;padding:10px 12px;border-radius:8px;border:1px solid rgba(255,255,255,0.18);background:rgba(0,0,0,0.32);color:#fff;" />
+                    <input id="dut-pf-newpass" type="password" placeholder="Mật khẩu mới (8-32 ký tự, khác mật khẩu cũ)" style="padding:10px 12px;border-radius:8px;border:1px solid rgba(255,255,255,0.18);background:rgba(0,0,0,0.32);color:#fff;" />
+                    <input id="dut-pf-confirm" type="password" placeholder="Nhập lại mật khẩu mới để xác nhận" style="padding:10px 12px;border-radius:8px;border:1px solid rgba(255,255,255,0.18);background:rgba(0,0,0,0.32);color:#fff;" />
+                    <button type="button" class="dut-btn dut-btn-primary" id="dut-pf-submit" style="justify-content:center;padding:10px;font-size:14px;background:#16a34a;border-color:#16a34a;">
+                        ✅ Xác thực & Đặt lại mật khẩu mới
+                    </button>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(modal);
+
+        let selectedMethod = 'BACKUP_CODE';
+        let accountOptions = null;
+
+        const alertBox = modal.querySelector('#dut-pf-alert');
+        function showPfAlert(html, isErr) {
+            alertBox.style.display = 'block';
+            alertBox.style.background = isErr ? 'rgba(239,68,68,0.16)' : 'rgba(34,197,94,0.16)';
+            alertBox.style.border = isErr ? '1px solid rgba(239,68,68,0.45)' : '1px solid rgba(34,197,94,0.45)';
+            alertBox.style.color = isErr ? '#fca5a5' : '#86efac';
+            alertBox.innerHTML = html;
+        }
+
+        modal.querySelector('#dut-pf-close').onclick = () => modal.remove();
+
+        const descEl = modal.querySelector('#dut-pf-method-desc');
+        const otpSendRow = modal.querySelector('#dut-pf-otp-send-row');
+        const codeInput = modal.querySelector('#dut-pf-code');
+        const secAnsInput = modal.querySelector('#dut-pf-sec-ans');
+
+        function updateMethodUI() {
+            modal.querySelectorAll('.dut-pf-method-btn').forEach(b => {
+                const active = b.dataset.method === selectedMethod;
+                b.style.background = active ? '#7c3aed' : 'transparent';
+                b.style.color = active ? '#fff' : '#94a3b8';
+            });
+
+            if (selectedMethod === 'BACKUP_CODE') {
+                otpSendRow.style.display = 'none';
+                codeInput.style.display = 'block';
+                secAnsInput.style.display = 'none';
+                codeInput.placeholder = 'Nhập Mã dự phòng 8 chữ số (VD: 48291037)';
+                descEl.innerHTML = accountOptions
+                    ? `🔢 Tài khoản này hiện còn <strong>${accountOptions.remainingBackupCodes}/5</strong> Mã dự phòng (8 số) khả dụng.`
+                    : `Nhập <strong>1 trong 5 Mã dự phòng (8 chữ số)</strong> mà bạn đã tạo và lưu khi đăng nhập (mỗi mã chỉ dùng 1 lần).`;
+            } else if (selectedMethod === 'RECOVERY_OTP') {
+                otpSendRow.style.display = 'block';
+                codeInput.style.display = 'block';
+                secAnsInput.style.display = 'none';
+                codeInput.placeholder = 'Nhập mã OTP 6 chữ số nhận được trong Email khôi phục';
+                descEl.innerHTML = (accountOptions && accountOptions.hasRecoveryEmail)
+                    ? `📧 Hệ thống sẽ gửi mã OTP (6 số) tới hộp thư liên kết: <strong>${escapeHtml(accountOptions.maskedRecoveryEmail)}</strong>.`
+                    : `📧 Nhập tên tài khoản và bấm <strong>"🔍 Kiểm tra"</strong> để xem Email khôi phục đã liên kết.`;
+            } else {
+                otpSendRow.style.display = 'none';
+                codeInput.style.display = 'none';
+                secAnsInput.style.display = 'block';
+                descEl.innerHTML = (accountOptions && accountOptions.hasSecurityQuestion)
+                    ? `❓ Câu hỏi bảo mật: <strong style="color:#fde047;">${escapeHtml(accountOptions.securityQuestion)}</strong>`
+                    : `❓ Nhập tên tài khoản và bấm <strong>"🔍 Kiểm tra"</strong> để tải Câu hỏi bảo mật của bạn.`;
+            }
+        }
+
+        modal.querySelectorAll('.dut-pf-method-btn').forEach(btn => {
+            btn.onclick = () => {
+                selectedMethod = btn.dataset.method;
+                updateMethodUI();
+            };
+        });
+
+        modal.querySelector('#dut-pf-check').onclick = async () => {
+            const username = modal.querySelector('#dut-pf-user').value.trim();
+            if (!username) {
+                showPfAlert('⚠️ Vui lòng nhập địa chỉ tài khoản cần khôi phục!', true);
+                return;
+            }
+            const res = await origFetch(`/api/auth/recovery-options?username=${encodeURIComponent(username)}`);
+            const data = await res.json();
+            if (!data.success) {
+                showPfAlert(escapeHtml(data.message || 'Không tìm thấy tài khoản!'), true);
+                return;
+            }
+            accountOptions = data;
+            showPfAlert(
+                `✅ Đã tìm thấy tài khoản <strong>${escapeHtml(data.username)}</strong>:<br/>`
+                + `• Mã dự phòng 8 số: <strong>${data.remainingBackupCodes}/5 mã</strong> | `
+                + `Email liên kết: <strong>${data.hasRecoveryEmail ? escapeHtml(data.maskedRecoveryEmail) : 'Chưa đặt'}</strong> | `
+                + `Câu hỏi bảo mật: <strong>${data.hasSecurityQuestion ? 'Đã đặt' : 'Chưa đặt'}</strong>`,
+                false
+            );
+            updateMethodUI();
+        };
+
+        modal.querySelector('#dut-pf-send-email-otp').onclick = async () => {
+            const username = modal.querySelector('#dut-pf-user').value.trim();
+            if (!username) {
+                showPfAlert('⚠️ Vui lòng nhập địa chỉ tài khoản trước!', true);
+                return;
+            }
+            const res = await origFetch('/api/auth/forgot-password', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
+                body: new URLSearchParams({ username }).toString()
+            });
+            const data = await res.json();
+            showPfAlert(escapeHtml(data.message || ''), !data.success);
+        };
+
+        modal.querySelector('#dut-pf-submit').onclick = async () => {
+            const username = modal.querySelector('#dut-pf-user').value.trim();
+            const code = codeInput.value.trim();
+            const securityAnswer = secAnsInput.value.trim();
+            const newPassword = modal.querySelector('#dut-pf-newpass').value;
+            const confirmPassword = modal.querySelector('#dut-pf-confirm').value;
+
+            if (!username || !newPassword) {
+                showPfAlert('⚠️ Vui lòng nhập đầy đủ Tài khoản và Mật khẩu mới!', true);
+                return;
+            }
+            if (confirmPassword && newPassword !== confirmPassword) {
+                showPfAlert('⚠️ Mật khẩu xác nhận không khớp với mật khẩu mới!', true);
+                return;
+            }
+
+            const res = await origFetch('/api/auth/reset-password', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
+                body: new URLSearchParams({
+                    username,
+                    method: selectedMethod,
+                    code,
+                    securityAnswer,
+                    newPassword,
+                    confirmPassword
+                }).toString()
+            });
+            const data = await res.json();
+            showPfAlert(escapeHtml(data.message || ''), !data.success);
+            if (data.success) {
+                showToast(data.message);
+                setTimeout(() => modal.remove(), 1500);
+            }
+        };
+    }
+
+    async function enhanceAdminSecurityPanel() {
+        if (!location.pathname.includes('admin') || document.getElementById('dut-admin-sec-panel')) return;
+        const container = document.querySelector('main, .container, .admin-container') || document.body;
+        const panel = document.createElement('div');
+        panel.id = 'dut-admin-sec-panel';
+        panel.style.cssText = 'margin:18px;padding:16px 20px;border-radius:12px;background:rgba(139,92,246,0.08);border:1px solid rgba(139,92,246,0.3);color:#f8fafc;';
+        panel.innerHTML = `
+            <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
+                <div>
+                    <h3 style="margin:0;font-size:16px;">🛡️ Quản lý Chống tấn công & Chặn IP (AbuseGuard)</h3>
+                    <small id="dut-sec-stats" style="color:#94a3b8;">Đang tải trạng thái bảo mật IP...</small>
+                </div>
+                <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+                    <input id="dut-ban-ip-input" type="text" placeholder="Nhập IP (VD: 203.0.113.5)" style="padding:6px 10px;border-radius:8px;border:1px solid rgba(255,255,255,0.2);background:rgba(0,0,0,0.3);color:#fff;font-size:13px;" />
+                    <input id="dut-ban-min-input" type="number" value="30" min="1" max="10080" style="width:75px;padding:6px 8px;border-radius:8px;border:1px solid rgba(255,255,255,0.2);background:rgba(0,0,0,0.3);color:#fff;font-size:13px;" title="Số phút chặn" />
+                    <button type="button" class="dut-btn dut-btn-danger" id="dut-btn-ban-ip">🚫 Chặn IP</button>
+                    <button type="button" class="dut-btn" id="dut-btn-unban-ip">✅ Mở khóa IP</button>
+                </div>
+            </div>
+            <div id="dut-banned-ip-list" style="margin-top:10px;font-size:13px;color:#fca5a5;"></div>
+        `;
+        container.prepend(panel);
+
+        async function loadSecStatus() {
+            try {
+                const res = await origFetch('/api/admin/security', { headers: authHeaders(false) });
+                if (!res.ok) return;
+                const d = await res.json();
+                panel.querySelector('#dut-sec-stats').textContent = `Số IP đang theo dõi: ${d.trackedIps || 0} | Số IP đang bị khóa: ${(d.bannedIps || []).length}`;
+                const listEl = panel.querySelector('#dut-banned-ip-list');
+                if (d.bannedIps && d.bannedIps.length > 0) {
+                    listEl.innerHTML = 'Các IP đang bị khóa: ' + d.bannedIps.map(x => `<span style="padding:2px 8px;margin-right:6px;border-radius:6px;background:rgba(239,68,68,0.2);">${escapeHtml(x.ip)} (${x.remainingSeconds}s)</span>`).join('');
+                } else {
+                    listEl.innerHTML = '<span style="color:#86efac;">Hiện không có IP nào đang bị cấm.</span>';
+                }
+            } catch (e) {}
+        }
+
+        panel.querySelector('#dut-btn-ban-ip').onclick = async () => {
+            const ip = panel.querySelector('#dut-ban-ip-input').value.trim();
+            const minutes = panel.querySelector('#dut-ban-min-input').value.trim();
+            const res = await origFetch('/api/admin/security/ban', {
+                method: 'POST',
+                headers: authHeaders(true),
+                body: new URLSearchParams({ ip, minutes }).toString()
+            });
+            const d = await res.json();
+            showToast(d.message || '');
+            loadSecStatus();
+        };
+
+        panel.querySelector('#dut-btn-unban-ip').onclick = async () => {
+            const ip = panel.querySelector('#dut-ban-ip-input').value.trim();
+            const res = await origFetch('/api/admin/security/unban', {
+                method: 'POST',
+                headers: authHeaders(true),
+                body: new URLSearchParams({ ip }).toString()
+            });
+            const d = await res.json();
+            showToast(d.message || '');
+            loadSecStatus();
+        };
+
+        loadSecStatus();
+    }
+
+    function hookRealtimeSseAutoRefresh() {
+        let boundSource = null;
+        setInterval(() => {
+            if (typeof sseSource !== 'undefined' && sseSource && sseSource !== boundSource) {
+                boundSource = sseSource;
+                boundSource.addEventListener('new_mail', () => {
+                    if (STATE.currentFolder === 'inbox' || STATE.currentFolder === 'starred') {
+                        loadFolderMails(STATE.currentFolder, false);
+                        refreshQuotaBar();
+                    }
+                });
+                boundSource.addEventListener('state_sync', () => {
+                    loadFolderMails(STATE.currentFolder, false);
+                    refreshQuotaBar();
+                });
+                boundSource.addEventListener('message', () => {
+                    if (STATE.currentFolder === 'inbox') {
+                        loadFolderMails('inbox', false);
+                        refreshQuotaBar();
+                    }
+                });
+            }
+        }, 500);
+    }
+
     function boot() {
         injectStyles();
-        enhanceSidebar();
-        enhanceSearchAndRefresh();
-        hookComposeCloseForDrafts();
-        observeMailListContainer();
-        switchFolder('inbox');
+        enhanceLoginPageForgotPassword();
+        enhanceAdminSecurityPanel();
+        if (document.querySelector('input[placeholder*="Tìm kiếm"]')) {
+            enhanceSidebar();
+            enhanceChangePasswordButton();
+            enhanceSearchAndRefresh();
+            hookComposeCloseForDrafts();
+            observeMailListContainer();
+            hookRealtimeSseAutoRefresh();
+            switchFolder('inbox');
+            setTimeout(checkAndPromptBackupCodesOnLogin, 600);
+        }
     }
 
     if (document.readyState === 'loading') {

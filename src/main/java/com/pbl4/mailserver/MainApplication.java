@@ -1,4 +1,3 @@
-// FILE: src/main/java/com/pbl4/mailserver/MainApplication.java
 package com.pbl4.mailserver;
 
 import com.pbl4.mailserver.config.ServerConfig;
@@ -16,13 +15,11 @@ import java.util.function.Supplier;
 
 public class MainApplication {
 
-    // Các listener đã khởi động thành công, để tắt gọn trong shutdown hook
     private static final List<SmtpListener> LISTENERS = new CopyOnWriteArrayList<>();
 
     public static void main(String[] args) {
         System.out.println("=== Đang khởi động DUT Secure Mail Server ===");
 
-        // Truy cập ServerConfig sớm: nạp lớp sẽ kiểm tra cấu hình PRODUCTION (thiếu thì thoát mã 1)
         ServerConfig.validateProduction();
         System.out.println("Chế độ: " + (ServerConfig.PRODUCTION ? "PRODUCTION" : "DEV (PRODUCTION=false)")
                 + " | domain=" + ServerConfig.MAIL_DOMAIN + " | hostname=" + ServerConfig.MAIL_HOSTNAME);
@@ -53,14 +50,12 @@ public class MainApplication {
 
         ApiServer.startServer();
 
-        // Cổng SMTP cũ (SMTP_PORT, mặc định 2525) cho dev/test
         try {
             SmtpServerManager.startServer();
         } catch (Exception e) {
             System.err.println("[LỖI] Không khởi động được SMTP cổng " + ServerConfig.SMTP_PORT + ": " + e.getMessage() + " (tiếp tục các cổng khác)");
         }
 
-        // Các cổng mới của CONTRACT v2: mỗi listener bọc try/catch riêng
         startListener("mx", ServerConfig.MX_PORT, false, MxHandler::new);
         startListener("submission", ServerConfig.SUBMISSION_PORT, false, SubmissionHandler::new);
         if (ServerConfig.SMTPS_PORT > 0) {

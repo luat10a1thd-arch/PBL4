@@ -1,6 +1,5 @@
 package com.pbl4.mailserver.dns;
 
-/** Giữ singleton cho DnsLookup.get()/set() (interface không có trường tĩnh thay đổi được). */
 final class DnsLookupHolder {
     private static volatile DnsLookup instance;
 

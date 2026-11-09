@@ -1,4 +1,3 @@
-// FILE: src/main/java/com/pbl4/mailserver/core/MailService.java
 package com.pbl4.mailserver.core;
 
 import com.pbl4.mailserver.config.ServerConfig;
@@ -17,7 +16,7 @@ public class MailService {
         public final int successCount;
         public final int failCount;
         public final String message;
-        // true khi MỌI người nhận nội bộ đều thất bại do hòm thư đầy (OVER_QUOTA) -> tầng SMTP có thể trả 552
+
         public final boolean quotaExceeded;
 
         public DeliveryResult(boolean success, int successCount, int failCount, String message) {
@@ -32,10 +31,6 @@ public class MailService {
             this.quotaExceeded = quotaExceeded;
         }
     }
-
-    // ------------------------------------------------------------------------------------------------
-    // Điểm móc phục vụ test (package-private): thay MessageNormalizer (9B-2) và OutboundQueue (A6) bằng bản giả
-    // ------------------------------------------------------------------------------------------------
 
     interface Normalizer {
         byte[] normalize(byte[] raw, String envelopeFrom);
@@ -58,11 +53,6 @@ public class MailService {
         outbound = OutboundQueue::enqueue;
     }
 
-    // ------------------------------------------------------------------------------------------------
-    // Adapter cũ (String) - giữ để WebAPI và test hiện có chưa vỡ
-    // ------------------------------------------------------------------------------------------------
-
-    /** @deprecated Dùng {@link #submit(String, String, Set, byte[])} với thư dựng bởi MimeBuilder. */
     @Deprecated
     public static DeliveryResult deliver(String sender, String recipientsRaw, String subject, String body) {
         if (sender == null || recipientsRaw == null || subject == null || body == null) {
@@ -103,7 +93,6 @@ public class MailService {
         return deliverRaw(canonicalSender, allRecipients, rawEmail);
     }
 
-    /** @deprecated Dùng {@link #submit(String, String, Set, byte[])}. Adapter: String -> UTF-8 byte rồi gọi submit. */
     @Deprecated
     public static DeliveryResult deliverRaw(String sender, Set<String> recipients, String rawMessage) {
         if (sender == null || recipients == null || recipients.isEmpty() || rawMessage == null) {
@@ -112,14 +101,6 @@ public class MailService {
         return submit(sender, sender, recipients, rawMessage.getBytes(StandardCharsets.UTF_8));
     }
 
-    // ------------------------------------------------------------------------------------------------
-    // CONTRACT v2: submit / deliverLocal (byte[] xuyên suốt)
-    // ------------------------------------------------------------------------------------------------
-
-    /**
-     * Gửi thư từ người dùng đã xác thực (submission / web).
-     * Ép From = authUser, normalize, lưu Sent, nội bộ -> hòm INBOX, ngoại -> OutboundQueue.
-     */
     public static DeliveryResult submit(String authUser, String envelopeFrom, Set<String> rcpts, byte[] raw) {
         if (authUser == null || rcpts == null || rcpts.isEmpty() || raw == null) {
             return new DeliveryResult(false, 0, 0, "Thiếu thông tin gửi thư!");
@@ -129,12 +110,11 @@ public class MailService {
         if (canonicalSender == null) {
             canonicalSender = authUser.trim().toLowerCase(Locale.ROOT);
         }
-        // Địa chỉ người gửi sẽ được ghi vào header: tuyệt đối không cho chứa khoảng trắng/ngoặc nhọn/ký tự điều khiển
+
         if (canonicalSender.isEmpty() || SENDER_UNSAFE.matcher(canonicalSender).find()) {
             return new DeliveryResult(false, 0, 0, "Địa chỉ người gửi không hợp lệ!");
         }
 
-        // 1) Chống giả mạo người gửi, 2) chuẩn hóa thư
         byte[] forced = forceFromHeader(raw, canonicalSender);
         byte[] message;
         try {
@@ -147,7 +127,6 @@ public class MailService {
             return new DeliveryResult(false, 0, 0, "Không chuẩn hóa được nội dung thư!");
         }
 
-        // 3) Tách người nhận nội bộ / ngoại, loại trùng
         Set<String> localRecipients = new LinkedHashSet<>();
         Set<String> externalRecipients = new LinkedHashSet<>();
         int invalidLocal = 0;
@@ -161,7 +140,7 @@ public class MailService {
             if (isLocalDomain(cleanRcpt)) {
                 String canonicalRcpt = UserStore.canonical(cleanRcpt);
                 if (canonicalRcpt != null && UserStore.exists(canonicalRcpt)) {
-                    localRecipients.add(canonicalRcpt); // alias (postmaster@...) cùng về admin thì chỉ giao một lần
+                    localRecipients.add(canonicalRcpt);
                 } else {
                     invalidLocal++;
                 }
@@ -180,25 +159,23 @@ public class MailService {
         boolean quotaExceeded = false;
         List<String> messages = new ArrayList<>();
 
-        // 4) Giao nội bộ (cùng logic lõi với deliverLocal, nhưng lấy được số hòm thư đầy để báo chi tiết)
         if (!localRecipients.isEmpty()) {
             LocalOutcome lo = storeLocal(localRecipients, message, Folder.INBOX);
             successTotal += lo.ok;
             failTotal += lo.fail;
             quotaFailCount += lo.quotaFail;
-            // Mọi người nhận nội bộ đều thất bại do quota (và không có địa chỉ nội bộ nào không tồn tại)
+
             quotaExceeded = (invalidLocal == 0 && lo.quotaFail == localRecipients.size());
             if (lo.ok > 0) {
                 messages.add("Đã lưu nội bộ cho " + lo.ok + " người nhận");
             }
         }
 
-        // 5) Lưu bản sao thư đã gửi (đồng bộ, ngay lập tức)
         MailStorageEngine.SaveResult sentResult = MailStorageEngine.saveEmailResult(canonicalSender + "_sent", message);
         if (sentResult != MailStorageEngine.SaveResult.OK) {
             System.err.println("[MAIL SERVICE] Không lưu được bản Sent của " + canonicalSender + ": " + sentResult);
         }
-        // Nếu người gửi đã đánh dấu hạn chế người nhận (và khác chính mình), lưu thêm bản ghi vào _spam của người gửi để kiểm tra trực quan
+
         for (String rcpt : localRecipients) {
             if (!rcpt.equalsIgnoreCase(canonicalSender) && MailStorageEngine.isSenderBlocked(canonicalSender, rcpt)) {
                 MailStorageEngine.saveEmailResult(canonicalSender + "_spam", message);
@@ -206,7 +183,6 @@ public class MailService {
             }
         }
 
-        // 6) Người nhận bên ngoài -> hàng đợi gửi ra
         if (!externalRecipients.isEmpty()) {
             boolean enqueued;
             try {
@@ -224,7 +200,6 @@ public class MailService {
             }
         }
 
-        // Nêu rõ số người nhận thất bại (và bao nhiêu trong số đó do hòm thư đầy)
         if (failTotal > 0) {
             String failMsg = "Thất bại " + failTotal + " người nhận";
             if (quotaFailCount > 0) {
@@ -240,11 +215,6 @@ public class MailService {
                 messages.isEmpty() ? "Gửi thư thất bại!" : String.join(" | ", messages), quotaExceeded);
     }
 
-    /**
-     * Giao thư tới các hòm thư nội bộ (thư đến từ MX). envelopeFrom "" = null sender (hợp lệ).
-     * INBOX lưu vào "u", SPAM lưu vào "u_spam". Không lưu bản Sent, không đẩy ra hàng đợi ngoài.
-     * quotaExceeded chỉ true khi MỌI người nhận thất bại vì OVER_QUOTA.
-     */
     public static DeliveryResult deliverLocal(String envelopeFrom, Set<String> localRcpts, byte[] raw, Folder folder) {
         if (localRcpts == null || localRcpts.isEmpty() || raw == null) {
             return new DeliveryResult(false, 0, 0, "Thiếu thông tin giao thư nội bộ!");
@@ -260,7 +230,7 @@ public class MailService {
             if (lo.quotaFail > 0) failMsg += " (" + lo.quotaFail + " hòm thư đã đầy dung lượng)";
             messages.add(failMsg);
         }
-        // Mọi người nhận đều thất bại và tất cả đều do vượt quota
+
         boolean quotaExceeded = (lo.ok == 0 && lo.fail > 0 && lo.quotaFail == lo.fail);
 
         if (lo.ok > 0) {
@@ -270,17 +240,15 @@ public class MailService {
                 messages.isEmpty() ? "Giao thư nội bộ thất bại!" : String.join(" | ", messages), quotaExceeded);
     }
 
-    // Kết quả đếm khi lưu vào các hòm thư nội bộ
     private static final class LocalOutcome {
         int ok;
         int fail;
         int quotaFail;
     }
 
-    // Lõi chung của deliverLocal và submit: lưu raw vào từng hòm (INBOX hoặc SPAM). Người nhận không tồn tại = thất bại.
     private static LocalOutcome storeLocal(Collection<String> rcpts, byte[] raw, Folder folder) {
         LocalOutcome out = new LocalOutcome();
-        Set<String> done = new HashSet<>(); // alias và tên thật cùng về một hòm thì chỉ giao một lần
+        Set<String> done = new HashSet<>();
         for (String rcpt : rcpts) {
             if (rcpt == null || rcpt.trim().isEmpty()) continue;
             String canonical = UserStore.canonical(rcpt.trim().toLowerCase(Locale.ROOT));
@@ -301,10 +269,6 @@ public class MailService {
         }
         return out;
     }
-
-    // ------------------------------------------------------------------------------------------------
-    // Ép header From (chống giả mạo người gửi) - làm việc trực tiếp trên byte[], không String hóa cả thư
-    // ------------------------------------------------------------------------------------------------
 
     private static final Pattern SENDER_UNSAFE = Pattern.compile("[\\s<>\"\\x00-\\x1f\\x7f]");
 

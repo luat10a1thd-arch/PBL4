@@ -5,6 +5,7 @@ import com.pbl4.mailserver.config.ServerConfig;
 import javax.net.ssl.KeyManagerFactory;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLSocket;
+import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
@@ -26,7 +27,6 @@ import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
 import java.security.spec.InvalidKeySpecException;
 import java.security.spec.PKCS8EncodedKeySpec;
-import java.io.ByteArrayInputStream;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
@@ -35,25 +35,10 @@ import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-/**
- * Tạo SSLContext cho STARTTLS / SMTPS / STLS.
- *
- * Nguồn chứng chỉ (theo thứ tự ưu tiên):
- *  1. PEM thật (Let's Encrypt): env PBL4_TLS_CERT_FILE (fullchain.pem) + PBL4_TLS_KEY_FILE (privkey.pem).
- *     Hỗ trợ khóa "PRIVATE KEY" (PKCS#8), "RSA PRIVATE KEY" (PKCS#1) và "EC PRIVATE KEY" (SEC1).
- *     Khóa mã hóa bằng mật khẩu không được hỗ trợ. Khi file đổi (certbot renew) sẽ tự nạp lại
- *     (kiểm tra tối đa mỗi 60 giây); nạp lại lỗi thì GIỮ chứng chỉ đang chạy.
- *  2. Keystore JKS tại ServerConfig.KEYSTORE_PATH (tự sinh bằng keytool, chứng chỉ TỰ KÝ) - như cũ.
- */
 public class SslContextFactory {
 
-    // Chỉ cho phép TLS 1.2 trở lên (loại TLS 1.0/1.1/SSLv3)
     private static final String[] PREFERRED_PROTOCOLS = {"TLSv1.3", "TLSv1.2"};
-
-    // Sau khi khởi tạo thất bại, đợi một lúc mới thử lại (tránh chạy keytool/đọc đĩa liên tục)
     private static final long RETRY_AFTER_FAILURE_MS = 5000L;
-
-    // Số lần thử đọc keystore khi file đang được ghi dở (tồn tại nhưng chưa ghi xong)
     private static final int LOAD_ATTEMPTS = 5;
     private static final long LOAD_RETRY_SLEEP_MS = 300L;
 
@@ -63,13 +48,12 @@ public class SslContextFactory {
     private static boolean lastAttemptFailed = false;
     private static long lastFailureNanos = 0L;
 
-    // --- PEM + tự nạp lại ---
     private static volatile Path certPath = envPath("PBL4_TLS_CERT_FILE");
     private static volatile Path keyPath = envPath("PBL4_TLS_KEY_FILE");
     private static volatile long reloadCheckIntervalMs = 60_000L;
     private static volatile long lastCheckNanos = 0L;
-    private static String loadedStamp = null;      // dấu vết file PEM đã nạp thành công (null = đang dùng keystore)
-    private static String lastFailedStamp = null;  // dấu vết file PEM đã thử mà hỏng (tránh thử lại vô ích/spam log)
+    private static String loadedStamp = null;
+    private static String lastFailedStamp = null;
     private static boolean warnedSelfSigned = false;
 
     private static final byte[] OID_RSA_ENCRYPTION = {0x06, 0x09, 0x2A, (byte) 0x86, 0x48, (byte) 0x86, (byte) 0xF7, 0x0D, 0x01, 0x01, 0x01};
@@ -84,13 +68,6 @@ public class SslContextFactory {
         return Paths.get(v.trim());
     }
 
-    // ------------------------------------------------------------------ API công khai
-
-    /**
-     * Trả về SSLContext dùng chung. Chỉ tạo MỘT lần (lazy, thread-safe), các lần sau
-     * trả ngay bản đã cache. Nếu cấu hình PEM, định kỳ kiểm tra file đổi và nạp lại.
-     * Trả null nếu không tạo được (người gọi trả 454 / -ERR).
-     */
     public static SSLContext createSSLContext() {
         SSLContext ctx = cachedContext;
         if (ctx != null) {
@@ -112,35 +89,22 @@ public class SslContextFactory {
                 SSLContext built = null;
                 if (pemConfigured()) {
                     String stamp = pemStamp();
-                    if (stamp == null) {
-                        System.err.println("[SSL FACTORY] CẢNH BÁO: đã đặt PBL4_TLS_CERT_FILE/PBL4_TLS_KEY_FILE nhưng file chưa tồn tại ("
-                                + certPath + ", " + keyPath + "). Tạm dùng chứng chỉ TỰ KÝ; sẽ tự nạp PEM khi file xuất hiện.");
-                    } else {
+                    if (stamp != null) {
                         try {
                             built = loadFromPem(certPath, keyPath);
                             usingPem = true;
                             loadedStamp = stamp;
                             lastFailedStamp = null;
-                            System.out.println("[SSL FACTORY] Đã nạp chứng chỉ PEM: " + certPath);
                         } catch (Exception e) {
                             lastFailedStamp = stamp;
-                            System.err.println("[SSL FACTORY] CẢNH BÁO: không nạp được PEM (" + e.getMessage()
-                                    + "). Tạm dùng chứng chỉ TỰ KÝ.");
                         }
                     }
-                } else if (!warnedSelfSigned && ServerConfig.PRODUCTION) {
-                    System.err.println("[SSL FACTORY] CẢNH BÁO: PRODUCTION nhưng chưa đặt PBL4_TLS_CERT_FILE/PBL4_TLS_KEY_FILE; "
-                            + "dùng chứng chỉ tự ký, máy chủ mail/client chuẩn sẽ không tin cậy.");
                 }
                 if (built == null) {
                     built = buildKeystoreContext();
                     usingPem = false;
                     loadedStamp = null;
-                    if (!warnedSelfSigned) {
-                        warnedSelfSigned = true;
-                        System.err.println("[SSL FACTORY] Đang dùng chứng chỉ TỰ KÝ (" + ServerConfig.KEYSTORE_PATH
-                                + "). Chỉ phù hợp dev/test, cần Let's Encrypt cho môi trường thật.");
-                    }
+                    warnedSelfSigned = true;
                 }
                 lastCheckNanos = System.nanoTime();
                 cachedContext = built;
@@ -149,17 +113,11 @@ public class SslContextFactory {
             } catch (Exception e) {
                 lastAttemptFailed = true;
                 lastFailureNanos = System.nanoTime();
-                System.err.println("[SSL FACTORY] Error creating SSLContext: " + e.getMessage());
                 return null;
             }
         }
     }
 
-    /**
-     * Bọc socket thường thành SSLSocket phía server (dùng cho STARTTLS/STLS/SMTPS) và giới hạn
-     * giao thức TLS 1.2+. Người gọi tự gọi startHandshake() sau khi đặt timeout.
-     * Không truyền IP làm hostname (host = null) để tránh dùng IP như tên SNI/peer host.
-     */
     public static SSLSocket wrapServerSocket(Socket plain) throws IOException {
         SSLContext ctx = createSSLContext();
         if (ctx == null) {
@@ -176,12 +134,10 @@ public class SslContextFactory {
         return sslSocket;
     }
 
-    /** true nếu SSLContext đang chạy được nạp từ PEM (không phải tự ký). */
     public static boolean isUsingPem() {
         return usingPem;
     }
 
-    /** Đổi đường dẫn PEM (dùng cho test/quản trị) và xóa cache để nạp lại ở lần gọi tới. */
     public static void setPemFiles(Path cert, Path key) {
         synchronized (LOCK) {
             certPath = cert;
@@ -190,12 +146,10 @@ public class SslContextFactory {
         }
     }
 
-    /** Chu kỳ kiểm tra file PEM đổi (ms). Mặc định 60000; 0 = kiểm tra mỗi lần gọi (test). */
     public static void setReloadCheckIntervalMs(long ms) {
         reloadCheckIntervalMs = Math.max(0L, ms);
     }
 
-    /** Xóa cache SSLContext. */
     public static void reset() {
         synchronized (LOCK) {
             resetLocked();
@@ -213,9 +167,6 @@ public class SslContextFactory {
         warnedSelfSigned = false;
     }
 
-    /**
-     * Dựng SSLContext từ file PEM (không đụng tới cache). Ném exception với thông báo rõ nếu hỏng.
-     */
     public static SSLContext loadFromPem(Path cert, Path key) throws Exception {
         String certText = new String(Files.readAllBytes(cert), StandardCharsets.ISO_8859_1);
         List<byte[]> certDers = new ArrayList<>();
@@ -251,13 +202,10 @@ public class SslContextFactory {
         return sslContext;
     }
 
-    // ------------------------------------------------------------------ nạp lại khi file đổi
-
     private static boolean pemConfigured() {
         return certPath != null && keyPath != null;
     }
 
-    /** Dấu vết (mtime:size) của cặp file PEM; null nếu thiếu file. */
     private static String pemStamp() {
         try {
             Path c = certPath;
@@ -291,11 +239,8 @@ public class SslContextFactory {
                 usingPem = true;
                 loadedStamp = stamp;
                 lastFailedStamp = null;
-                System.out.println("[SSL FACTORY] Đã nạp lại chứng chỉ PEM (file thay đổi): " + certPath);
             } catch (Exception e) {
                 lastFailedStamp = stamp;
-                System.err.println("[SSL FACTORY] CẢNH BÁO: nạp lại PEM thất bại (" + e.getMessage()
-                        + "); giữ chứng chỉ đang chạy, sẽ thử lại khi file đổi tiếp.");
             }
         }
     }
@@ -315,8 +260,6 @@ public class SslContextFactory {
         return Base64.getEncoder().encodeToString(b).toCharArray();
     }
 
-    // ------------------------------------------------------------------ PEM / DER
-
     private static final class PemBlock {
         final String type;
         final byte[] der;
@@ -334,7 +277,6 @@ public class SslContextFactory {
             try {
                 out.add(new PemBlock(m.group(1), Base64.getMimeDecoder().decode(m.group(2).trim())));
             } catch (IllegalArgumentException ignored) {
-                // khối base64 hỏng: bỏ qua
             }
         }
         return out;
@@ -350,13 +292,12 @@ public class SslContextFactory {
                 case "EC PRIVATE KEY":
                     return parsePkcs8(wrapEcSec1(b.der));
                 case "ENCRYPTED PRIVATE KEY":
-                    throw new GeneralSecurityException("Khóa riêng trong " + where
-                            + " được mã hóa bằng mật khẩu, không hỗ trợ (dùng khóa không mật khẩu của certbot).");
+                    throw new GeneralSecurityException("Khóa riêng trong " + where + " được mã hóa bằng mật khẩu, không hỗ trợ.");
                 default:
                     break;
             }
         }
-        throw new GeneralSecurityException("Không tìm thấy khóa riêng (PRIVATE KEY / RSA PRIVATE KEY / EC PRIVATE KEY) trong " + where);
+        throw new GeneralSecurityException("Không tìm thấy khóa riêng trong " + where);
     }
 
     private static PrivateKey parsePkcs8(byte[] pkcs8) throws GeneralSecurityException {
@@ -364,10 +305,9 @@ public class SslContextFactory {
             try {
                 return KeyFactory.getInstance(alg).generatePrivate(new PKCS8EncodedKeySpec(pkcs8));
             } catch (InvalidKeySpecException ignored) {
-                // thử thuật toán kế tiếp
             }
         }
-        throw new GeneralSecurityException("Định dạng khóa riêng không được hỗ trợ (chỉ RSA hoặc EC).");
+        throw new GeneralSecurityException("Định dạng khóa riêng không được hỗ trợ.");
     }
 
     private static void verifyKeyMatchesCert(PrivateKey key, X509Certificate leaf, Path certFile) throws GeneralSecurityException {
@@ -389,17 +329,15 @@ public class SslContextFactory {
         v.initVerify(leaf.getPublicKey());
         v.update(probe);
         if (!v.verify(sig)) {
-            throw new GeneralSecurityException("Khóa riêng không khớp với chứng chỉ đầu tiên trong " + certFile);
+            throw new GeneralSecurityException("Khóa riêng không khớp với chứng chỉ trong " + certFile);
         }
     }
 
-    /** PKCS#1 RSAPrivateKey -> PKCS#8 PrivateKeyInfo. */
     private static byte[] wrapRsaPkcs1(byte[] pkcs1) {
         byte[] algId = der(0x30, OID_RSA_ENCRYPTION, new byte[]{0x05, 0x00});
         return der(0x30, new byte[]{0x02, 0x01, 0x00}, algId, der(0x04, pkcs1));
     }
 
-    /** SEC1 ECPrivateKey -> PKCS#8 PrivateKeyInfo (lấy OID đường cong từ trường [0]). */
     private static byte[] wrapEcSec1(byte[] sec1) throws IOException {
         int[] root = tlv(sec1, 0);
         if (root[0] != 0x30) throw new IOException("EC PRIVATE KEY không hợp lệ");
@@ -422,7 +360,6 @@ public class SslContextFactory {
         return der(0x30, new byte[]{0x02, 0x01, 0x00}, algId, der(0x04, sec1));
     }
 
-    /** Đọc header DER tại vị trí p: trả {tag, độ dài header, độ dài nội dung}. */
     private static int[] tlv(byte[] b, int p) throws IOException {
         if (p + 2 > b.length) throw new IOException("DER bị cắt cụt");
         int tag = b[p] & 0xFF;
@@ -468,8 +405,6 @@ public class SslContextFactory {
         return o.toByteArray();
     }
 
-    // ------------------------------------------------------------------ keystore tự ký (như cũ)
-
     private static String[] pickProtocols(String[] supported) throws IOException {
         List<String> supportedList = Arrays.asList(supported);
         List<String> enabled = new ArrayList<>();
@@ -500,10 +435,6 @@ public class SslContextFactory {
         return sslContext;
     }
 
-    /**
-     * Đọc keystore, thử lại vài lần nếu file mới xuất hiện nhưng chưa ghi xong
-     * (tiến trình/luồng khác đang tạo). Lỗi cuối cùng được ném ra nếu vẫn hỏng.
-     */
     private static KeyStore loadKeyStoreWithRetry() throws Exception {
         Exception last = null;
         for (int attempt = 1; attempt <= LOAD_ATTEMPTS; attempt++) {
@@ -528,10 +459,6 @@ public class SslContextFactory {
         throw last;
     }
 
-    /**
-     * Tạo keystore bằng keytool. Ghi ra file tạm rồi đổi tên nguyên tử sang đường dẫn thật,
-     * nên không bao giờ có lúc keystore tồn tại mà chưa ghi xong.
-     */
     private static synchronized void generateKeystoreWithKeytool() {
         Path target = Paths.get(ServerConfig.KEYSTORE_PATH);
         if (Files.exists(target)) {
@@ -563,17 +490,13 @@ public class SslContextFactory {
             pb.redirectErrorStream(true);
             Process p = pb.start();
 
-            // keytool chạy rất nhanh; đặt giới hạn để không treo vĩnh viễn
             if (!p.waitFor(60, TimeUnit.SECONDS)) {
                 p.destroyForcibly();
-                System.err.println("[SSL FACTORY] Keytool timeout");
                 return;
             }
-            String output = new String(p.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
-            int exitCode = p.exitValue();
 
+            int exitCode = p.exitValue();
             if (exitCode != 0 || !Files.exists(tmp)) {
-                System.err.println("[SSL FACTORY] Keytool error (Exit Code " + exitCode + "): " + output);
                 return;
             }
 
@@ -581,7 +504,6 @@ public class SslContextFactory {
                 Files.move(tmp, target, StandardCopyOption.ATOMIC_MOVE);
             }
         } catch (Exception e) {
-            System.err.println("[SSL FACTORY] Failed to generate keystore: " + e.getMessage());
         } finally {
             try {
                 Files.deleteIfExists(tmp);

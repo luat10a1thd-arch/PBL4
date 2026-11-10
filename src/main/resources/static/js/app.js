@@ -1,6 +1,8 @@
 let selectedFiles = [];
 let activeMailbox = 'inbox';
 let currentSelectedMail = null;
+let currentDetailMail = null;
+let replyContext = null;
 let confirmCallback = null;
 let loadedMailsCache = [];
 
@@ -10,6 +12,9 @@ let totalMailCount = 0;
 let currentRequestId = 0;
 
 let sseSource = null;
+let sseReconnectTimer = null;
+let sseRetryDelay = 3000;
+let sseGeneration = 0;
 
 document.addEventListener('DOMContentLoaded', () => {
     const currentUser = localStorage.getItem('currentUser');
@@ -30,13 +35,35 @@ document.addEventListener('DOMContentLoaded', () => {
     startRealtimeListener();
 });
 
-function startRealtimeListener() {
+async function startRealtimeListener() {
     stopRealtimeListener();
 
     const token = localStorage.getItem('authToken');
     if (!token) return;
 
-    sseSource = new EventSource(`/api/mails/stream?token=${encodeURIComponent(token)}`);
+    const generation = ++sseGeneration;
+
+    let ticket = null;
+    try {
+        const res = await fetch('/api/mails/stream-ticket', {
+            method: 'POST',
+            headers: { 'Authorization': 'Bearer ' + token }
+        });
+        if (res.status === 401) return;
+        if (!res.ok) throw new Error('ticket');
+        const data = await res.json();
+        ticket = data.ticket;
+    } catch (e) {
+        scheduleSseReconnect();
+        return;
+    }
+    if (!ticket || generation !== sseGeneration) return;
+
+    sseSource = new EventSource(`/api/mails/stream?ticket=${encodeURIComponent(ticket)}`);
+
+    sseSource.onopen = () => {
+        sseRetryDelay = 3000;
+    };
 
     sseSource.onmessage = (event) => {
         if (activeMailbox === 'inbox') {
@@ -57,10 +84,33 @@ function startRealtimeListener() {
         }
     });
 
-    sseSource.onerror = () => {};
+    sseSource.addEventListener('evicted', () => {
+        sseGeneration++;
+        if (sseSource) { sseSource.close(); sseSource = null; }
+    });
+
+    sseSource.onerror = () => {
+        if (sseSource) { sseSource.close(); sseSource = null; }
+        scheduleSseReconnect();
+    };
+}
+
+function scheduleSseReconnect() {
+    if (sseReconnectTimer) return;
+    const delay = sseRetryDelay;
+    sseRetryDelay = Math.min(sseRetryDelay * 2, 60000);
+    sseReconnectTimer = setTimeout(() => {
+        sseReconnectTimer = null;
+        startRealtimeListener();
+    }, delay + Math.floor(Math.random() * 1000));
 }
 
 function stopRealtimeListener() {
+    sseGeneration++;
+    if (sseReconnectTimer) {
+        clearTimeout(sseReconnectTimer);
+        sseReconnectTimer = null;
+    }
     if (sseSource) {
         sseSource.close();
         sseSource = null;
@@ -83,7 +133,6 @@ function showToast(message, type = 'success') {
 
     container.appendChild(toast);
     setTimeout(() => toast.classList.add('show'), 10);
-
     setTimeout(() => {
         toast.classList.remove('show');
         setTimeout(() => toast.remove(), 300);
@@ -115,6 +164,7 @@ function closeComposeModal() {
 function resetComposeForm() {
     document.getElementById('compose-form').reset();
     selectedFiles = [];
+    replyContext = null;
     renderFilePreview();
 }
 
@@ -149,7 +199,6 @@ function renderFilePreview() {
 
     selectedFiles.forEach((file, index) => {
         const fileChip = document.createElement('div');
-
         fileChip.style.cssText = `
             display: inline-flex;
             align-items: center;
@@ -169,11 +218,15 @@ function renderFilePreview() {
             <span style="color: #64748b; font-size: 11px;">
                 (${formatFileSize(file.size)})
             </span>
-            <i class="fa-solid fa-xmark"
+            <i class="fa-solid fa-xmark remove-file-btn"
                style="cursor: pointer; color: #ef4444; margin-left: 4px; font-size: 14px;"
-               onclick="removeFile(${index})"
                title="Xóa file này"></i>
         `;
+
+        const rmBtn = fileChip.querySelector('.remove-file-btn');
+        if (rmBtn) {
+            rmBtn.onclick = () => removeFile(index);
+        }
 
         previewContainer.appendChild(fileChip);
     });
@@ -181,18 +234,15 @@ function renderFilePreview() {
 
 function formatFileSize(bytes) {
     if (bytes === 0) return '0 B';
-
     const k = 1024;
     const sizes = ['B', 'KB', 'MB', 'GB'];
     const i = Math.floor(Math.log(bytes) / Math.log(k));
-
     return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
 }
 
 function convertFileToBase64(file) {
     return new Promise((resolve, reject) => {
         const reader = new FileReader();
-
         reader.readAsDataURL(file);
         reader.onload = () => resolve(reader.result);
         reader.onerror = error => reject(error);
@@ -213,18 +263,15 @@ async function handleSendMail(event) {
     }
 
     const recipients = rawTo.split(/[\s,;]+/).filter(email => email.length > 0);
-
     if (recipients.length === 0) {
         showToast('Địa chỉ email người nhận không hợp lệ!', 'error');
         return;
     }
 
     let attachmentData = '';
-
     if (selectedFiles.length > 0) {
         for (let i = 0; i < selectedFiles.length; i++) {
             const file = selectedFiles[i];
-
             try {
                 const base64 = await convertFileToBase64(file);
                 attachmentData += `\n[ATTACHMENT:${file.name}]${base64}[/ATTACHMENT]`;
@@ -236,6 +283,15 @@ async function handleSendMail(event) {
     }
 
     const fullContent = bodyText + attachmentData;
+    let payload =
+        `to=${encodeURIComponent(recipients.join(','))}` +
+        `&subject=${encodeURIComponent(subject)}` +
+        `&body=${encodeURIComponent(fullContent)}`;
+
+    if (replyContext) {
+        payload += `&reply_id=${encodeURIComponent(replyContext.id)}` +
+                   `&reply_folder=${encodeURIComponent(replyContext.folder)}`;
+    }
 
     try {
         const response = await fetch('/api/mails/send', {
@@ -244,14 +300,10 @@ async function handleSendMail(event) {
                 'Content-Type': 'application/x-www-form-urlencoded',
                 'Authorization': 'Bearer ' + token
             },
-            body:
-                `to=${encodeURIComponent(recipients.join(','))}` +
-                `&subject=${encodeURIComponent(subject)}` +
-                `&body=${encodeURIComponent(fullContent)}`
+            body: payload
         });
 
         const data = await response.json();
-
         if (data.success) {
             closeComposeModal();
             showToast(data.message || 'Gửi thư thành công!', 'success');
@@ -373,11 +425,19 @@ function renderEmailList(mails) {
                 <div class="email-subject">${escapeHtml(mail.subject)}</div>
                 <div class="email-date">${escapeHtml(formatMailDate(mail.timestamp))}</div>
             </div>
-            <button onclick="handleDeleteMail('${escapeHtml(mail.id)}', event)" title="Xóa thư"
+            <button class="delete-mail-btn" title="Xóa thư"
                     style="position: absolute; right: 12px; top: 12px; background: none; border: none; color: #ef4444; cursor: pointer; padding: 4px; font-size: 14px;">
                 <i class="fa-solid fa-trash"></i>
             </button>
         `;
+
+        const delBtn = item.querySelector('.delete-mail-btn');
+        if (delBtn) {
+            delBtn.onclick = (e) => {
+                e.stopPropagation();
+                handleDeleteMail(mail.id, e);
+            };
+        }
 
         emailListDiv.appendChild(item);
     });
@@ -438,8 +498,7 @@ async function updateStorageUsage() {
             if (data.success) {
                 const usedMb = parseFloat(data.usedMb).toFixed(2);
                 const quotaMb = data.quotaMb;
-                const percent = Math.min(100, Math.max(0, (data.usedBytes / data.quotaBytes) * 100));
-                const percentStr = percent.toFixed(1);
+                const percent = Math.min(100, Math.max(0, (data.usedBytes / data.quotaBytes) * 100)).toFixed(1);
 
                 const storageText = document.getElementById('storage-text');
                 const storageProgress = document.getElementById('storage-progress');
@@ -448,15 +507,7 @@ async function updateStorageUsage() {
                     storageText.textContent = `${usedMb} MB / ${quotaMb} MB`;
                 }
                 if (storageProgress) {
-                    storageProgress.style.width = `${percentStr}%`;
-                    
-                    if (percent >= 90) {
-                        storageProgress.style.backgroundColor = '#ef4444';
-                    } else if (percent >= 75) {
-                        storageProgress.style.backgroundColor = '#f59e0b';
-                    } else {
-                        storageProgress.style.backgroundColor = '#6366f1';
-                    }
+                    storageProgress.style.width = `${percent}%`;
                 }
             }
         }
@@ -482,7 +533,6 @@ function handleDeleteMail(mailId, event) {
             });
 
             const data = await response.json();
-
             if (data.success) {
                 showToast('Đã xóa thư thành công!', 'success');
                 refreshMails();
@@ -498,16 +548,19 @@ function handleDeleteMail(mailId, event) {
 
 function resetEmailDetail() {
     currentSelectedMail = null;
+    currentDetailMail = null;
     document.getElementById('no-email-selected').classList.remove('hidden');
     document.getElementById('email-detail').classList.add('hidden');
 }
 
 async function selectEmail(mail, element) {
+    if (!mail || typeof mail !== 'object') return;
+
     document.querySelectorAll('.email-item').forEach(item => {
         item.classList.remove('active');
     });
 
-    element.classList.add('active');
+    if (element) element.classList.add('active');
     currentSelectedMail = mail;
 
     const token = localStorage.getItem('authToken');
@@ -568,18 +621,26 @@ function downloadAttachment(fileName, rawBase64) {
 }
 
 function renderEmailDetail(mail) {
+    currentDetailMail = mail;
+
     document.getElementById('no-email-selected').classList.add('hidden');
     document.getElementById('email-detail').classList.remove('hidden');
 
-    document.getElementById('detail-subject').textContent = mail.subject;
-    document.getElementById('detail-sender').textContent = mail.sender;
+    const replyBtn = document.getElementById('reply-btn');
+    if (replyBtn) {
+        replyBtn.classList.toggle('hidden', activeMailbox === 'sent');
+    }
+
+    document.getElementById('detail-subject').textContent = mail.subject || '';
+    document.getElementById('detail-sender').textContent = mail.sender || '';
     document.getElementById('detail-receiver').textContent =
-        mail.recipient || localStorage.getItem('currentUser');
+        mail.recipient || localStorage.getItem('currentUser') || '';
     document.getElementById('detail-time').textContent =
         formatMailDate(mail.timestamp);
 
     const detailBodyElem = document.getElementById('detail-body');
     detailBodyElem.innerHTML = '';
+    detailBodyElem.style.whiteSpace = 'pre-wrap';
 
     let bodyText = mail.body || '';
 
@@ -653,7 +714,6 @@ function renderEmailDetail(mail) {
 
 function escapeHtml(text) {
     if (!text) return '';
-
     return String(text)
         .replace(/&/g, '&amp;')
         .replace(/</g, '&lt;')
@@ -697,7 +757,6 @@ function formatMailDate(value) {
     );
 
     let date = new Date(normalized);
-
     if (Number.isNaN(date.getTime())) {
         date = new Date(
             normalized.replace(/^(\d{4}-\d{2}-\d{2})\s+/, '$1T')
@@ -740,4 +799,59 @@ async function logout() {
         localStorage.removeItem('authToken');
         window.location.href = '/';
     }
+}
+
+function extractEmail(text) {
+    if (!text) return '';
+    const angle = String(text).match(/<([^<>\s]+@[^<>\s]+)>/);
+    if (angle) return angle[1];
+    const plain = String(text).match(/[^\s<>"',;]+@[^\s<>"',;]+/);
+    return plain ? plain[0] : '';
+}
+
+function stripAttachmentTags(body) {
+    return String(body || '')
+        .replace(/\[ATTACHMENT:[^\]\r\n]+\][\s\S]*?\[\/ATTACHMENT\]/g, '')
+        .trim();
+}
+
+function buildReplySubject(subject) {
+    const s = (subject || '').trim();
+    return /^re\s*:/i.test(s) ? s : 'Re: ' + s;
+}
+
+function buildQuotedBody(mail) {
+    const quoted = stripAttachmentTags(mail.body)
+        .split(/\r?\n/)
+        .map(line => '> ' + line)
+        .join('\n');
+    const when = formatMailDate(mail.timestamp);
+    const who = mail.sender || 'người gửi';
+    return `\n\n\nVào ${when}, ${who} đã viết:\n${quoted}`;
+}
+
+function openReply() {
+    const mail = currentDetailMail;
+    if (!mail) {
+        showToast('Hãy chọn một thư để trả lời!', 'error');
+        return;
+    }
+    const replyTo = extractEmail(mail.sender);
+    if (!replyTo) {
+        showToast('Không xác định được địa chỉ người gửi để trả lời!', 'error');
+        return;
+    }
+
+    openComposeModal();
+    document.getElementById('compose-to').value = replyTo;
+    document.getElementById('compose-subject').value = buildReplySubject(mail.subject);
+
+    const bodyEl = document.getElementById('compose-body');
+    bodyEl.value = buildQuotedBody(mail);
+
+    replyContext = { id: mail.id, folder: activeMailbox };
+
+    bodyEl.focus();
+    bodyEl.setSelectionRange(0, 0);
+    bodyEl.scrollTop = 0;
 }

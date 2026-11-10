@@ -48,6 +48,24 @@
             gap: 10px;
             justify-content: center;
         }
+        .dns-box {
+            background: #0f172a;
+            color: #e2e8f0;
+            border-radius: 10px;
+            padding: 14px;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+            font-size: 12.5px;
+            line-height: 1.55;
+            white-space: pre-wrap;
+            word-break: break-all;
+            max-height: 420px;
+            overflow: auto;
+            margin: 12px 0;
+        }
+        .dns-toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+        .dns-toolbar .form-control { max-width: 260px; }
+        .queue-rcpts, .queue-error { max-width: 280px; word-break: break-word; font-size: 13px; }
+        .queue-error { color: #b45309; }
         @keyframes fadeIn {
             from { opacity: 0; transform: scale(0.95); }
             to { opacity: 1; transform: scale(1); }
@@ -71,6 +89,11 @@
             <li>
                 <a href="#" onclick="switchAdminTab('mail-storage', this)">
                     <i class="fa-solid fa-database"></i> Quản lý Thư & Dung lượng
+                </a>
+            </li>
+            <li>
+                <a href="#" onclick="switchAdminTab('outbound', this)">
+                    <i class="fa-solid fa-paper-plane"></i> Hàng đợi gửi & DNS
                 </a>
             </li>
         </ul>
@@ -109,6 +132,34 @@
                     <div class="stat-info">
                         <h4>Dung lượng sử dụng</h4>
                         <div class="value" id="stat-storage-used">0 B</div>
+                    </div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-icon"><i class="fa-solid fa-inbox"></i></div>
+                    <div class="stat-info">
+                        <h4>Thư vào (Inbox)</h4>
+                        <div class="value" id="stat-inbox-mails">0</div>
+                    </div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-icon"><i class="fa-solid fa-paper-plane"></i></div>
+                    <div class="stat-info">
+                        <h4>Thư ra (Đã gửi)</h4>
+                        <div class="value" id="stat-sent-mails">0</div>
+                    </div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-icon"><i class="fa-solid fa-triangle-exclamation"></i></div>
+                    <div class="stat-info">
+                        <h4>Thư rác (Spam)</h4>
+                        <div class="value" id="stat-spam-mails">0</div>
+                    </div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-icon"><i class="fa-solid fa-hourglass-half"></i></div>
+                    <div class="stat-info">
+                        <h4>Đang chờ gửi ra</h4>
+                        <div class="value" id="stat-queue-size">0</div>
                     </div>
                 </div>
             </div>
@@ -164,6 +215,45 @@
                         </div>
                         <button type="submit" class="btn-primary-admin"><i class="fa-solid fa-paper-plane"></i> Gửi thông báo hàng loạt</button>
                     </form>
+                </div>
+            </div>
+
+            <div id="tab-outbound" class="tab-content">
+                <div class="card-panel">
+                    <h3><i class="fa-solid fa-list-check"></i> Hàng đợi gửi thư ra ngoài</h3>
+                    <div style="margin-bottom: 10px;">
+                        <button type="button" class="btn-primary-admin" id="queue-refresh-btn"><i class="fa-solid fa-rotate"></i> Làm mới</button>
+                        <span id="queue-summary" style="margin-left: 10px; color: #64748b; font-size: 13px;"></span>
+                    </div>
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Domain đích</th>
+                                <th>Người nhận</th>
+                                <th>Số lần thử</th>
+                                <th>Lần thử kế tiếp</th>
+                                <th>Lỗi cuối</th>
+                                <th>Thao tác</th>
+                            </tr>
+                        </thead>
+                        <tbody id="queue-table-body">
+                            <tr>
+                                <td colspan="6" style="text-align: center; color: #64748b;">Chưa tải hàng đợi.</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <div class="card-panel">
+                    <h3><i class="fa-solid fa-globe"></i> Bản ghi DNS cần khai (MX, SPF, DKIM, DMARC, PTR)</h3>
+                    <div class="dns-toolbar">
+                        <label for="dns-ip" style="font-weight: 600;">IP công khai của server:</label>
+                        <input type="text" class="form-control" id="dns-ip" placeholder="vd: 203.0.113.10" autocomplete="off">
+                        <button type="button" class="btn-primary-admin" id="dns-load-btn"><i class="fa-solid fa-rotate"></i> Tạo bản ghi</button>
+                        <button type="button" class="btn-primary-admin" id="dns-copy-btn"><i class="fa-solid fa-copy"></i> Sao chép</button>
+                    </div>
+                    <div id="dns-note" style="margin-top: 8px; color: #b45309; font-size: 13px;"></div>
+                    <div class="dns-box" id="dns-text">Chưa tải bản ghi DNS.</div>
                 </div>
             </div>
 
@@ -257,6 +347,11 @@
 
         document.getElementById('tab-' + tabName).classList.add('active');
         element.classList.add('active');
+
+        if (tabName === 'outbound') {
+            loadQueue();
+            if (!dnsLoaded) loadDnsRecords();
+        }
     }
 
     async function loadServerStats() {
@@ -269,6 +364,11 @@
                 document.getElementById('stat-total-mails').innerText = data.totalMails;
                 document.getElementById('stat-storage-used').innerText = data.formattedSize;
                 document.getElementById('quota-limit').value = data.quotaMb;
+                const show = (id, v) => { document.getElementById(id).innerText = (v === undefined || v === null || v < 0) ? '-' : v; };
+                show('stat-inbox-mails', data.inboxMails);
+                show('stat-sent-mails', data.sentMails);
+                show('stat-spam-mails', data.spamMails);
+                show('stat-queue-size', data.queueSize);
             }
         } catch (err) {
             console.error('Lỗi tải thống kê server:', err);
@@ -477,6 +577,184 @@
             showToast('Lỗi kết nối Server!', 'error');
         }
     }
+
+    // ===== Hàng đợi gửi ra =====
+    let dnsLoaded = false;
+
+    function formatTime(ms) {
+        if (!ms || ms <= 0) return '-';
+        const d = new Date(ms);
+        if (isNaN(d.getTime())) return '-';
+        const diff = ms - Date.now();
+        const abs = d.toLocaleString('vi-VN');
+        if (diff <= 0) return abs + ' (đến hạn)';
+        const mins = Math.round(diff / 60000);
+        return abs + (mins >= 1 ? ' (sau ~' + mins + ' phút)' : ' (sắp tới)');
+    }
+
+    function makeCell(text, className) {
+        const td = document.createElement('td');
+        td.textContent = (text === undefined || text === null || text === '') ? '-' : String(text);
+        if (className) td.className = className;
+        return td;
+    }
+
+    async function loadQueue() {
+        const tbody = document.getElementById('queue-table-body');
+        const summary = document.getElementById('queue-summary');
+        try {
+            const res = await fetch('/api/admin/queue', {
+                headers: { 'Authorization': 'Bearer ' + token }
+            });
+            const data = await res.json();
+            if (!data.success) {
+                showToast(data.message || 'Không tải được hàng đợi!', 'error');
+                return;
+            }
+
+            tbody.innerHTML = '';
+            summary.textContent = data.total + ' job' + (data.truncated ? ' (chỉ hiển thị 1000 job đầu)' : '');
+            document.getElementById('stat-queue-size').innerText = data.total;
+
+            if (data.queue.length === 0) {
+                const tr = document.createElement('tr');
+                const td = makeCell('Hàng đợi trống — không có thư nào đang chờ gửi.');
+                td.colSpan = 6;
+                td.style.textAlign = 'center';
+                td.style.color = '#64748b';
+                tr.appendChild(td);
+                tbody.appendChild(tr);
+                return;
+            }
+
+            data.queue.forEach(job => {
+                const tr = document.createElement('tr');
+                tr.appendChild(makeCell(job.domain));
+                tr.appendChild(makeCell((job.rcpts || []).join(', '), 'queue-rcpts'));
+                tr.appendChild(makeCell(job.attempts));
+                tr.appendChild(makeCell(formatTime(job.nextAttemptEpochMs)));
+                tr.appendChild(makeCell(job.lastError, 'queue-error'));
+
+                const actionTd = document.createElement('td');
+                const retryBtn = document.createElement('button');
+                retryBtn.className = 'btn-action btn-unlock';
+                retryBtn.innerHTML = '<i class="fa-solid fa-rotate-right"></i> Thử lại';
+                retryBtn.addEventListener('click', () => retryQueueJob(job.id));
+
+                const delBtn = document.createElement('button');
+                delBtn.className = 'btn-action btn-delete';
+                delBtn.style.marginLeft = '4px';
+                delBtn.innerHTML = '<i class="fa-solid fa-trash"></i> Xóa';
+                delBtn.addEventListener('click', () => deleteQueueJob(job.id, job.domain));
+
+                actionTd.appendChild(retryBtn);
+                actionTd.appendChild(delBtn);
+                tr.appendChild(actionTd);
+                tbody.appendChild(tr);
+            });
+        } catch (err) {
+            console.error('Lỗi tải hàng đợi gửi:', err);
+            showToast('Lỗi kết nối Server!', 'error');
+        }
+    }
+
+    async function retryQueueJob(id) {
+        try {
+            const res = await fetch('/api/admin/queue/retry', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                    'Authorization': 'Bearer ' + token
+                },
+                body: `id=${encodeURIComponent(id)}`
+            });
+            const data = await res.json();
+            showToast(data.message || (data.success ? 'Đã thử lại!' : 'Thử lại thất bại!'), data.success ? 'success' : 'error');
+            loadQueue();
+            loadSystemLogs();
+        } catch (err) {
+            showToast('Lỗi kết nối Server!', 'error');
+        }
+    }
+
+    function deleteQueueJob(id, domain) {
+        showConfirmModal(
+            'Xóa job khỏi hàng đợi',
+            `Thư gửi tới ${domain} sẽ bị hủy và KHÔNG được gửi nữa. Bạn có chắc chắn không?`,
+            async () => {
+                try {
+                    const res = await fetch('/api/admin/queue/delete', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/x-www-form-urlencoded',
+                            'Authorization': 'Bearer ' + token
+                        },
+                        body: `id=${encodeURIComponent(id)}`
+                    });
+                    const data = await res.json();
+                    showToast(data.message || (data.success ? 'Đã xóa!' : 'Xóa thất bại!'), data.success ? 'success' : 'error');
+                    loadQueue();
+                    loadSystemLogs();
+                } catch (err) {
+                    showToast('Lỗi kết nối Server!', 'error');
+                }
+            },
+            true
+        );
+    }
+
+    // ===== Bản ghi DNS =====
+    async function loadDnsRecords() {
+        const ip = document.getElementById('dns-ip').value.trim();
+        const url = '/api/admin/dns' + (ip ? '?ip=' + encodeURIComponent(ip) : '');
+        const box = document.getElementById('dns-text');
+        const note = document.getElementById('dns-note');
+        try {
+            const res = await fetch(url, { headers: { 'Authorization': 'Bearer ' + token } });
+            const data = await res.json();
+            if (!data.success) {
+                showToast(data.message || 'Không tạo được bản ghi DNS!', 'error');
+                return;
+            }
+            dnsLoaded = true;
+            box.textContent = data.text;
+            const notes = [];
+            if (data.ipAssumed) notes.push('Đang dùng IP giả định ' + data.ip + ' — nhập IP công khai thật rồi bấm "Tạo bản ghi".');
+            if (!data.dkimAvailable) notes.push('Chưa tạo được khóa DKIM nên chưa có bản ghi DKIM.');
+            note.textContent = notes.join(' ');
+        } catch (err) {
+            console.error('Lỗi tải bản ghi DNS:', err);
+            showToast('Lỗi kết nối Server!', 'error');
+        }
+    }
+
+    async function copyDnsRecords() {
+        const text = document.getElementById('dns-text').textContent;
+        try {
+            if (navigator.clipboard && window.isSecureContext) {
+                await navigator.clipboard.writeText(text);
+            } else {
+                const ta = document.createElement('textarea');
+                ta.value = text;
+                ta.style.position = 'fixed';
+                ta.style.opacity = '0';
+                document.body.appendChild(ta);
+                ta.select();
+                const ok = document.execCommand('copy');
+                ta.remove();
+                if (!ok) throw new Error('copy failed');
+            }
+            showToast('Đã sao chép bản ghi DNS!', 'success');
+        } catch (err) {
+            showToast('Không sao chép được, hãy chọn và copy thủ công.', 'error');
+        }
+    }
+
+    document.addEventListener('DOMContentLoaded', () => {
+        document.getElementById('queue-refresh-btn').addEventListener('click', loadQueue);
+        document.getElementById('dns-load-btn').addEventListener('click', loadDnsRecords);
+        document.getElementById('dns-copy-btn').addEventListener('click', copyDnsRecords);
+    });
 
     function logoutAdmin() {
         localStorage.clear();

@@ -12,6 +12,13 @@
   </properties>
 
   <dependencies>
+    <!-- Thư viện DNS Java bắt buộc -->
+    <dependency>
+        <groupId>dnsjava</groupId>
+        <artifactId>dnsjava</artifactId>
+        <version>3.5.3</version>
+    </dependency>
+
     <dependency>
         <groupId>org.mindrot</groupId>
         <artifactId>jbcrypt</artifactId>

@@ -203,17 +203,17 @@ function renderFilePreview() {
             display: inline-flex;
             align-items: center;
             gap: 6px;
-            background: #e2e8f0;
+            background: #f1f5f9;
             border: 1px solid #cbd5e1;
             padding: 4px 10px;
             border-radius: 16px;
             font-size: 12px;
-            color: #1e293b;
-            font-weight: 500;
+            color: #0f172a;
+            font-weight: 600;
         `;
 
         fileChip.innerHTML = `
-            <i class="fa-solid fa-file" style="color: #2563eb;"></i>
+            <i class="fa-solid fa-file" style="color: #4f46e5;"></i>
             <span>${escapeHtml(file.name)}</span>
             <span style="color: #64748b; font-size: 11px;">
                 (${formatFileSize(file.size)})
@@ -405,7 +405,7 @@ function renderEmailList(mails) {
 
     if (!mails || mails.length === 0) {
         emailListDiv.innerHTML = `
-            <div style="padding: 20px; text-align: center; color: #94a3b8;">
+            <div style="padding: 20px; text-align: center; color: #64748b; font-size: 13.5px;">
                 Không có email nào.
             </div>
         `;
@@ -668,7 +668,7 @@ function renderEmailDetail(mail) {
         attachSection.style.cssText = 'margin-top: 25px; border-top: 1px dashed #cbd5e1; padding-top: 15px;';
 
         const attachTitle = document.createElement('strong');
-        attachTitle.style.cssText = 'color: #475569; font-size: 13px;';
+        attachTitle.style.cssText = 'color: #0f172a; font-size: 13px;';
         attachTitle.textContent = '📎 Danh sách file đính kèm:';
         attachSection.appendChild(attachTitle);
 
@@ -677,10 +677,10 @@ function renderEmailDetail(mail) {
 
         for (const att of attachments) {
             const attachBox = document.createElement('div');
-            attachBox.style.cssText = 'margin-top: 10px; padding: 10px 14px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; display: inline-block; margin-right: 10px;';
+            attachBox.style.cssText = 'margin-top: 10px; padding: 10px 14px; background: #f8fafc; border: 1px solid #cbd5e1; border-radius: 8px; display: inline-block; margin-right: 10px;';
 
             const nameDiv = document.createElement('div');
-            nameDiv.style.cssText = 'font-weight: 600; color: #334155; font-size: 13px; margin-bottom: 4px;';
+            nameDiv.style.cssText = 'font-weight: 600; color: #0f172a; font-size: 13px; margin-bottom: 4px;';
             nameDiv.innerHTML = '<i class="fa-solid fa-paperclip"></i> ';
 
             const nameSpan = document.createElement('span');
@@ -691,7 +691,7 @@ function renderEmailDetail(mail) {
             if (att.base64Data.length > 0) {
                 const downloadBtn = document.createElement('button');
                 downloadBtn.className = 'btn btn-outline';
-                downloadBtn.style.cssText = 'font-size: 11px; padding: 3px 8px; color: #2563eb; cursor: pointer; display: inline-flex; align-items: center; gap: 4px; border-radius: 4px;';
+                downloadBtn.style.cssText = 'font-size: 11px; padding: 3px 8px; color: #4f46e5; cursor: pointer; display: inline-flex; align-items: center; gap: 4px; border-radius: 4px;';
                 downloadBtn.innerHTML = '<i class="fa-solid fa-download"></i> Tải về';
                 downloadBtn.onclick = () => downloadAttachment(att.fileName, att.base64Data);
                 attachBox.appendChild(downloadBtn);

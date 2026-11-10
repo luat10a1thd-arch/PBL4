@@ -7,51 +7,10 @@
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <link rel="stylesheet" href="css/style.css">
     <style>
-        .confirm-modal-overlay {
-            position: fixed;
-            top: 0; left: 0; right: 0; bottom: 0;
-            background: rgba(15, 23, 42, 0.6);
-            backdrop-filter: blur(4px);
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            z-index: 10000;
-            animation: fadeIn 0.2s ease-out;
-        }
-        .confirm-modal-box {
-            background: #ffffff;
-            width: 100%;
-            max-width: 420px;
-            border-radius: 16px;
-            padding: 24px;
-            box-shadow: var(--shadow-lg);
-            text-align: center;
-        }
-        .confirm-icon {
-            font-size: 44px;
-            color: #f59e0b;
-            margin-bottom: 12px;
-        }
-        .confirm-title {
-            font-size: 18px;
-            font-weight: 700;
-            color: #0f172a;
-            margin-bottom: 8px;
-        }
-        .confirm-msg {
-            font-size: 14px;
-            color: #64748b;
-            margin-bottom: 20px;
-        }
-        .confirm-actions {
-            display: flex;
-            gap: 10px;
-            justify-content: center;
-        }
         .dns-box {
             background: #0f172a;
-            color: #e2e8f0;
-            border-radius: 10px;
+            color: #f8fafc;
+            border-radius: 8px;
             padding: 14px;
             font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
             font-size: 12.5px;
@@ -66,10 +25,6 @@
         .dns-toolbar .form-control { max-width: 260px; }
         .queue-rcpts, .queue-error { max-width: 280px; word-break: break-word; font-size: 13px; }
         .queue-error { color: #b45309; }
-        @keyframes fadeIn {
-            from { opacity: 0; transform: scale(0.95); }
-            to { opacity: 1; transform: scale(1); }
-        }
     </style>
 </head>
 <body class="admin-body">
@@ -101,7 +56,7 @@
 
     <div class="admin-main">
         <div class="admin-header">
-            <div style="font-weight: 600; font-size: 18px;">Trang Quản Trị Hệ Thống</div>
+            <div style="font-weight: 700; font-size: 18px; color: #0f172a;">Trang Quản Trị Hệ Thống</div>
             <div class="admin-user-info">
                 <span class="badge-admin"><i class="fa-solid fa-shield-halved"></i> Administrator</span>
                 <span id="admin-username" style="font-weight: 600;">admin@pbl4.com</span>
@@ -304,7 +259,7 @@
             icon.style.color = '#ef4444';
         } else {
             btnYes.className = 'btn btn-primary';
-            btnYes.style.background = '#5046e5';
+            btnYes.style.background = '#4f46e5';
             icon.style.color = '#f59e0b';
         }
 
@@ -418,7 +373,7 @@
 
                     row.innerHTML = `
                         <td><strong>${escapeHtml(u.username)}</strong></td>
-                        <td><span style="color:${isSystemAdmin ? '#5046e5' : '#64748b'}; font-weight:600;">${escapeHtml(role)}</span></td>
+                        <td><span style="color:${isSystemAdmin ? '#4f46e5' : '#475569'}; font-weight:600;">${escapeHtml(role)}</span></td>
                         <td>${statusBadge}</td>
                     `;
                     row.appendChild(actionTd);
@@ -578,7 +533,6 @@
         }
     }
 
-    // ===== Hàng đợi gửi ra =====
     let dnsLoaded = false;
 
     function formatTime(ms) {
@@ -703,7 +657,6 @@
         );
     }
 
-    // ===== Bản ghi DNS =====
     async function loadDnsRecords() {
         const ip = document.getElementById('dns-ip').value.trim();
         const url = '/api/admin/dns' + (ip ? '?ip=' + encodeURIComponent(ip) : '');

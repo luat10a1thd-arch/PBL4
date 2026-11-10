@@ -953,12 +953,13 @@ public class MailHandler implements HttpHandler {
                 String key = body.substring(start, sep).toLowerCase(Locale.ROOT);
                 if (!map.containsKey(key)) {
                     String val = body.substring(sep + 1, end);
-                    if ("body".equals(key)) {
-                        val = val.replace("+", "%2B");
-                    }
                     try {
-                        map.put(key, java.net.URLDecoder.decode(val, StandardCharsets.UTF_8));
-                    } catch (IllegalArgumentException ignored) {}
+                        map.put(key, java.net.URLDecoder.decode(val.replace("+", "%2B"), StandardCharsets.UTF_8));
+                    } catch (IllegalArgumentException ignored) {
+                        try {
+                            map.put(key, java.net.URLDecoder.decode(val, StandardCharsets.UTF_8));
+                        } catch (IllegalArgumentException ignored2) {}
+                    }
                 }
             }
             if (amp < 0) break;

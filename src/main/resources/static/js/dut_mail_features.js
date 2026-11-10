@@ -339,6 +339,20 @@
                 padding: 11px 18px; border-radius: 8px; font-size: 13.5px; font-weight: 500;
                 box-shadow: 0 10px 28px rgba(0,0,0,0.18);
             }
+            .dut-attachment-item {
+                padding: 10px 14px; border-radius: 8px; background: #f8fafc;
+                border: 1px solid #cbd5e1; display: inline-flex; flex-direction: column; gap: 8px;
+            }
+            .dut-attachment-title-box {
+                display: flex; align-items: center; gap: 8px;
+                font-size: 13.5px; color: #0f172a; font-weight: 500;
+            }
+            .dut-attachment-icon {
+                font-size: 16px; flex-shrink: 0; line-height: 1;
+            }
+            .dut-attachment-filename {
+                white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 220px;
+            }
         `;
         document.head.appendChild(style);
     }
@@ -579,7 +593,7 @@
                                 ${isSpamFolder ? '<span class="dut-badge-spam">⚠️ Thư rác</span>' : ''}
                             </div>
                             <div style="color:${!seen ? '#0f172a' : '#475569'};font-weight:${!seen ? '700' : '400'};font-size:13.5px;margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">
-                                ${escapeHtml(m.subject || '(Không có chủ đề)')}
+                                ${escapeHtml((m.subject || '(Không có chủ đề)').replace(/\+/g, ' '))}
                             </div>
                             <div style="color:#64748b;font-size:12px;margin-top:4px;">
                                 ${escapeHtml(m.timestamp || '')}
@@ -700,7 +714,8 @@
     }
 
     function parseAttachmentsFromBody(rawBody) {
-        const text = rawBody || '';
+        let text = rawBody || '';
+        text = text.replace(/\+/g, ' ');
         const attachments = [];
         const regex = /\[ATTACHMENT:([^\]\r\n]+)\]([\s\S]*?)\[\/ATTACHMENT\]/g;
         let match;
@@ -722,6 +737,7 @@
 
     function renderFullDetailView(detailCol, mail) {
         const { cleanText, attachments } = parseAttachmentsFromBody(mail.body || '');
+        const displaySubject = (mail.subject || '(Không có chủ đề)').replace(/\+/g, ' ');
 
         let attHtml = '';
         if (attachments.length > 0) {
@@ -734,8 +750,11 @@
                             const isImg = /\.(png|jpg|jpeg|gif|webp|bmp|svg)$/.test(lower);
                             const isPdf = /\.pdf$/.test(lower);
                             return `
-                            <div style="padding:10px 14px;border-radius:8px;background:#f8fafc;border:1px solid #cbd5e1;display:inline-flex;flex-direction:column;gap:8px;">
-                                <div style="font-size:13.5px;color:#0f172a;font-weight:500;">📎 ${escapeHtml(a.name)}</div>
+                            <div class="dut-attachment-item">
+                                <div class="dut-attachment-title-box">
+                                    <span class="dut-attachment-icon">📎</span>
+                                    <span class="dut-attachment-filename" title="${escapeHtml(a.name)}">${escapeHtml(a.name)}</span>
+                                </div>
                                 <div style="display:flex;gap:6px;">
                                     ${(isImg || isPdf) ? `
                                         <button type="button" class="dut-btn" data-preview-idx="${idx}" style="font-size:12px;padding:5px 10px;">
@@ -760,7 +779,7 @@
             <div style="padding: 20px 24px; color: #0f172a;">
                 <div id="dut-detail-toolbar-slot"></div>
                 <h2 style="margin: 0 0 12px 0; font-size: 22px; font-weight: 700; color: #0f172a;">
-                    ${escapeHtml(mail.subject || '(Không có chủ đề)')}
+                    ${escapeHtml(displaySubject)}
                 </h2>
                 <div style="font-size: 14px; color: #334155; line-height: 1.7; padding-bottom: 14px; border-bottom: 1px solid #e2e8f0;">
                     <div><strong>👥 Từ:</strong> ${escapeHtml(mail.sender || '')}</div>
@@ -991,7 +1010,7 @@
             body: body.toString()
         });
         if (!res.ok) return;
-        showToast('📩 Đã đánh dấu là chưa đọc');
+        showToast('📩 Đánh dấu là chưa đọc');
         await loadFolderMails(STATE.currentFolder, false);
     }
 
@@ -1148,7 +1167,7 @@
         openComposeModal();
         setTimeout(() => {
             const { toInput, subjInput, bodyInput } = findComposeInputs();
-            let subj = (mail.subject || '').trim();
+            let subj = (mail.subject || '').trim().replace(/\+/g, ' ');
             if (!/^Re:/i.test(subj)) subj = 'Re: ' + subj;
 
             const { cleanText } = parseAttachmentsFromBody(mail.body || '');
@@ -1178,8 +1197,9 @@
         setTimeout(() => {
             const { toInput, subjInput, bodyInput } = findComposeInputs();
             const { cleanText } = parseAttachmentsFromBody(mail.body || '');
+            const rawSubj = (mail.subject === '(Thư nháp)' ? '' : (mail.subject || '')).replace(/\+/g, ' ');
             if (toInput) toInput.value = mail.recipient || '';
-            if (subjInput) subjInput.value = (mail.subject === '(Thư nháp)' ? '' : (mail.subject || ''));
+            if (subjInput) subjInput.value = rawSubj;
             if (bodyInput) bodyInput.value = cleanText;
             STATE.activeDraftId = mail.id;
             syncInputsToDraftBuffer();
@@ -1302,14 +1322,14 @@
         openComposeModal();
         setTimeout(() => {
             const { toInput, subjInput, bodyInput } = findComposeInputs();
-            let subj = (mail.subject || '').trim();
+            let subj = (mail.subject || '').trim().replace(/\+/g, ' ');
             if (!/^Fwd:/i.test(subj)) subj = 'Fwd: ' + subj;
 
             const { cleanText } = parseAttachmentsFromBody(mail.body || '');
             const fwdText = `\n\n---------- Thư chuyển tiếp ----------\n`
                 + `Từ: ${mail.sender || ''}\n`
                 + `Thời gian: ${mail.timestamp || ''}\n`
-                + `Chủ đề: ${mail.subject || ''}\n`
+                + `Chủ đề: ${subj}\n`
                 + `Tới: ${mail.recipient || ''}\n\n`
                 + cleanText;
 
@@ -1840,7 +1860,7 @@
 
     async function enhanceAdminSecurityPanel() {
         if (!location.pathname.includes('admin') || document.getElementById('dut-admin-sec-panel')) return;
-        const container = document.querySelector('main, .container, .admin-container') || document.body;
+        const container = document.querySelector('.admin-content, .admin-main, main, .container') || document.body;
         const panel = document.createElement('div');
         panel.id = 'dut-admin-sec-panel';
         panel.style.cssText = 'margin:0 0 20px 0;padding:16px 20px;border-radius:8px;background:#ffffff;border:1px solid #e2e8f0;color:#0f172a;box-shadow:0 1px 3px rgba(0,0,0,0.05);';
@@ -1866,10 +1886,11 @@
                 const res = await origFetch('/api/admin/security', { headers: authHeaders(false) });
                 if (!res.ok) return;
                 const d = await res.json();
-                panel.querySelector('#dut-sec-stats').textContent = `Số IP đang theo dõi: ${d.trackedIps || 0} | Số IP đang bị khóa: ${(d.bannedIps || []).length}`;
+                panel.querySelector('#dut-sec-stats').textContent = `Số IP đang theo dõi: ${d.trackedIps || d.monitored || 0} | Số IP đang bị khóa: ${(d.bannedIps || d.banned || []).length}`;
                 const listEl = panel.querySelector('#dut-banned-ip-list');
-                if (d.bannedIps && d.bannedIps.length > 0) {
-                    listEl.innerHTML = 'Các IP đang bị khóa: ' + d.bannedIps.map(x => `<span style="padding:2px 8px;margin-right:6px;border-radius:6px;background:#fee2e2;color:#b91c1c;">${escapeHtml(x.ip)} (${x.remainingSeconds}s)</span>`).join('');
+                const banned = d.bannedIps || d.banned || [];
+                if (banned && banned.length > 0) {
+                    listEl.innerHTML = 'Các IP đang bị khóa: ' + banned.map(x => typeof x === 'string' ? `<span style="padding:2px 8px;margin-right:6px;border-radius:6px;background:#fee2e2;color:#b91c1c;">${escapeHtml(x)}</span>` : `<span style="padding:2px 8px;margin-right:6px;border-radius:6px;background:#fee2e2;color:#b91c1c;">${escapeHtml(x.ip)} (${x.remainingSeconds || 0}s)</span>`).join('');
                 } else {
                     listEl.innerHTML = '<span style="color:#15803d;">Hiện không có IP nào đang bị cấm.</span>';
                 }

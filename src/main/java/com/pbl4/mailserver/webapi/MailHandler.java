@@ -115,14 +115,61 @@ public class MailHandler implements HttpHandler {
             handleGetStarred(exchange, authedUser);
         } else if ("GET".equalsIgnoreCase(method) && path.endsWith("/search")) {
             handleSearchMails(exchange, authedUser);
-
         } else if ("GET".equalsIgnoreCase(method) && path.endsWith("/detail")) {
             handleGetMailDetail(exchange, authedUser);
+        } else if ("GET".equalsIgnoreCase(method) && path.endsWith("/attachment")) {
+            handleDownloadAttachment(exchange, authedUser);
         } else if ("GET".equalsIgnoreCase(method) && (path.endsWith("/storage-usage") || path.endsWith("/quota"))) {
             handleGetStorageUsage(exchange, authedUser);
         } else {
             sendResponse(exchange, 404, "{\"success\": false, \"message\": \"Endpoint không tồn tại!\"}");
         }
+    }
+
+    private void handleDownloadAttachment(HttpExchange exchange, String username) throws IOException {
+        Map<String, String> q = parseQuery(exchange.getRequestURI().getRawQuery());
+        String mailId = q.get("id");
+        String folder = q.get("folder");
+        String indexStr = q.get("index");
+
+        if (mailId == null || indexStr == null) {
+            sendResponse(exchange, 400, "{\"success\": false, \"message\": \"Thiếu thông số file!\"}");
+            return;
+        }
+
+        int index = 0;
+        try {
+            index = Integer.parseInt(indexStr);
+        } catch (NumberFormatException e) {
+            sendResponse(exchange, 400, "{\"success\": false, \"message\": \"Chỉ số đính kèm không hợp lệ!\"}");
+            return;
+        }
+
+        String targetUser = findMailboxContaining(username, mailId, folder);
+        MailStorageEngine.StoredMail mail = MailStorageEngine.getSingleMail(targetUser, mailId);
+        if (mail == null || mail.rawBytes() == null) {
+            sendResponse(exchange, 404, "{\"success\": false, \"message\": \"Không tìm thấy thư!\"}");
+            return;
+        }
+
+        ParsedMail parsed = MimeParser.parse(mail.rawBytes());
+        List<AttachmentInfo> list = parsed.attachments();
+
+        if (list == null || list.isEmpty() || index < 0 || index >= list.size()) {
+            sendResponse(exchange, 404, "{\"success\": false, \"message\": \"Không tìm thấy file đính kèm!\"}");
+            return;
+        }
+
+        AttachmentInfo att = list.get(index);
+        byte[] data = att.data();
+        String filename = att.name() == null || att.name().isEmpty() ? "attachment" : att.name();
+
+        exchange.getResponseHeaders().set("Content-Type", att.contentType() != null ? att.contentType() : "application/octet-stream");
+        exchange.getResponseHeaders().set("Content-Disposition", "attachment; filename=\"" + safeTagName(filename) + "\"");
+        exchange.sendResponseHeaders(200, data.length);
+        OutputStream os = exchange.getResponseBody();
+        os.write(data);
+        os.close();
     }
 
     private void handleStreamTicket(HttpExchange exchange, String username, String token) throws IOException {
@@ -865,7 +912,7 @@ public class MailHandler implements HttpHandler {
     static String attachmentsToTags(List<AttachmentInfo> attachments) {
         if (attachments == null || attachments.isEmpty()) return "";
         StringBuilder sb = new StringBuilder();
-        Base64.Encoder enc = Base64.getEncoder();
+        Base64.Encoder enc = Base64.getMimeEncoder();
         for (AttachmentInfo a : attachments) {
             if (a.data().length == 0) continue;
             if (sb.length() > 0) sb.append('\n');

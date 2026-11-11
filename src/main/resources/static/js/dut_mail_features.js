@@ -713,12 +713,13 @@
         } catch (err) {}
     }
 
-    function parseAttachmentsFromBody(rawBody) {
+    function parseAttachmentsFromBody(rawBody, mailId) {
         let text = rawBody || '';
         text = text.replace(/\+/g, ' ');
         const attachments = [];
         const regex = /\[ATTACHMENT:([^\]\r\n]+)\]([\s\S]*?)\[\/ATTACHMENT\]/g;
         let match;
+        let index = 0;
         while ((match = regex.exec(text)) !== null) {
             let b64 = (match[2] || '').trim();
             const prefixMatch = b64.match(/^data:([^;]+);base64,/i);
@@ -727,8 +728,10 @@
             }
             b64 = b64.replace(/\s+/g, '');
             attachments.push({
+                index: index++,
                 name: match[1].trim(),
-                base64: b64
+                base64: b64,
+                downloadUrl: `/api/mails/attachment?id=${encodeURIComponent(mailId || '')}&folder=${encodeURIComponent(STATE.currentFolder)}&index=${index - 1}`
             });
         }
         const cleanText = text.replace(regex, '').trim();
@@ -736,7 +739,7 @@
     }
 
     function renderFullDetailView(detailCol, mail) {
-        const { cleanText, attachments } = parseAttachmentsFromBody(mail.body || '');
+        const { cleanText, attachments } = parseAttachmentsFromBody(mail.body || '', mail.id);
         const displaySubject = (mail.subject || '(Không có chủ đề)').replace(/\+/g, ' ');
 
         let attHtml = '';
@@ -761,10 +764,10 @@
                                             👁️ Xem trước
                                         </button>
                                     ` : ''}
-                                    <a href="data:application/octet-stream;base64,${a.base64}" download="${escapeHtml(a.name)}"
-                                       class="dut-btn" style="text-decoration:none;justify-content:center;font-size:12px;padding:5px 10px;">
+                                    <button type="button" class="dut-btn" data-download-url="${escapeHtml(a.downloadUrl)}" data-filename="${escapeHtml(a.name)}"
+                                       style="font-size:12px;padding:5px 10px;">
                                        ⬇️ Tải về
-                                    </a>
+                                    </button>
                                 </div>
                             </div>
                             `;
@@ -807,6 +810,25 @@
                     box.innerHTML = `<iframe src="data:application/pdf;base64,${att.base64}" style="width:100%;height:480px;border:1px solid #cbd5e1;border-radius:8px;background:#fff;"></iframe>`;
                 } else {
                     box.innerHTML = `<img src="data:image/png;base64,${att.base64}" alt="${escapeHtml(att.name)}" style="max-width:100%;max-height:480px;border-radius:8px;border:1px solid #cbd5e1;" />`;
+                }
+            });
+        });
+
+        detailCol.querySelectorAll('[data-download-url]').forEach(btn => {
+            btn.addEventListener('click', async () => {
+                const url = btn.getAttribute('data-download-url');
+                const filename = btn.getAttribute('data-filename');
+                try {
+                    const res = await origFetch(url, { headers: authHeaders(false) });
+                    if (!res.ok) throw new Error();
+                    const blob = await res.blob();
+                    const link = document.createElement('a');
+                    link.href = URL.createObjectURL(blob);
+                    link.download = filename;
+                    link.click();
+                    URL.revokeObjectURL(link.href);
+                } catch (e) {
+                    showToast('❌ Không thể tải file đính kèm');
                 }
             });
         });
@@ -1170,7 +1192,7 @@
             let subj = (mail.subject || '').trim().replace(/\+/g, ' ');
             if (!/^Re:/i.test(subj)) subj = 'Re: ' + subj;
 
-            const { cleanText } = parseAttachmentsFromBody(mail.body || '');
+            const { cleanText } = parseAttachmentsFromBody(mail.body || '', mail.id);
             const quoted = `\n\n--- Vào ${mail.timestamp || ''}, ${mail.sender || ''} đã viết: ---\n` +
                 cleanText.split('\n').map(l => `> ${l}`).join('\n');
 
@@ -1196,7 +1218,7 @@
         openComposeModal();
         setTimeout(() => {
             const { toInput, subjInput, bodyInput } = findComposeInputs();
-            const { cleanText } = parseAttachmentsFromBody(mail.body || '');
+            const { cleanText } = parseAttachmentsFromBody(mail.body || '', mail.id);
             const rawSubj = (mail.subject === '(Thư nháp)' ? '' : (mail.subject || '')).replace(/\+/g, ' ');
             if (toInput) toInput.value = mail.recipient || '';
             if (subjInput) subjInput.value = rawSubj;
@@ -1325,7 +1347,7 @@
             let subj = (mail.subject || '').trim().replace(/\+/g, ' ');
             if (!/^Fwd:/i.test(subj)) subj = 'Fwd: ' + subj;
 
-            const { cleanText } = parseAttachmentsFromBody(mail.body || '');
+            const { cleanText } = parseAttachmentsFromBody(mail.body || '', mail.id);
             const fwdText = `\n\n---------- Thư chuyển tiếp ----------\n`
                 + `Từ: ${mail.sender || ''}\n`
                 + `Thời gian: ${mail.timestamp || ''}\n`

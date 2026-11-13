@@ -1,7 +1,9 @@
+// FILE: src/main/java/com/pbl4/mailserver/ratelimit/AbuseGuard.java
 package com.pbl4.mailserver.ratelimit;
 
 import com.pbl4.mailserver.config.ServerConfig;
 
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
@@ -66,6 +68,23 @@ public final class AbuseGuard {
 
     public static void release(String ip) {
         DEFAULT.release(ip);
+    }
+
+    // ---- Bổ sung cho trang quản trị (chỉ thêm, không đổi hàm cũ) ----
+
+    /** IP đang bị khóa -> số giây còn lại (>= 1). */
+    public static Map<String, Long> bannedIps() {
+        return DEFAULT.bannedIps();
+    }
+
+    /** Admin khóa IP theo số phút (không đặt tên ban(ip, long) vì trùng chữ ký ban(String, long ms) có sẵn). */
+    public static void banForMinutes(String ip, long minutes) {
+        DEFAULT.banForMinutes(ip, minutes);
+    }
+
+    /** Mở khóa IP: xóa ban, bộ đếm RCPT xấu và số lần vi phạm tích lũy. */
+    public static void unban(String ip) {
+        DEFAULT.unban(ip);
     }
 
     public static final class Engine {
@@ -228,6 +247,39 @@ public final class AbuseGuard {
                     }
                 }
             }
+        }
+
+        // ---- Bổ sung (add-only) ----
+
+        public void banForMinutes(String ip, long minutes) {
+            if (minutes < 1) return;
+            ban(ip, minutes * 60_000L);
+        }
+
+        public void unban(String ip) {
+            if (ip == null || ip.isEmpty()) return;
+            State s = map.get(ip);
+            if (s == null) return;
+            synchronized (s) {
+                if (s.dead) return;
+                s.bannedUntil = 0L;
+                s.badRcpt = 0;
+                s.strikes = 0;
+            }
+        }
+
+        public Map<String, Long> bannedIps() {
+            long now = clock.getAsLong();
+            Map<String, Long> out = new LinkedHashMap<>();
+            for (Map.Entry<String, State> e : map.entrySet()) {
+                State s = e.getValue();
+                synchronized (s) {
+                    if (!s.dead && s.bannedUntil > now) {
+                        out.put(e.getKey(), Math.max(1L, (s.bannedUntil - now) / 1000L));
+                    }
+                }
+            }
+            return out;
         }
     }
 }

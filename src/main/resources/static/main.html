@@ -1,3 +1,4 @@
+<!-- FILE: src/main/resources/web/main.html -->
 <!DOCTYPE html>
 <html lang="vi">
 <head>
@@ -32,8 +33,27 @@
                 <a href="#" id="nav-inbox" class="nav-item active" onclick="loadInbox(event)">
                     <i class="fa-solid fa-inbox"></i> Hộp thư đến
                 </a>
+                <a href="#" id="nav-starred" class="nav-item" onclick="loadStarred(event)">
+                    <i class="fa-solid fa-star"></i> Thư gắn sao
+                </a>
                 <a href="#" id="nav-sent" class="nav-item" onclick="loadSentMail(event)">
                     <i class="fa-solid fa-paper-plane"></i> Thư đã gửi
+                </a>
+                <a href="#" id="nav-drafts" class="nav-item" onclick="loadDrafts(event)">
+                    <i class="fa-solid fa-file-pen"></i> Thư nháp
+                </a>
+                <a href="#" id="nav-spam" class="nav-item" onclick="loadSpam(event)">
+                    <i class="fa-solid fa-triangle-exclamation"></i> Thư rác
+                </a>
+                <a href="#" id="nav-trash" class="nav-item" onclick="loadTrash(event)">
+                    <i class="fa-solid fa-trash-can"></i> Thùng rác
+                </a>
+                <div class="nav-divider"></div>
+                <a href="#" id="nav-blocked" class="nav-item" onclick="openBlockedModal(event)">
+                    <i class="fa-solid fa-ban"></i> Người đã chặn
+                </a>
+                <a href="#" id="nav-security" class="nav-item" onclick="openSecurityModal(event)">
+                    <i class="fa-solid fa-shield-halved"></i> Bảo mật tài khoản
                 </a>
             </nav>
 
@@ -51,14 +71,19 @@
         <section class="email-list-panel">
             <div class="panel-header">
                 <h3 id="box-title">Hộp thư đến</h3>
-                <button class="btn-refresh" onclick="refreshMails()" title="Làm mới">
-                    <i class="fa-solid fa-rotate-right"></i>
-                </button>
+                <div class="panel-header-actions">
+                    <button id="empty-folder-btn" class="btn btn-outline btn-sm hidden" onclick="emptyCurrentFolder()">
+                        <i class="fa-solid fa-broom"></i> <span id="empty-folder-label">Dọn sạch</span>
+                    </button>
+                    <button class="btn-refresh" onclick="refreshMails()" title="Làm mới">
+                        <i class="fa-solid fa-rotate-right"></i>
+                    </button>
+                </div>
             </div>
             
             <div class="search-box-wrapper">
                 <i class="fa-solid fa-magnifying-glass search-icon"></i>
-                <input type="text" id="mail-search-input" placeholder="Tìm kiếm theo người gửi, tiêu đề..." onkeyup="filterMails()">
+                <input type="text" id="mail-search-input" placeholder="Lọc nhanh; nhấn Enter để tìm toàn bộ trong mục này..." onkeyup="filterMails(event)">
             </div>
 
             <div id="email-list" class="email-list"></div>
@@ -75,8 +100,35 @@
                     <h2 id="detail-subject">Tiêu đề email ở đây</h2>
                     
                     <div class="detail-actions">
-                        <button id="reply-btn" class="btn btn-primary hidden" onclick="openReply()">
+                        <button id="reply-btn" class="btn btn-primary btn-sm hidden" onclick="openReply()">
                             <i class="fa-solid fa-reply"></i> Trả lời
+                        </button>
+                        <button id="forward-btn" class="btn btn-outline btn-sm hidden" onclick="openForward()">
+                            <i class="fa-solid fa-share"></i> Chuyển tiếp
+                        </button>
+                        <button id="edit-draft-btn" class="btn btn-primary btn-sm hidden" onclick="openDraftEdit()">
+                            <i class="fa-solid fa-pen"></i> Tiếp tục soạn
+                        </button>
+                        <button id="star-btn" class="btn btn-outline btn-sm hidden" onclick="toggleStarCurrent()">
+                            <i id="star-btn-icon" class="fa-regular fa-star"></i> <span id="star-btn-label">Gắn sao</span>
+                        </button>
+                        <button id="unread-btn" class="btn btn-outline btn-sm hidden" onclick="markUnreadCurrent()">
+                            <i class="fa-regular fa-envelope"></i> Chưa đọc
+                        </button>
+                        <button id="spam-btn" class="btn btn-outline btn-sm hidden" onclick="reportSpamCurrent()">
+                            <i class="fa-solid fa-triangle-exclamation"></i> Báo thư rác
+                        </button>
+                        <button id="unspam-btn" class="btn btn-outline btn-sm hidden" onclick="unspamCurrent()">
+                            <i class="fa-solid fa-circle-check"></i> Không phải thư rác
+                        </button>
+                        <button id="trash-btn" class="btn btn-outline btn-sm hidden" onclick="trashCurrent()">
+                            <i class="fa-solid fa-trash"></i> Xóa
+                        </button>
+                        <button id="restore-btn" class="btn btn-outline btn-sm hidden" onclick="restoreCurrent()">
+                            <i class="fa-solid fa-rotate-left"></i> Khôi phục
+                        </button>
+                        <button id="purge-btn" class="btn btn-danger btn-sm hidden" onclick="purgeCurrent()">
+                            <i class="fa-solid fa-trash-can-arrow-up"></i> Xóa vĩnh viễn
                         </button>
                     </div>
 
@@ -122,6 +174,7 @@
             </div>
 
             <div class="compose-footer">
+                <span id="draft-status" class="draft-status"></span>
                 <button type="button" class="btn btn-secondary" onclick="closeComposeModal()">Hủy</button>
                 <button type="submit" class="btn btn-primary">
                     <i class="fa-solid fa-paper-plane"></i> Gửi thư
@@ -135,15 +188,113 @@
     <div id="confirm-modal" class="confirm-modal-overlay hidden">
         <div class="confirm-modal-box">
             <i class="fa-solid fa-trash-can confirm-icon"></i>
-            <div class="confirm-title">Xác nhận xóa thư</div>
-            <div class="confirm-msg">Bạn có chắc chắn muốn xóa lá thư này vĩnh viễn?</div>
+            <div class="confirm-title" id="confirm-title">Xác nhận xóa thư</div>
+            <div class="confirm-msg" id="confirm-msg">Bạn có chắc chắn muốn xóa lá thư này vĩnh viễn?</div>
             <div class="confirm-actions">
                 <button class="btn btn-outline" onclick="closeConfirmModal(false)">Hủy bỏ</button>
-                <button class="btn btn-danger" onclick="closeConfirmModal(true)">Đồng ý xóa</button>
+                <button class="btn btn-danger" id="confirm-yes-btn" onclick="closeConfirmModal(true)">Đồng ý xóa</button>
             </div>
         </div>
     </div>
 
+    <!-- Danh sách người đã chặn -->
+    <div id="blocked-modal" class="confirm-modal-overlay hidden">
+        <div class="modal-box">
+            <div class="modal-box-header">
+                <h3><i class="fa-solid fa-ban"></i> Người gửi đã chặn</h3>
+                <button class="btn-close-dark" onclick="closeBlockedModal()" title="Đóng">&times;</button>
+            </div>
+            <p class="modal-hint">Thư từ những địa chỉ này không vào Hộp thư đến của bạn. Bấm "Bỏ chặn" để nhận thư trở lại.</p>
+            <div id="blocked-list" class="blocked-list"></div>
+        </div>
+    </div>
+
+    <!-- Bảo mật tài khoản (logic ở js/auth.js) -->
+    <div id="security-modal" class="confirm-modal-overlay hidden">
+        <div class="modal-box sec-box">
+            <div class="modal-box-header">
+                <h3><i class="fa-solid fa-shield-halved"></i> Bảo mật tài khoản</h3>
+                <button class="btn-close-dark" onclick="closeSecurityModal()" title="Đóng">&times;</button>
+            </div>
+
+            <div class="sec-tabs">
+                <button type="button" id="sec-tab-password" class="sec-tab active" onclick="switchSecTab('password')">Đổi mật khẩu</button>
+                <button type="button" id="sec-tab-recovery" class="sec-tab" onclick="switchSecTab('recovery')">Email khôi phục</button>
+                <button type="button" id="sec-tab-codes" class="sec-tab" onclick="switchSecTab('codes')">Mã dự phòng</button>
+            </div>
+
+            <div id="sec-message" class="inline-msg hidden"></div>
+
+            <div id="sec-pane-password" class="sec-pane">
+                <form id="sec-pw-form" onsubmit="handleChangePassword(event)" autocomplete="off">
+                    <div class="form-group">
+                        <label for="sec-current-pw">Mật khẩu hiện tại</label>
+                        <input type="password" id="sec-current-pw" class="form-control" autocomplete="current-password" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="sec-new-pw">Mật khẩu mới (8–32 ký tự, có chữ, số, ký tự đặc biệt)</label>
+                        <input type="password" id="sec-new-pw" class="form-control" autocomplete="new-password" required
+                               oninput="updateStrength('sec-new-pw','sec-strength-bar','sec-strength-label')">
+                        <div class="strength"><div id="sec-strength-bar" class="strength-bar"></div></div>
+                        <div id="sec-strength-label" class="strength-label"></div>
+                    </div>
+                    <div class="form-group">
+                        <label for="sec-confirm-pw">Nhập lại mật khẩu mới</label>
+                        <input type="password" id="sec-confirm-pw" class="form-control" autocomplete="new-password" required>
+                    </div>
+                    <button type="submit" class="btn btn-primary btn-block">Đổi mật khẩu</button>
+                </form>
+            </div>
+
+            <div id="sec-pane-recovery" class="sec-pane hidden">
+                <div id="sec-recovery-status" class="sec-status"></div>
+                <form id="sec-rec-form" onsubmit="handleSaveRecovery(event)" autocomplete="off">
+                    <div class="form-group">
+                        <label for="sec-rec-email">Email khôi phục (nhận mã OTP khi quên mật khẩu)</label>
+                        <input type="email" id="sec-rec-email" class="form-control" placeholder="ban@gmail.com" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="sec-rec-pw">Mật khẩu hiện tại (để xác nhận)</label>
+                        <input type="password" id="sec-rec-pw" class="form-control" autocomplete="current-password" required>
+                    </div>
+                    <button type="submit" class="btn btn-primary btn-block">Gửi mã xác minh</button>
+                </form>
+                <form id="sec-verify-form" class="hidden" onsubmit="handleVerifyRecoveryEmail(event)" autocomplete="off">
+                    <div class="form-group">
+                        <label for="sec-verify-code">Nhập mã xác minh đã gửi tới email khôi phục</label>
+                        <input type="text" id="sec-verify-code" class="form-control" inputmode="numeric" autocomplete="one-time-code" maxlength="16" required>
+                    </div>
+                    <button type="submit" class="btn btn-success btn-block">Xác minh email</button>
+                </form>
+            </div>
+
+            <div id="sec-pane-codes" class="sec-pane hidden">
+                <div id="sec-codes-status" class="sec-status"></div>
+                <div class="warning-box">
+                    <i class="fa-solid fa-triangle-exclamation"></i>
+                    Mã dự phòng chỉ hiển thị <strong>MỘT LẦN</strong> ngay sau khi tạo và <strong>không thể xem lại</strong>.
+                    Tạo bộ mới sẽ vô hiệu hóa toàn bộ mã cũ. Mỗi mã chỉ dùng được một lần.
+                </div>
+                <form id="sec-codes-form" onsubmit="handleGenerateBackupCodes(event)" autocomplete="off">
+                    <div class="form-group">
+                        <label for="sec-codes-pw">Mật khẩu hiện tại (để xác nhận)</label>
+                        <input type="password" id="sec-codes-pw" class="form-control" autocomplete="current-password" required>
+                    </div>
+                    <button type="submit" class="btn btn-primary btn-block">Tạo mã dự phòng</button>
+                </form>
+                <div id="sec-codes-result" class="hidden">
+                    <div id="sec-codes-grid" class="codes-grid"></div>
+                    <div class="codes-actions">
+                        <button type="button" class="btn btn-outline btn-sm" onclick="downloadBackupCodes()"><i class="fa-solid fa-download"></i> Tải về (.txt)</button>
+                        <button type="button" class="btn btn-outline btn-sm" onclick="printBackupCodes()"><i class="fa-solid fa-print"></i> In</button>
+                        <button type="button" class="btn btn-success btn-sm" onclick="clearBackupCodes(true)"><i class="fa-solid fa-check"></i> Tôi đã lưu lại</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="js/auth.js"></script>
     <script src="js/app.js"></script>
 </body>
 </html>

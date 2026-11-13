@@ -1,3 +1,4 @@
+/* FILE: src/main/resources/web/css/style.css */
 :root {
     --primary-color: #4f46e5;
     --primary-hover: #4338ca;
@@ -253,6 +254,7 @@
 .email-item:hover { background: #f8fafc; transform: translateX(3px); }
 .email-item.active { background: var(--primary-light); border-left: 4px solid var(--primary-color); }
 .email-item.unread .email-subject { font-weight: 700; color: var(--text-main); }
+/* FILE: src/main/resources/web/css/style.css  (PHẦN TIẾP THEO - bắt đầu từ dòng .email-sender) */
 .email-sender { font-size: 13px; font-weight: 600; color: var(--text-main); }
 .email-subject { font-size: 14px; color: var(--text-muted); margin: 4px 0; }
 .email-date { font-size: 11px; color: #94a3b8; }
@@ -680,3 +682,190 @@
 
 .detail-actions { display: flex; gap: 10px; margin: 12px 0 4px; }
 .detail-actions .btn { display: inline-flex; align-items: center; gap: 6px; padding: 8px 16px; font-size: 13px; cursor: pointer; }
+
+/* =====================================================================
+   KHỐI THÊM CỦA L5 (giao diện thư) - chỉ thêm, không sửa các khối cũ ở trên
+   ===================================================================== */
+.btn-secondary { background: #e2e8f0; color: var(--text-main); }
+.btn-secondary:hover { background: #cbd5e1; }
+.btn-sm { padding: 6px 12px; font-size: 12.5px; }
+.detail-actions { flex-wrap: wrap; }
+.detail-actions .btn.btn-sm { padding: 6px 12px; font-size: 12.5px; }
+
+.sidebar { overflow-y: auto; }
+.nav-divider { height: 1px; background: var(--border-color); margin: 8px 4px; }
+
+.panel-header-actions { display: flex; align-items: center; gap: 8px; }
+
+.email-item { position: relative; }
+.email-item-main { padding-right: 30px; }
+.email-item.unread .email-sender { font-weight: 800; }
+.unread-dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--primary-color);
+    margin-right: 6px;
+    vertical-align: middle;
+}
+.star-on { color: #f59e0b; }
+.email-sender .star-on { margin-right: 6px; font-size: 12px; }
+.delete-mail-btn {
+    position: absolute;
+    right: 12px;
+    top: 12px;
+    background: none;
+    border: none;
+    color: #ef4444;
+    cursor: pointer;
+    padding: 4px;
+    font-size: 14px;
+}
+.delete-mail-btn:hover { color: #b91c1c; }
+.empty-list { padding: 20px; text-align: center; color: #94a3b8; font-size: 14px; }
+.load-more-wrap { padding: 15px; text-align: center; }
+.load-more-btn { width: 100%; font-size: 13px; cursor: pointer; }
+
+.file-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: #e2e8f0;
+    border: 1px solid #cbd5e1;
+    padding: 4px 10px;
+    border-radius: 16px;
+    font-size: 12px;
+    color: #1e293b;
+    font-weight: 500;
+}
+.file-chip-icon { color: #2563eb; }
+.file-chip-size { color: #64748b; font-size: 11px; }
+.file-chip-remove { cursor: pointer; color: #ef4444; margin-left: 4px; font-size: 14px; }
+
+.draft-status { margin-right: auto; align-self: center; font-size: 12px; color: var(--text-muted); }
+.storage-progress.danger { background: #ef4444; }
+
+.detail-header { margin-bottom: 20px; }
+#detail-subject { font-size: 20px; font-weight: 700; color: #0f172a; margin-bottom: 12px; word-break: break-word; }
+.detail-meta {
+    background: #f8fafc;
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+    padding: 14px 18px;
+    font-size: 13px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+.detail-meta p { display: flex; align-items: center; gap: 8px; color: #334155; }
+.detail-meta strong { color: #0f172a; min-width: 70px; }
+.divider { border: 0; height: 1px; background: var(--border-color); margin: 20px 0; }
+
+.modal-box {
+    background: #ffffff;
+    width: 100%;
+    max-width: 460px;
+    max-height: 90vh;
+    overflow-y: auto;
+    border-radius: 16px;
+    padding: 22px 24px;
+    box-shadow: var(--shadow-lg);
+}
+.modal-box-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+.modal-box-header h3 { font-size: 17px; color: var(--text-main); display: flex; align-items: center; gap: 8px; }
+.btn-close-dark { background: none; border: none; color: #64748b; font-size: 24px; line-height: 1; cursor: pointer; }
+.btn-close-dark:hover { color: #0f172a; }
+.modal-hint { font-size: 13px; color: var(--text-muted); margin-bottom: 12px; line-height: 1.5; }
+.blocked-list { display: flex; flex-direction: column; gap: 8px; max-height: 340px; overflow-y: auto; }
+.blocked-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 8px 12px;
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+    background: #f8fafc;
+}
+.blocked-addr { font-size: 13px; color: var(--text-main); word-break: break-all; }
+
+/* =====================================================================
+   KHỐI THÊM CỦA L6 (tài khoản / bảo mật / admin) - chỉ thêm, nằm cuối file
+   ===================================================================== */
+.forgot-row { text-align: right; margin: -6px 0 14px; }
+.forgot-link { color: var(--primary-color); font-size: 13px; font-weight: 600; text-decoration: none; }
+.forgot-link:hover { text-decoration: underline; }
+.auth-help { font-size: 13px; color: var(--text-muted); margin-bottom: 16px; line-height: 1.5; }
+
+.method-switch { display: flex; gap: 6px; background: #f1f5f9; padding: 4px; border-radius: var(--radius-md); margin-bottom: 14px; }
+.method-btn {
+    flex: 1;
+    padding: 8px 6px;
+    border: none;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--text-muted);
+    font-size: 12.5px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+.method-btn.active { background: var(--surface-bg); color: var(--primary-color); box-shadow: var(--shadow-sm); }
+
+.inline-msg { margin-top: 12px; padding: 10px 12px; border-radius: 8px; font-size: 13px; line-height: 1.5; }
+.inline-msg.success { background: #dcfce7; color: #15803d; border: 1px solid #86efac; }
+.inline-msg.error { background: #fee2e2; color: #b91c1c; border: 1px solid #fca5a5; }
+
+.strength { height: 6px; background: #e2e8f0; border-radius: 3px; margin-top: 8px; overflow: hidden; }
+.strength-bar { height: 100%; width: 0; border-radius: 3px; transition: width 0.2s ease, background 0.2s ease; }
+.strength-bar.s1 { background: #ef4444; }
+.strength-bar.s2 { background: #f59e0b; }
+.strength-bar.s3 { background: #84cc16; }
+.strength-bar.s4 { background: #10b981; }
+.strength-label { font-size: 12px; color: var(--text-muted); margin-top: 4px; min-height: 16px; }
+
+.sec-box { max-width: 520px; }
+.sec-tabs { display: flex; gap: 6px; background: #f1f5f9; padding: 4px; border-radius: var(--radius-md); margin-bottom: 14px; }
+.sec-tab {
+    flex: 1;
+    padding: 8px 6px;
+    border: none;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--text-muted);
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+}
+.sec-tab.active { background: var(--primary-color); color: #ffffff; }
+.sec-pane { margin-top: 4px; }
+.sec-status { font-size: 13px; color: var(--text-main); background: #f8fafc; border: 1px solid var(--border-color); border-radius: 8px; padding: 9px 12px; margin-bottom: 12px; }
+.warning-box {
+    font-size: 12.5px;
+    line-height: 1.5;
+    color: #92400e;
+    background: #fffbeb;
+    border: 1px solid #fde68a;
+    border-radius: 8px;
+    padding: 10px 12px;
+    margin-bottom: 12px;
+}
+.codes-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin: 12px 0; }
+.code-cell {
+    padding: 8px 10px;
+    border-radius: 6px;
+    background: #fef3c7;
+    border: 1px solid #fde68a;
+    color: #92400e;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 15px;
+    font-weight: 700;
+    letter-spacing: 1.5px;
+    text-align: center;
+}
+.codes-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+.sec-toolbar { display: flex; gap: 14px; align-items: flex-end; flex-wrap: wrap; }
+.sec-toolbar .form-group { margin-bottom: 0; }
+.sec-note { margin-top: 10px; font-size: 12.5px; color: var(--text-muted); }

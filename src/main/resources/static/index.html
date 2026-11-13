@@ -1,3 +1,4 @@
+<!-- FILE: src/main/resources/web/index.html -->
 <!DOCTYPE html>
 <html lang="vi">
 <head>
@@ -41,6 +42,9 @@
                     <input type="password" id="login-password" placeholder="••••••••" autocomplete="current-password" required>
                 </div>
             </div>
+            <div class="forgot-row">
+                <a href="#" class="forgot-link" onclick="showForgotPassword(event)">Quên mật khẩu?</a>
+            </div>
             <button type="submit" class="btn btn-primary btn-block">
                 Vào Hộp Thư <i class="fa-solid fa-arrow-right"></i>
             </button>
@@ -71,6 +75,67 @@
             <button type="submit" class="btn btn-success btn-block">
                 Tạo Tài Khoản <i class="fa-solid fa-user-check"></i>
             </button>
+        </form>
+
+        <form id="forgot-form" class="auth-form hidden" onsubmit="handleResetPassword(event)" autocomplete="off">
+            <p class="auth-help">Nhập tên tài khoản, chọn cách xác minh rồi đặt mật khẩu mới.</p>
+
+            <div class="input-group">
+                <label for="fp-username">Tên tài khoản</label>
+                <div class="input-icon-wrapper">
+                    <i class="fa-solid fa-user input-icon"></i>
+                    <input type="email" id="fp-username" placeholder="user@pbl4.com" autocomplete="username" required>
+                </div>
+            </div>
+
+            <div class="method-switch">
+                <button type="button" id="fp-method-otp" class="method-btn active" onclick="selectResetMethod('OTP')">
+                    <i class="fa-solid fa-envelope-circle-check"></i> OTP qua email khôi phục
+                </button>
+                <button type="button" id="fp-method-backup" class="method-btn" onclick="selectResetMethod('BACKUP_CODE')">
+                    <i class="fa-solid fa-key"></i> Mã dự phòng
+                </button>
+            </div>
+
+            <button type="button" id="fp-send-otp" class="btn btn-outline btn-block" onclick="handleSendOtp()">
+                <i class="fa-solid fa-paper-plane"></i> Gửi mã OTP
+            </button>
+
+            <div class="input-group" style="margin-top: 14px;">
+                <label for="fp-code" id="fp-code-label">Mã OTP</label>
+                <div class="input-icon-wrapper">
+                    <i class="fa-solid fa-hashtag input-icon"></i>
+                    <input type="text" id="fp-code" inputmode="numeric" autocomplete="one-time-code" maxlength="20" placeholder="Nhập mã" required>
+                </div>
+            </div>
+
+            <div class="input-group">
+                <label for="fp-new-password">Mật khẩu mới</label>
+                <div class="input-icon-wrapper">
+                    <i class="fa-solid fa-lock input-icon"></i>
+                    <input type="password" id="fp-new-password" placeholder="8–32 ký tự, có chữ, số, ký tự đặc biệt" autocomplete="new-password" required
+                           oninput="updateStrength('fp-new-password','fp-strength-bar','fp-strength-label')">
+                </div>
+                <div class="strength"><div id="fp-strength-bar" class="strength-bar"></div></div>
+                <div id="fp-strength-label" class="strength-label"></div>
+            </div>
+
+            <div class="input-group">
+                <label for="fp-confirm">Nhập lại mật khẩu mới</label>
+                <div class="input-icon-wrapper">
+                    <i class="fa-solid fa-check-double input-icon"></i>
+                    <input type="password" id="fp-confirm" placeholder="••••••••" autocomplete="new-password" required>
+                </div>
+            </div>
+
+            <button type="submit" class="btn btn-primary btn-block">
+                Đặt lại mật khẩu <i class="fa-solid fa-arrow-right"></i>
+            </button>
+            <div class="forgot-row" style="margin-top: 12px; text-align: center;">
+                <a href="#" class="forgot-link" onclick="backToLogin(event)"><i class="fa-solid fa-arrow-left"></i> Quay lại đăng nhập</a>
+            </div>
+
+            <div id="fp-message" class="inline-msg hidden"></div>
         </form>
 
         <div id="auth-message" class="alert-message hidden"></div>

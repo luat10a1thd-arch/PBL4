@@ -1,3 +1,4 @@
+// FILE: src/main/java/com/pbl4/mailserver/core/UserStore.java
 package com.pbl4.mailserver.core;
 
 import com.pbl4.mailserver.config.ServerConfig;
@@ -51,7 +52,8 @@ public class UserStore {
         if (userMap.isEmpty()) {
             byte[] salt = SecurityUtils.generateSalt();
             String saltBase64 = Base64.getEncoder().encodeToString(salt);
-            String hash = SecurityUtils.hashPassword(ServerConfig.ADMIN_DEFAULT_PASS);
+            // Nếu thiếu PBL4_ADMIN_PASSWORD, mật khẩu ngẫu nhiên được in ra console đúng một lần ở đây
+            String hash = SecurityUtils.hashPassword(ServerConfig.consumeAdminInitialPassword());
             addUser(ServerConfig.ADMIN_EMAIL, hash, saltBase64, "ACTIVE", "ADMIN");
         } else if (!exists(ServerConfig.ADMIN_EMAIL)) {
             System.err.println("[USERSTORE] CẢNH BÁO: users.json đã có người dùng nhưng không có " + ServerConfig.ADMIN_EMAIL + ", KHÔNG tự tạo lại admin mặc định.");
@@ -127,6 +129,10 @@ public class UserStore {
             mainFileTrusted = true;
         }
 
+        // Siết quyền các file hiện có (file cũ có thể đã được tạo với quyền 644)
+        if (file.exists()) setFilePermissions(file.toPath(), false);
+        if (backup.exists()) setFilePermissions(backup.toPath(), false);
+
         boolean dirty = false;
         for (User user : userMap.values()) {
             if (user.getSalt() == null || user.getSalt().trim().isEmpty()) {
@@ -188,8 +194,8 @@ public class UserStore {
         try {
             Path corrupt = Paths.get(usersFilePath + ".corrupt-" + System.currentTimeMillis());
             Files.move(main.toPath(), corrupt, StandardCopyOption.REPLACE_EXISTING);
-            Files.copy(backup.toPath(), main.toPath(), StandardCopyOption.REPLACE_EXISTING);
-            setFilePermissions(main.toPath(), false);
+            setFilePermissions(corrupt, false);
+            SecurityUtils.writeOwnerOnly(main.toPath(), Files.readAllBytes(backup.toPath()));
             mainFileTrusted = true;
             System.err.println("[USERSTORE] File hỏng được giữ lại tại " + corrupt.getFileName());
         } catch (Exception e) {
@@ -226,13 +232,12 @@ public class UserStore {
             Path backup = Paths.get(usersFilePath + ".bak");
             Path tmp = Paths.get(usersFilePath + ".tmp");
 
+            // Mọi file chứa hash đều được tạo với quyền 600 ngay từ đầu (không có khoảng hở quyền rộng)
             if (Files.exists(target) && mainFileTrusted) {
-                Files.copy(target, backup, StandardCopyOption.REPLACE_EXISTING);
-                setFilePermissions(backup, false);
+                SecurityUtils.writeOwnerOnly(backup, Files.readAllBytes(target));
             }
 
-            Files.write(tmp, sb.toString().getBytes(StandardCharsets.UTF_8));
-            setFilePermissions(tmp, false);
+            SecurityUtils.writeOwnerOnly(tmp, sb.toString().getBytes(StandardCharsets.UTF_8));
 
             try {
                 Files.move(tmp, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
@@ -310,6 +315,11 @@ public class UserStore {
     }
 
     public static synchronized boolean addUserIfAbsent(String username, String passwordHash) {
+        return addUserIfAbsent(username, passwordHash, "ACTIVE");
+    }
+
+    /** Như bản 2 tham số nhưng cho phép đặt trạng thái ban đầu (APPROVAL: "LOCKED" cho tới khi Admin duyệt). Admin luôn ACTIVE. */
+    public static synchronized boolean addUserIfAbsent(String username, String passwordHash, String initialStatus) {
         ensureLoaded();
         String key = username.toLowerCase(Locale.ROOT).trim();
         if (userMap.containsKey(key) || isAliasName(key)) {
@@ -317,9 +327,11 @@ public class UserStore {
         }
         byte[] saltBytes = SecurityUtils.generateSalt();
         String saltBase64 = Base64.getEncoder().encodeToString(saltBytes);
-        String role = ServerConfig.ADMIN_EMAIL.equalsIgnoreCase(username) ? "ADMIN" : "USER";
+        boolean isAdmin = ServerConfig.ADMIN_EMAIL.equalsIgnoreCase(username);
+        String role = isAdmin ? "ADMIN" : "USER";
+        String status = (isAdmin || initialStatus == null || initialStatus.trim().isEmpty()) ? "ACTIVE" : initialStatus;
 
-        User user = new User(username.trim(), passwordHash, saltBase64, "ACTIVE", role);
+        User user = new User(username.trim(), passwordHash, saltBase64, status, role);
         userMap.put(key, user);
         saveUsersToFile();
         return true;

@@ -1,3 +1,4 @@
+// FILE: src/main/java/com/pbl4/mailserver/pop3/Pop3Handler.java
 package com.pbl4.mailserver.pop3;
 
 import com.pbl4.mailserver.config.ServerConfig;
@@ -132,7 +133,8 @@ public class Pop3Handler implements Runnable {
             String pendingUser = null;
             String currentUser = null;
             boolean isAuthenticated = false;
-            boolean isTlsActive = false;
+            // Kết nối POP3S (TLS ngầm định) đã là SSLSocket từ đầu => coi như TLS đang hoạt động
+            boolean isTlsActive = (clientSocket instanceof SSLSocket);
 
             // PASS chỉ lấy metadata (id + kích thước byte thật), KHÔNG giải mã cả hòm thư.
             // Nội dung thư chỉ được giải mã lười, từng thư một, khi RETR/TOP.
@@ -185,7 +187,10 @@ public class Pop3Handler implements Runnable {
                 }
                 else if ("CAPA".equals(command)) {
                     writeLine(out, "+OK Capability list follows");
-                    writeLine(out, "USER");
+                    // Khi bắt buộc TLS mà chưa STLS: không quảng bá USER (RFC 2595), chỉ STLS
+                    if (isTlsActive || !ServerConfig.POP3_REQUIRE_TLS) {
+                        writeLine(out, "USER");
+                    }
                     writeLine(out, "UIDL");
                     writeLine(out, "TOP");
                     if (!isTlsActive) {
@@ -199,12 +204,22 @@ public class Pop3Handler implements Runnable {
                         send(out, "-ERR Already authenticated");
                         continue;
                     }
+                    if (ServerConfig.POP3_REQUIRE_TLS && !isTlsActive) {
+                        send(out, "-ERR [AUTH] Command only permitted with TLS, use STLS first");
+                        continue;
+                    }
                     pendingUser = argument;
                     send(out, "+OK User accepted");
                 }
                 else if ("PASS".equals(command)) {
                     if (isAuthenticated) {
                         send(out, "-ERR Already authenticated");
+                        continue;
+                    }
+                    if (ServerConfig.POP3_REQUIRE_TLS && !isTlsActive) {
+                        // Từ chối trước khi xử lý mật khẩu; không ghi nhận như lần sai
+                        pendingUser = null;
+                        send(out, "-ERR [AUTH] Command only permitted with TLS, use STLS first");
                         continue;
                     }
                     if (pendingUser == null) {

@@ -1,3 +1,4 @@
+// FILE: src/main/java/com/pbl4/mailserver/webapi/AdminHandler.java
 package com.pbl4.mailserver.webapi;
 
 import com.pbl4.mailserver.auth.DnsRecordPrinter;
@@ -7,6 +8,7 @@ import com.pbl4.mailserver.core.OutboundQueue;
 import com.pbl4.mailserver.core.User;
 import com.pbl4.mailserver.core.UserStore;
 import com.pbl4.mailserver.outbound.QueueEntry;
+import com.pbl4.mailserver.ratelimit.AbuseGuard;
 
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
@@ -16,6 +18,9 @@ import java.io.FileWriter;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.io.RandomAccessFile;
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.net.UnknownHostException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Paths;
@@ -27,6 +32,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.Deque;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadPoolExecutor;
@@ -36,6 +42,8 @@ import java.util.regex.Pattern;
 public class AdminHandler implements HttpHandler {
 
     private static final String SYSTEM_LOG_PATH = "data/system.log";
+    // Nhật ký hành động của admin (ai, làm gì, lúc nào, IP). Chỉ ghi nối thêm, có xoay vòng; không chứa mật khẩu/nội dung thư.
+    private static final String AUDIT_LOG_PATH = "data/admin-audit.log";
 
     // Broadcast chạy nền trên executor riêng (1 luồng, tối đa 2 job chờ) để không giữ luồng HTTP
     private static final ThreadPoolExecutor BROADCAST_EXECUTOR = new ThreadPoolExecutor(
@@ -59,6 +67,15 @@ public class AdminHandler implements HttpHandler {
     private static final int QUEUE_MAX_ROWS = 1000;
     private static final String DNS_PLACEHOLDER_IP = "203.0.113.10";
     private static final Object DNS_LOCK = new Object();
+
+    // Bảo mật IP
+    private static final int BAN_MIN_MINUTES = 1;
+    private static final int BAN_MAX_MINUTES = 10080;
+    private static final int BAN_DEFAULT_MINUTES = 30;
+    private static final int SECURITY_MAX_ROWS = 1000;
+    private static final Pattern IPV4 = Pattern.compile(
+            "(25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)(\\.(25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)){3}");
+    private static final Pattern IPV6_CHARS = Pattern.compile("[0-9A-Fa-f:.]{2,45}");
 
     // ---- Điểm móc (package-private) để test thay phần phụ thuộc bằng bản giả ----
 
@@ -97,6 +114,17 @@ public class AdminHandler implements HttpHandler {
 
     interface StatsSource {
         MailStats read();
+    }
+
+    /** Khóa/mở khóa IP (ratelimit/AbuseGuard). */
+    interface SecurityAccess {
+        Map<String, Long> bannedIps();
+
+        int trackedIps();
+
+        void ban(String ip, long minutes);
+
+        void unban(String ip);
     }
 
     private static final Gate DEFAULT_GATE = new Gate() {
@@ -140,21 +168,49 @@ public class AdminHandler implements HttpHandler {
             countEncFiles("_spam"),
             MailStorageEngine.getTotalStorageSizeBytes());
 
+    private static final SecurityAccess DEFAULT_SECURITY = new SecurityAccess() {
+        @Override
+        public Map<String, Long> bannedIps() {
+            return AbuseGuard.bannedIps();
+        }
+
+        @Override
+        public int trackedIps() {
+            return AbuseGuard.defaultEngine().trackedIps();
+        }
+
+        @Override
+        public void ban(String ip, long minutes) {
+            AbuseGuard.banForMinutes(ip, minutes);
+        }
+
+        @Override
+        public void unban(String ip) {
+            AbuseGuard.unban(ip);
+        }
+    };
+
     private static volatile Gate gate = DEFAULT_GATE;
     private static volatile QueueAccess queueAccess = DEFAULT_QUEUE;
     private static volatile DnsRenderer dnsRenderer = DEFAULT_DNS;
     private static volatile StatsSource statsSource = DEFAULT_STATS;
+    private static volatile SecurityAccess securityAccess = DEFAULT_SECURITY;
 
     static void setHooksForTest(Gate g, QueueAccess q, DnsRenderer d, StatsSource s) {
+        setHooksForTest(g, q, d, s, null);
+    }
+
+    static void setHooksForTest(Gate g, QueueAccess q, DnsRenderer d, StatsSource s, SecurityAccess sec) {
         gate = g != null ? g : DEFAULT_GATE;
         queueAccess = q != null ? q : DEFAULT_QUEUE;
         dnsRenderer = d != null ? d : DEFAULT_DNS;
         statsSource = s != null ? s : DEFAULT_STATS;
+        securityAccess = sec != null ? sec : DEFAULT_SECURITY;
         statsCachedAt = 0;
     }
 
     static void resetHooksForTest() {
-        setHooksForTest(null, null, null, null);
+        setHooksForTest(null, null, null, null, null);
     }
 
     private static long countEncFiles(String boxSuffix) {
@@ -169,12 +225,15 @@ public class AdminHandler implements HttpHandler {
         return count;
     }
 
-    @Override
-    public void handle(HttpExchange exchange) throws IOException {
+    /**
+     * Kiểm tra phiên + quyền ADMIN. Trả tên admin, hoặc null nếu đã tự trả 401/403.
+     * Được gọi ở cổng vào VÀ lại ở đầu mỗi route bảo mật (phòng thủ nhiều lớp).
+     */
+    private String requireAdmin(HttpExchange exchange) throws IOException {
         String authHeader = exchange.getRequestHeaders().getFirst("Authorization");
         if (authHeader == null || !authHeader.startsWith("Bearer ")) {
             sendResponse(exchange, 401, "{\"success\": false, \"message\": \"Chưa đăng nhập!\"}");
-            return;
+            return null;
         }
 
         String token = authHeader.substring(7);
@@ -182,13 +241,22 @@ public class AdminHandler implements HttpHandler {
 
         if (currentUser == null) {
             sendResponse(exchange, 401, "{\"success\": false, \"message\": \"Phiên đăng nhập hết hạn hoặc không hợp lệ!\"}");
-            return;
+            return null;
         }
 
         if (!gate.isAdmin(currentUser)) {
+            audit(currentUser, "access.denied", "path=" + exchange.getRequestURI().getPath(), callerIp(exchange));
             sendResponse(exchange, 403, "{\"success\": false, \"message\": \"Từ chối truy cập! Quyền Admin bắt buộc.\"}");
-            return;
+            return null;
         }
+        return currentUser;
+    }
+
+    @Override
+    public void handle(HttpExchange exchange) throws IOException {
+        String currentUser = requireAdmin(exchange);
+        if (currentUser == null) return;
+        exchange.setAttribute("adminUser", currentUser);
 
         String path = exchange.getRequestURI().getPath();
         String method = exchange.getRequestMethod();
@@ -218,8 +286,15 @@ public class AdminHandler implements HttpHandler {
             return;
         }
 
+        if ("GET".equalsIgnoreCase(method) && path.endsWith("/security")) {
+            handleGetSecurity(exchange);
+            return;
+        }
+
         if ("DELETE".equalsIgnoreCase(method) && path.endsWith("/queue")) {
-            handleDeleteQueueJob(exchange, queryParam(exchange, "id"));
+            String qid = queryParam(exchange, "id");
+            setAudit(exchange, "queue.delete", "id=" + qid);
+            handleDeleteQueueJob(exchange, qid);
             return;
         }
 
@@ -229,21 +304,33 @@ public class AdminHandler implements HttpHandler {
             String targetUser = getParamValue(body, "targetUser");
 
             if (path.endsWith("/user/delete")) {
+                setAudit(exchange, "user.delete", "target=" + targetUser);
                 handleDeleteUser(exchange, targetUser);
             } else if (path.endsWith("/user/toggle-lock")) {
                 String action = getParamValue(body, "action");
+                setAudit(exchange, "user.toggle-lock", "target=" + targetUser + " action=" + action);
                 handleToggleLockUser(exchange, targetUser, action);
             } else if (path.endsWith("/broadcast")) {
                 String subject = getParamValue(body, "subject");
                 String content = getParamValue(body, "body");
+                setAudit(exchange, "broadcast", "");   // cố ý không ghi tiêu đề/nội dung
                 handleBroadcast(exchange, subject, content);
             } else if (path.endsWith("/quota")) {
                 String quotaStr = getParamValue(body, "quota");
+                setAudit(exchange, "quota.set", "value=" + quotaStr);
                 handleSaveQuota(exchange, quotaStr);
             } else if (path.endsWith("/queue/retry")) {
-                handleRetryQueueJob(exchange, getParamValue(body, "id"));
+                String qid = getParamValue(body, "id");
+                setAudit(exchange, "queue.retry", "id=" + qid);
+                handleRetryQueueJob(exchange, qid);
             } else if (path.endsWith("/queue/delete")) {
-                handleDeleteQueueJob(exchange, getParamValue(body, "id"));
+                String qid = getParamValue(body, "id");
+                setAudit(exchange, "queue.delete", "id=" + qid);
+                handleDeleteQueueJob(exchange, qid);
+            } else if (path.endsWith("/security/ban")) {
+                handleBanIp(exchange, getParamValue(body, "ip"), getParamValue(body, "minutes"));
+            } else if (path.endsWith("/security/unban")) {
+                handleUnbanIp(exchange, getParamValue(body, "ip"));
             } else {
                 sendResponse(exchange, 404, "{\"success\": false, \"message\": \"Endpoint không tồn tại!\"}");
             }
@@ -309,6 +396,213 @@ public class AdminHandler implements HttpHandler {
 
     private static void invalidateStatsCache() {
         statsCachedAt = 0;
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // Bảo mật: IP bị khóa (AbuseGuard)
+    // ------------------------------------------------------------------------------------------
+
+    private void handleGetSecurity(HttpExchange exchange) throws IOException {
+        if (requireAdmin(exchange) == null) return;
+
+        int tracked = securityAccess.trackedIps();
+        List<Map.Entry<String, Long>> banned = new ArrayList<>(securityAccess.bannedIps().entrySet());
+        banned.sort((a, b) -> Long.compare(b.getValue(), a.getValue()));
+
+        StringBuilder sb = new StringBuilder("[");
+        int shown = Math.min(banned.size(), SECURITY_MAX_ROWS);
+        for (int i = 0; i < shown; i++) {
+            if (i > 0) sb.append(",");
+            sb.append("{\"ip\":\"").append(escapeJson(banned.get(i).getKey()))
+              .append("\",\"remainingSeconds\":").append(banned.get(i).getValue()).append("}");
+        }
+        sb.append("]");
+        sendResponse(exchange, 200, "{\"success\": true, \"trackedIps\": " + tracked
+                + ", \"bannedIps\": " + sb + "}");
+    }
+
+    private void handleBanIp(HttpExchange exchange, String ipRaw, String minutesStr) throws IOException {
+        String admin = requireAdmin(exchange);
+        if (admin == null) return;
+        setAudit(exchange, "security.ban", "ip=" + ipRaw + " minutes=" + minutesStr);
+
+        InetAddress addr = parseIp(ipRaw);
+        if (addr == null) {
+            sendResponse(exchange, 400, "{\"success\": false, \"message\": \"Địa chỉ IP không hợp lệ!\"}");
+            return;
+        }
+
+        long minutes = BAN_DEFAULT_MINUTES;
+        if (minutesStr != null && !minutesStr.trim().isEmpty()) {
+            String m = minutesStr.trim();
+            if (m.length() > 6 || !m.matches("\\d+")) {
+                sendResponse(exchange, 400, "{\"success\": false, \"message\": \"Số phút phải là số nguyên từ "
+                        + BAN_MIN_MINUTES + " đến " + BAN_MAX_MINUTES + "!\"}");
+                return;
+            }
+            minutes = Long.parseLong(m);
+        }
+        if (minutes < BAN_MIN_MINUTES || minutes > BAN_MAX_MINUTES) {
+            sendResponse(exchange, 400, "{\"success\": false, \"message\": \"Số phút phải là số nguyên từ "
+                    + BAN_MIN_MINUTES + " đến " + BAN_MAX_MINUTES + "!\"}");
+            return;
+        }
+
+        if (addr.isLoopbackAddress() || addr.isAnyLocalAddress() || addr.isMulticastAddress()) {
+            sendResponse(exchange, 400, "{\"success\": false, \"message\": \"Không thể chặn địa chỉ này!\"}");
+            return;
+        }
+
+        InetSocketAddress remote = exchange.getRemoteAddress();
+        if (remote != null && remote.getAddress() != null && remote.getAddress().equals(addr)) {
+            sendResponse(exchange, 400, "{\"success\": false, \"message\": \"Không thể tự chặn địa chỉ IP của chính bạn!\"}");
+            return;
+        }
+
+        String cleanIp = addr.getHostAddress();
+        securityAccess.ban(cleanIp, minutes);
+        appendLog("Bảo mật: Admin đã chặn IP " + cleanIp + " trong " + minutes + " phút");
+        sendResponse(exchange, 200, "{\"success\": true, \"ip\": \"" + escapeJson(cleanIp)
+                + "\", \"minutes\": " + minutes + ", \"message\": \"Đã chặn IP " + escapeJson(cleanIp)
+                + " trong " + minutes + " phút!\"}");
+    }
+
+    private void handleUnbanIp(HttpExchange exchange, String ipRaw) throws IOException {
+        String admin = requireAdmin(exchange);
+        if (admin == null) return;
+        setAudit(exchange, "security.unban", "ip=" + ipRaw);
+
+        InetAddress addr = parseIp(ipRaw);
+        if (addr == null) {
+            sendResponse(exchange, 400, "{\"success\": false, \"message\": \"Địa chỉ IP không hợp lệ!\"}");
+            return;
+        }
+        String cleanIp = addr.getHostAddress();
+        securityAccess.unban(cleanIp);
+        appendLog("Bảo mật: Admin đã mở khóa IP " + cleanIp);
+        sendResponse(exchange, 200, "{\"success\": true, \"ip\": \"" + escapeJson(cleanIp)
+                + "\", \"message\": \"Đã mở khóa IP " + escapeJson(cleanIp) + "!\"}");
+    }
+
+    /**
+     * Parse IPv4/IPv6 literal THẬT, tự viết để tuyệt đối không phát sinh truy vấn DNS
+     * (InetAddress.getByName có thể tra DNS với chuỗi lạ). Trả null nếu không hợp lệ.
+     * IPv4-mapped (::ffff:a.b.c.d) tự quy về IPv4. Không chấp nhận zone-id (%eth0).
+     */
+    static InetAddress parseIp(String raw) {
+        if (raw == null) return null;
+        String s = raw.trim();
+        if (s.length() < 2 || s.length() > 45) return null;
+        try {
+            if (s.indexOf(':') < 0) {
+                if (!IPV4.matcher(s).matches()) return null;
+                String[] p = s.split("\\.");
+                byte[] b = new byte[4];
+                for (int i = 0; i < 4; i++) b[i] = (byte) Integer.parseInt(p[i]);
+                return InetAddress.getByAddress(b);
+            }
+            if (!IPV6_CHARS.matcher(s).matches()) return null;
+            byte[] b = parseIpv6(s);
+            return b == null ? null : InetAddress.getByAddress(b);
+        } catch (UnknownHostException | RuntimeException e) {
+            return null;
+        }
+    }
+
+    private static byte[] parseIpv6(String s) {
+        int dbl = s.indexOf("::");
+        if (dbl != s.lastIndexOf("::")) return null;
+        List<Integer> head;
+        List<Integer> tail;
+        if (dbl >= 0) {
+            head = ipv6Groups(s.substring(0, dbl), false);
+            tail = ipv6Groups(s.substring(dbl + 2), true);
+            if (head == null || tail == null || head.size() + tail.size() > 7) return null;
+        } else {
+            head = ipv6Groups(s, true);
+            tail = new ArrayList<>();
+            if (head == null || head.size() != 8) return null;
+        }
+        int[] g = new int[8];
+        int i = 0;
+        for (int v : head) g[i++] = v;
+        i = 8 - tail.size();
+        for (int v : tail) g[i++] = v;
+        byte[] out = new byte[16];
+        for (int k = 0; k < 8; k++) {
+            out[2 * k] = (byte) (g[k] >> 8);
+            out[2 * k + 1] = (byte) g[k];
+        }
+        return out;
+    }
+
+    private static List<Integer> ipv6Groups(String part, boolean allowIpv4Tail) {
+        List<Integer> out = new ArrayList<>();
+        if (part.isEmpty()) return out;
+        String[] tok = part.split(":", -1);
+        for (int i = 0; i < tok.length; i++) {
+            String t = tok[i];
+            if (t.isEmpty()) return null;
+            if (t.indexOf('.') >= 0) {
+                if (!allowIpv4Tail || i != tok.length - 1 || !IPV4.matcher(t).matches()) return null;
+                String[] p = t.split("\\.");
+                out.add((Integer.parseInt(p[0]) << 8) | Integer.parseInt(p[1]));
+                out.add((Integer.parseInt(p[2]) << 8) | Integer.parseInt(p[3]));
+            } else {
+                if (t.length() > 4) return null;
+                out.add(Integer.parseInt(t, 16));
+            }
+        }
+        return out;
+    }
+
+    private static String callerIp(HttpExchange exchange) {
+        try {
+            InetSocketAddress a = exchange.getRemoteAddress();
+            if (a == null || a.getAddress() == null) return "";
+            String h = a.getAddress().getHostAddress();
+            int pct = h.indexOf('%');
+            return pct >= 0 ? h.substring(0, pct) : h;
+        } catch (RuntimeException e) {
+            return "";
+        }
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // Nhật ký hành động admin (append-only, xoay vòng)
+    // ------------------------------------------------------------------------------------------
+
+    private static final Object AUDIT_LOCK = new Object();
+
+    private static void setAudit(HttpExchange exchange, String action, String detail) {
+        exchange.setAttribute("auditAction", action);
+        exchange.setAttribute("auditDetail", detail == null ? "" : detail);
+    }
+
+    private static String cleanAudit(String raw, int max) {
+        if (raw == null) return "";
+        String s = raw.replaceAll("[\\p{Cntrl}]", " ").trim();
+        return s.length() > max ? s.substring(0, max) : s;
+    }
+
+    private static void audit(String admin, String action, String detail, String fromIp) {
+        synchronized (AUDIT_LOCK) {
+            try {
+                File f = new File(AUDIT_LOG_PATH);
+                File parent = f.getParentFile();
+                if (parent != null && !parent.exists()) parent.mkdirs();
+                rotateLogIfNeeded(f);
+                String time = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
+                try (FileWriter fw = new FileWriter(f, StandardCharsets.UTF_8, true)) {
+                    fw.write("[AUDIT " + time + "] admin=" + cleanAudit(admin, 100)
+                            + " ip=" + cleanAudit(fromIp, 45)
+                            + " action=" + cleanAudit(action, 60)
+                            + " " + cleanAudit(detail, 300) + "\n");
+                }
+            } catch (IOException e) {
+                System.err.println("Không ghi được nhật ký hành động admin.");
+            }
+        }
     }
 
     // ------------------------------------------------------------------------------------------
@@ -752,7 +1046,7 @@ public class AdminHandler implements HttpHandler {
         }
     }
 
-    // Xoay vòng: system.log -> system.log.1 -> .2 -> ... (giữ ADMIN_LOG_KEEP_FILES file cũ, xóa file cũ nhất)
+    // Xoay vòng: x.log -> x.log.1 -> .2 -> ... (giữ ADMIN_LOG_KEEP_FILES file cũ, xóa file cũ nhất). Dùng chung cho system.log và admin-audit.log.
     private static void rotateLogIfNeeded(File logFile) {
         if (!logFile.exists() || logFile.length() < ServerConfig.ADMIN_LOG_MAX_BYTES) return;
         try {
@@ -818,5 +1112,16 @@ public class AdminHandler implements HttpHandler {
         OutputStream os = exchange.getResponseBody();
         os.write(bytes);
         os.close();
+
+        // Ghi nhật ký hành động admin kèm mã kết quả (chỉ các route đã gọi setAudit)
+        Object act = exchange.getAttribute("auditAction");
+        if (act != null) {
+            Object who = exchange.getAttribute("adminUser");
+            Object det = exchange.getAttribute("auditDetail");
+            audit(who == null ? "?" : who.toString(), act.toString(),
+                    (det == null || det.toString().isEmpty() ? "" : det + " ") + "status=" + statusCode,
+                    callerIp(exchange));
+            exchange.setAttribute("auditAction", null);
+        }
     }
 }

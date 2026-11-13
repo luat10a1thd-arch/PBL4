@@ -1,3 +1,4 @@
+<!-- FILE: src/main/resources/web/admin.html -->
 <!DOCTYPE html>
 <html lang="vi">
 <head>
@@ -94,6 +95,11 @@
             <li>
                 <a href="#" onclick="switchAdminTab('outbound', this)">
                     <i class="fa-solid fa-paper-plane"></i> Hàng đợi gửi & DNS
+                </a>
+            </li>
+            <li>
+                <a href="#" onclick="switchAdminTab('security', this)">
+                    <i class="fa-solid fa-user-shield"></i> Bảo mật & Chặn IP
                 </a>
             </li>
         </ul>
@@ -257,6 +263,46 @@
                 </div>
             </div>
 
+            <div id="tab-security" class="tab-content">
+                <div class="card-panel">
+                    <h3><i class="fa-solid fa-ban"></i> Chặn IP thủ công</h3>
+                    <form class="sec-toolbar" id="ban-form">
+                        <div class="form-group">
+                            <label for="ban-ip">Địa chỉ IP (IPv4 hoặc IPv6)</label>
+                            <input type="text" class="form-control" id="ban-ip" placeholder="vd: 203.0.113.5" autocomplete="off" required>
+                        </div>
+                        <div class="form-group">
+                            <label for="ban-minutes">Số phút (1 – 10080)</label>
+                            <input type="number" class="form-control" id="ban-minutes" value="30" min="1" max="10080" required>
+                        </div>
+                        <button type="submit" class="btn-primary-admin" id="ban-submit-btn"><i class="fa-solid fa-ban"></i> Chặn IP</button>
+                    </form>
+                    <div class="sec-note">Không thể chặn 127.0.0.1 / ::1 hoặc chính địa chỉ IP bạn đang truy cập.</div>
+                </div>
+
+                <div class="card-panel">
+                    <h3><i class="fa-solid fa-shield-virus"></i> IP đang bị chặn</h3>
+                    <div style="margin-bottom: 10px;">
+                        <button type="button" class="btn-primary-admin" id="sec-refresh-btn"><i class="fa-solid fa-rotate"></i> Làm mới</button>
+                        <span id="sec-summary" style="margin-left: 10px; color: #64748b; font-size: 13px;"></span>
+                    </div>
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Địa chỉ IP</th>
+                                <th>Thời gian còn lại</th>
+                                <th>Thao tác</th>
+                            </tr>
+                        </thead>
+                        <tbody id="banned-table-body">
+                            <tr>
+                                <td colspan="3" style="text-align: center; color: #64748b;">Chưa tải danh sách.</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
         </div>
     </div>
 </div>
@@ -351,6 +397,9 @@
         if (tabName === 'outbound') {
             loadQueue();
             if (!dnsLoaded) loadDnsRecords();
+        }
+        if (tabName === 'security') {
+            loadSecurity();
         }
     }
 
@@ -750,10 +799,145 @@
         }
     }
 
+    // ===== Bảo mật & Chặn IP =====
+    function formatRemaining(sec) {
+        sec = Number(sec) || 0;
+        if (sec < 60) return sec + ' giây';
+        const d = Math.floor(sec / 86400);
+        const h = Math.floor((sec % 86400) / 3600);
+        const m = Math.floor((sec % 3600) / 60);
+        const parts = [];
+        if (d) parts.push(d + ' ngày');
+        if (h) parts.push(h + ' giờ');
+        if (m && !d) parts.push(m + ' phút');
+        return parts.join(' ');
+    }
+
+    async function loadSecurity() {
+        const tbody = document.getElementById('banned-table-body');
+        const summary = document.getElementById('sec-summary');
+        try {
+            const res = await fetch('/api/admin/security', {
+                headers: { 'Authorization': 'Bearer ' + token }
+            });
+            const data = await res.json();
+            if (!data.success) {
+                showToast(data.message || 'Không tải được dữ liệu bảo mật!', 'error');
+                return;
+            }
+
+            const banned = Array.isArray(data.bannedIps) ? data.bannedIps : [];
+            summary.textContent = banned.length + ' IP đang bị chặn · ' + (data.trackedIps || 0) + ' IP đang được theo dõi';
+            tbody.innerHTML = '';
+
+            if (banned.length === 0) {
+                const tr = document.createElement('tr');
+                const td = makeCell('Hiện không có IP nào đang bị chặn.');
+                td.colSpan = 3;
+                td.style.textAlign = 'center';
+                td.style.color = '#15803d';
+                tr.appendChild(td);
+                tbody.appendChild(tr);
+                return;
+            }
+
+            banned.forEach(item => {
+                const tr = document.createElement('tr');
+                tr.appendChild(makeCell(item.ip));
+                tr.appendChild(makeCell(formatRemaining(item.remainingSeconds)));
+
+                const actionTd = document.createElement('td');
+                const unbanBtn = document.createElement('button');
+                unbanBtn.className = 'btn-action btn-unlock';
+                unbanBtn.innerHTML = '<i class="fa-solid fa-lock-open"></i> Mở khóa';
+                unbanBtn.addEventListener('click', () => unbanIp(item.ip));
+                actionTd.appendChild(unbanBtn);
+                tr.appendChild(actionTd);
+                tbody.appendChild(tr);
+            });
+        } catch (err) {
+            console.error('Lỗi tải dữ liệu bảo mật:', err);
+            showToast('Lỗi kết nối Server!', 'error');
+        }
+    }
+
+    function handleBanIp(e) {
+        e.preventDefault();
+        const ip = document.getElementById('ban-ip').value.trim();
+        const minutesRaw = document.getElementById('ban-minutes').value.trim();
+        const minutes = Number(minutesRaw);
+
+        if (!ip) {
+            showToast('Vui lòng nhập địa chỉ IP!', 'error');
+            return;
+        }
+        if (!/^\d+$/.test(minutesRaw) || minutes < 1 || minutes > 10080) {
+            showToast('Số phút phải là số nguyên từ 1 đến 10080!', 'error');
+            return;
+        }
+
+        showConfirmModal(
+            'Xác nhận chặn IP',
+            `Chặn IP ${ip} trong ${minutes} phút? IP này sẽ không kết nối được tới máy chủ thư.`,
+            async () => {
+                try {
+                    const res = await fetch('/api/admin/security/ban', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/x-www-form-urlencoded',
+                            'Authorization': 'Bearer ' + token
+                        },
+                        body: `ip=${encodeURIComponent(ip)}&minutes=${encodeURIComponent(minutes)}`
+                    });
+                    const data = await res.json();
+                    showToast(data.message || (data.success ? 'Đã chặn IP!' : 'Chặn IP thất bại!'), data.success ? 'success' : 'error');
+                    if (data.success) document.getElementById('ban-ip').value = '';
+                    loadSecurity();
+                    loadSystemLogs();
+                } catch (err) {
+                    showToast('Lỗi kết nối Server!', 'error');
+                }
+            },
+            true
+        );
+    }
+
+    function unbanIp(ip) {
+        showConfirmModal(
+            'Mở khóa IP',
+            `Mở khóa cho IP ${ip}?`,
+            async () => {
+                try {
+                    const res = await fetch('/api/admin/security/unban', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/x-www-form-urlencoded',
+                            'Authorization': 'Bearer ' + token
+                        },
+                        body: `ip=${encodeURIComponent(ip)}`
+                    });
+                    const data = await res.json();
+                    showToast(data.message || (data.success ? 'Đã mở khóa!' : 'Mở khóa thất bại!'), data.success ? 'success' : 'error');
+                    loadSecurity();
+                    loadSystemLogs();
+                } catch (err) {
+                    showToast('Lỗi kết nối Server!', 'error');
+                }
+            }
+        );
+    }
+
     document.addEventListener('DOMContentLoaded', () => {
         document.getElementById('queue-refresh-btn').addEventListener('click', loadQueue);
         document.getElementById('dns-load-btn').addEventListener('click', loadDnsRecords);
         document.getElementById('dns-copy-btn').addEventListener('click', copyDnsRecords);
+        document.getElementById('sec-refresh-btn').addEventListener('click', loadSecurity);
+        document.getElementById('ban-form').addEventListener('submit', handleBanIp);
+        // Làm mới danh sách IP bị chặn mỗi 30 giây khi đang mở tab Bảo mật
+        setInterval(() => {
+            const tab = document.getElementById('tab-security');
+            if (tab && tab.classList.contains('active') && !document.hidden) loadSecurity();
+        }, 30000);
     });
 
     function logoutAdmin() {

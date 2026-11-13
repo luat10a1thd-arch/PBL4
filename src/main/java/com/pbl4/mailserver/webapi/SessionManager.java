@@ -1,3 +1,4 @@
+// FILE: src/main/java/com/pbl4/mailserver/webapi/SessionManager.java
 package com.pbl4.mailserver.webapi;
 
 import com.pbl4.mailserver.config.ServerConfig;
@@ -18,20 +19,21 @@ import java.util.concurrent.atomic.AtomicLong;
 
 public class SessionManager {
 
-    private static final long EXPIRY_MS = 2 * 60 * 60 * 1000;
     private static final SecureRandom RANDOM = new SecureRandom();
     private static final AtomicLong SEQ = new AtomicLong();
 
     private static class Session {
         final String username;
         final long seq; // thứ tự tạo (đơn điệu tăng) để xác định phiên cũ nhất, không phụ thuộc độ phân giải đồng hồ
+        final long created; // mốc tạo phiên: tính thời hạn TUYỆT ĐỐI
         // volatile: nhiều luồng HTTP cùng đọc/ghi lastAccess
         volatile long lastAccess;
 
         Session(String username) {
             this.username = username;
             this.seq = SEQ.incrementAndGet();
-            this.lastAccess = System.currentTimeMillis();
+            this.created = System.currentTimeMillis();
+            this.lastAccess = this.created;
         }
     }
 
@@ -40,7 +42,7 @@ public class SessionManager {
     private static final Object CREATE_LOCK = new Object();
 
     static {
-        // Daemon để không giữ JVM khi tắt server; quét mỗi phút để đóng SSE của phiên hết hạn kịp thời
+        // Daemon để không giữ JVM khi tắt server; quét mỗi phút để đóng SSE của phiên hết hạn/bị khóa kịp thời
         ScheduledExecutorService cleaner = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread t = new Thread(r, "session-cleaner");
             t.setDaemon(true);
@@ -53,7 +55,16 @@ public class SessionManager {
         return username == null ? "" : username.trim().toLowerCase(Locale.ROOT);
     }
 
-    /** Tạo phiên mới. Mỗi user tối đa SESSION_MAX_PER_USER phiên, vượt thì xóa phiên cũ nhất. */
+    /** Hết hạn khi quá thời gian không hoạt động (mặc định 2 giờ) HOẶC quá thời hạn tuyệt đối (mặc định 12 giờ). */
+    private static boolean isExpired(Session s, long now) {
+        return now - s.lastAccess > ServerConfig.SESSION_IDLE_MS
+                || now - s.created > ServerConfig.SESSION_ABSOLUTE_MS;
+    }
+
+    /**
+     * Tạo phiên mới với token ngẫu nhiên MỚI mỗi lần gọi (không bao giờ dùng lại token cũ).
+     * Mỗi user tối đa SESSION_MAX_PER_USER phiên, vượt thì xóa phiên cũ nhất.
+     */
     public static String createSession(String username) {
         byte[] bytes = new byte[32];
         RANDOM.nextBytes(bytes);
@@ -102,7 +113,7 @@ public class SessionManager {
         Session s = sessions.get(token);
         if (s == null) return null;
         long now = System.currentTimeMillis();
-        if (now - s.lastAccess > EXPIRY_MS) {
+        if (isExpired(s, now)) {
             if (sessions.remove(token, s)) SseManager.closeByToken(s.username, token);
             return null;
         }
@@ -125,12 +136,22 @@ public class SessionManager {
     }
 
     private static void cleanupExpiredSessions() {
-        long now = System.currentTimeMillis();
-        for (Map.Entry<String, Session> e : sessions.entrySet()) {
-            Session s = e.getValue();
-            if (now - s.lastAccess > EXPIRY_MS && sessions.remove(e.getKey(), s)) {
-                SseManager.closeByToken(s.username, e.getKey());
+        try {
+            long now = System.currentTimeMillis();
+            for (Map.Entry<String, Session> e : sessions.entrySet()) {
+                Session s = e.getValue();
+                boolean drop = isExpired(s, now);
+                if (!drop) {
+                    // Tài khoản bị Admin khóa/xóa: cắt phiên (và SSE) ngay trong vòng quét, không chờ request kế tiếp
+                    drop = !UserStore.exists(s.username) || "LOCKED".equalsIgnoreCase(UserStore.getStatus(s.username));
+                }
+                if (drop && sessions.remove(e.getKey(), s)) {
+                    SseManager.closeByToken(s.username, e.getKey());
+                }
             }
+        } catch (RuntimeException ex) {
+            // scheduleAtFixedRate sẽ dừng hẳn nếu ném lỗi: nuốt lỗi để lần quét sau vẫn chạy
+            System.err.println("[SESSION] Lỗi dọn phiên: " + ex.getMessage());
         }
     }
 }

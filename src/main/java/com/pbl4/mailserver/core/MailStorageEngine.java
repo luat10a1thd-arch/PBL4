@@ -1,3 +1,4 @@
+// FILE: src/main/java/com/pbl4/mailserver/core/MailStorageEngine.java
 package com.pbl4.mailserver.core;
 
 import com.pbl4.mailserver.config.ServerConfig;
@@ -6,9 +7,11 @@ import com.pbl4.mailserver.mime.MimeParser;
 import javax.crypto.Cipher;
 import javax.crypto.SecretKey;
 import javax.crypto.spec.IvParameterSpec;
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.FileVisitResult;
@@ -19,7 +22,6 @@ import java.nio.file.Paths;
 import java.nio.file.SimpleFileVisitor;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.attribute.BasicFileAttributes;
-import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
@@ -27,9 +29,12 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Properties;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
@@ -39,6 +44,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.function.Function;
+import java.util.regex.Pattern;
 
 public class MailStorageEngine {
 
@@ -169,6 +175,15 @@ public class MailStorageEngine {
             return names.size();
         }
 
+        synchronized boolean contains(String name) {
+            return sizes.containsKey(name);
+        }
+
+        synchronized long sizeOf(String name) {
+            Long v = sizes.get(name);
+            return v == null ? 0L : v;
+        }
+
         long totalBytes() {
             return totalBytes.get();
         }
@@ -234,19 +249,136 @@ public class MailStorageEngine {
         }
     }
 
+    /**
+     * Bảng cờ seen/starred của MỘT hòm thư. Lưu trong <hòm>/meta/flags.properties,
+     * nạp lười, ghi nguyên tử (file tạm quyền 600 rồi rename). Giá trị mỗi id gồm 2 ký tự:
+     * ký tự 1 = seen, ký tự 2 = starred; mỗi ký tự là 'T' (true), 'F' (false) hoặc '-' (chưa đặt).
+     */
+    private static final class FlagTable {
+        private final HashMap<String, String> map = new HashMap<>();
+        private boolean loaded = false;
+        private boolean dirty = false;
+
+        synchronized void ensureLoaded(Path dir) {
+            if (loaded) return;
+            map.clear();
+            dirty = false;
+            Path file = dir.resolve(FLAGS_DIR).resolve(FLAGS_FILE);
+            if (Files.isRegularFile(file)) {
+                try (InputStream in = Files.newInputStream(file)) {
+                    Properties p = new Properties();
+                    p.load(in);
+                    for (String k : p.stringPropertyNames()) {
+                        String v = p.getProperty(k);
+                        if (isSafeId(k) && validFlagValue(v)) map.put(k, v);
+                    }
+                } catch (IOException | IllegalArgumentException e) {
+                    map.clear();
+                    System.err.println("[MAIL STORAGE] Không đọc được file cờ thư, dùng trạng thái rỗng");
+                }
+            }
+            loaded = true;
+        }
+
+        synchronized String get(Path dir, String id) {
+            ensureLoaded(dir);
+            return map.get(id);
+        }
+
+        synchronized void remove(Path dir, String id) {
+            ensureLoaded(dir);
+            if (map.remove(id) != null) dirty = true;
+        }
+
+        synchronized void mergeAndFlush(Path dir, String id, Boolean seen, Boolean starred) throws IOException {
+            ensureLoaded(dir);
+            String old = map.get(id);
+            char s = (old != null) ? old.charAt(0) : '-';
+            char t = (old != null) ? old.charAt(1) : '-';
+            if (seen != null) s = seen ? 'T' : 'F';
+            if (starred != null) t = starred ? 'T' : 'F';
+            map.put(id, "" + s + t);
+            dirty = true;
+            try {
+                flush(dir);
+            } catch (IOException e) {
+                loaded = false;
+                dirty = false;
+                throw e;
+            }
+        }
+
+        synchronized void flush(Path dir) throws IOException {
+            if (!dirty) return;
+            if (!Files.isDirectory(dir)) {
+                dirty = false;
+                return;
+            }
+            Path metaDir = dir.resolve(FLAGS_DIR);
+            Path file = metaDir.resolve(FLAGS_FILE);
+            if (map.isEmpty()) {
+                Files.deleteIfExists(file);
+                dirty = false;
+                return;
+            }
+            Files.createDirectories(metaDir);
+            SecurityUtils.restrictToOwner(metaDir, true);
+            Properties p = new Properties();
+            p.putAll(map);
+            ByteArrayOutputStream bos = new ByteArrayOutputStream();
+            p.store(bos, null);
+            Path tmp = metaDir.resolve(FLAGS_FILE + ".tmp");
+            try {
+                SecurityUtils.writeOwnerOnly(tmp, bos.toByteArray());
+                try {
+                    Files.move(tmp, file, StandardCopyOption.ATOMIC_MOVE);
+                } catch (AtomicMoveNotSupportedException e) {
+                    Files.move(tmp, file, StandardCopyOption.REPLACE_EXISTING);
+                }
+            } catch (IOException e) {
+                try { Files.deleteIfExists(tmp); } catch (IOException ignored) {}
+                throw e;
+            }
+            dirty = false;
+        }
+
+        private static boolean validFlagValue(String v) {
+            if (v == null || v.length() != 2) return false;
+            for (int i = 0; i < 2; i++) {
+                char c = v.charAt(i);
+                if (c != 'T' && c != 'F' && c != '-') return false;
+            }
+            return true;
+        }
+    }
+
     private static final String SENT_SUFFIX = "_sent";
     private static final String SPAM_SUFFIX = "_spam";
+    private static final String DRAFTS_SUFFIX = "_drafts";
+    private static final String TRASH_SUFFIX = "_trash";
+
+    private static final String FLAGS_DIR = "meta";
+    private static final String FLAGS_FILE = "flags.properties";
+    private static final String BLOCKED_FILE = "blocked_senders.txt";
+    private static final int MAX_BLOCKED_SENDERS = 500;
 
     private static final long SPAM_MAX_AGE_MS = TimeUnit.DAYS.toMillis(30);
+    private static final long TRASH_MAX_AGE_MS = TimeUnit.DAYS.toMillis(30);
     private static final long SPAM_PURGE_PERIOD_MINUTES = 360;
 
-    private static final SecureRandom RANDOM = new SecureRandom();
+    private static final Pattern SAFE_ID = Pattern.compile("[A-Za-z0-9_.-]{1,100}");
+    private static final Pattern EMAIL_SHAPE = Pattern.compile("[a-z0-9._%+=-]{1,64}@[a-z0-9.-]{1,255}");
 
     private static final ConcurrentHashMap<String, MailboxIndex> indexes = new ConcurrentHashMap<>();
     private static final LruCache<MailSummary> SUMMARY_CACHE = new LruCache<>(ServerConfig.MAIL_SUMMARY_CACHE_MAX_ENTRIES);
     private static final LruCache<Long> META_CACHE = new LruCache<>(ServerConfig.MAIL_META_CACHE_MAX_ENTRIES);
     private static final ConcurrentHashMap<String, Object> quotaMonitors = new ConcurrentHashMap<>();
     private static final ConcurrentHashMap<String, ReentrantReadWriteLock> userLocks = new ConcurrentHashMap<>();
+    private static final ConcurrentHashMap<String, FlagTable> flagTables = new ConcurrentHashMap<>();
+    private static final ConcurrentHashMap<String, Set<String>> blockedCache = new ConcurrentHashMap<>();
+    // Tuần tự hóa các thao tác nhiều bước (move/saveDraft) của cùng một người dùng.
+    // Thứ tự khóa luôn là: opMonitor -> khóa hòm thư -> quotaMonitor (không bao giờ ngược lại).
+    private static final ConcurrentHashMap<String, Object> opMonitors = new ConcurrentHashMap<>();
 
     private static final ReentrantLock PURGE_LOCK = new ReentrantLock();
 
@@ -272,12 +404,19 @@ public class MailStorageEngine {
     private static volatile long quotaBytesOverride = -1;
     private static volatile Function<String, String> headerDecoder = MimeParser::decodeHeader;
 
-    static void setBaseDirForTest(Path dir) {
-        baseDirOverride = dir;
+    private static void clearAllCaches() {
         indexes.clear();
         SUMMARY_CACHE.clear();
         META_CACHE.clear();
         quotaMonitors.clear();
+        flagTables.clear();
+        blockedCache.clear();
+        opMonitors.clear();
+    }
+
+    static void setBaseDirForTest(Path dir) {
+        baseDirOverride = dir;
+        clearAllCaches();
     }
 
     static void setUserDirectoryForTest(UserDirectory dir) {
@@ -297,10 +436,7 @@ public class MailStorageEngine {
         quotaBytesOverride = -1;
         headerDecoder = MimeParser::decodeHeader;
         baseDirOverride = null;
-        indexes.clear();
-        SUMMARY_CACHE.clear();
-        META_CACHE.clear();
-        quotaMonitors.clear();
+        clearAllCaches();
     }
 
     static boolean isWriteLockHeldByCurrentThread(String mailbox) {
@@ -323,7 +459,44 @@ public class MailStorageEngine {
             } catch (Throwable t) {
                 System.err.println("[MAIL STORAGE] Lỗi khi dọn thư rác nền: " + t.getMessage());
             }
+            try {
+                int n = purgeOldTrash();
+                if (n > 0) {
+                    System.out.println("[MAIL STORAGE] Đã dọn " + n + " thư trong thùng rác quá hạn");
+                }
+            } catch (Throwable t) {
+                System.err.println("[MAIL STORAGE] Lỗi khi dọn thùng rác nền: " + t.getMessage());
+            }
         }, 5, SPAM_PURGE_PERIOD_MINUTES, TimeUnit.MINUTES);
+    }
+
+    // Siết quyền 700/600 cho cây dữ liệu thư và thư mục khóa DKIM một lần khi nạp lớp (chạy nền, không chặn khởi động).
+    static {
+        Thread t = new Thread(MailStorageEngine::hardenPermissions, "perm-hardener");
+        t.setDaemon(true);
+        t.start();
+    }
+
+    /**
+     * Thư mục data/ (cha của hòm thư) và data/mailboxes/ -> 700, file bên trong -> 600; thư mục khóa DKIM -> 700, file khóa -> 600.
+     * Không làm gì trên hệ thống không hỗ trợ POSIX. Chỉ đổi quyền, không đổi nội dung.
+     */
+    public static void hardenPermissions() {
+        try {
+            Path base = baseDir();
+            if (Files.isDirectory(base)) {
+                if (baseDirOverride == null && base.getParent() != null) {
+                    SecurityUtils.restrictToOwner(base.getParent(), true);
+                }
+                SecurityUtils.restrictTreeToOwner(base);
+            }
+            Path dkim = Paths.get(ServerConfig.DKIM_KEY_DIR).toAbsolutePath().normalize();
+            if (Files.isDirectory(dkim)) {
+                SecurityUtils.restrictTreeToOwner(dkim);
+            }
+        } catch (Throwable ignored) {
+            // chỉ là biện pháp phòng thủ thêm, không được làm hỏng khởi động
+        }
     }
 
     private static Path baseDir() {
@@ -345,6 +518,7 @@ public class MailStorageEngine {
     private static void forgetMailbox(String mailbox) {
         String key = mailbox.trim();
         indexes.remove(key);
+        flagTables.remove(key);
         SUMMARY_CACHE.removeByPrefixIgnoreCase(key + "|");
         META_CACHE.removeByPrefixIgnoreCase(key + "|");
     }
@@ -353,10 +527,16 @@ public class MailStorageEngine {
         return quotaMonitors.computeIfAbsent(cleanUser.trim().toLowerCase(Locale.ROOT), k -> new Object());
     }
 
+    private static Object opMonitor(String cleanUser) {
+        return opMonitors.computeIfAbsent(cleanUser.trim().toLowerCase(Locale.ROOT), k -> new Object());
+    }
+
     private static long usedBytesOfUser(String cleanUser) {
         return loadedIndex(cleanUser).totalBytes()
                 + loadedIndex(cleanUser + SENT_SUFFIX).totalBytes()
-                + loadedIndex(cleanUser + SPAM_SUFFIX).totalBytes();
+                + loadedIndex(cleanUser + SPAM_SUFFIX).totalBytes()
+                + loadedIndex(cleanUser + DRAFTS_SUFFIX).totalBytes()
+                + loadedIndex(cleanUser + TRASH_SUFFIX).totalBytes();
     }
 
     private static long maxQuotaBytes() {
@@ -369,9 +549,9 @@ public class MailStorageEngine {
         }
     }
 
+    /** Kích thước file GCM trên đĩa: 1 byte phiên bản + IV 12 + dữ liệu + tag 16. */
     static long estimateEncryptedSize(long plainBytes) {
-        long cipherBytes = (plainBytes / 16 + 1) * 16;
-        return 24 + 1 + ((cipherBytes + 2) / 3) * 4;
+        return plainBytes + MailCrypto.GCM_OVERHEAD;
     }
 
     private static ReentrantReadWriteLock getLockForUser(String username) {
@@ -382,12 +562,53 @@ public class MailStorageEngine {
         if (username == null || username.trim().isEmpty()) {
             throw new IllegalArgumentException("Tên hòm thư không được để trống");
         }
+        String name = username.trim();
+        if (name.indexOf('/') >= 0 || name.indexOf('\\') >= 0 || name.indexOf('\0') >= 0) {
+            throw new IllegalArgumentException("Đường dẫn hòm thư không hợp lệ");
+        }
         Path base = baseDir();
-        Path dir = base.resolve(username.trim()).normalize();
+        Path dir = base.resolve(name).normalize();
         if (!dir.startsWith(base) || dir.equals(base)) {
             throw new IllegalArgumentException("Đường dẫn hòm thư không hợp lệ");
         }
         return dir;
+    }
+
+    // ---------- Kiểm tra đầu vào từ bên ngoài ----------
+
+    /** id file thư an toàn: ^[A-Za-z0-9_.-]{1,100}$ và không chứa "..". */
+    static boolean isSafeId(String id) {
+        return id != null && !id.contains("..") && SAFE_ID.matcher(id).matches();
+    }
+
+    private static boolean isSafeMailboxName(String mailbox) {
+        if (mailbox == null) return false;
+        String t = mailbox.trim();
+        if (t.isEmpty() || t.length() > 254) return false;
+        if (t.contains("..")) return false;
+        for (int i = 0; i < t.length(); i++) {
+            char c = t.charAt(i);
+            if (c < 0x20 || c == 0x7f) return false;
+            if (c == '/' || c == '\\' || c == ':' || c == '*' || c == '?' || c == '"'
+                    || c == '<' || c == '>' || c == '|') return false;
+        }
+        return true;
+    }
+
+    /** Tên hòm hợp lệ VÀ thuộc về một người dùng đang tồn tại. */
+    private static boolean isValidMailboxForUser(String mailbox) {
+        if (!isSafeMailboxName(mailbox)) return false;
+        String clean = getCleanUsername(mailbox.trim());
+        return clean != null && !clean.isEmpty() && userDirectory.exists(clean);
+    }
+
+    /** id phải hợp lệ và nằm trong chỉ mục của hòm thư. */
+    private static boolean isKnownId(String mailbox, String id) {
+        try {
+            return isSafeId(id) && loadedIndex(mailbox).contains(id);
+        } catch (RuntimeException e) {
+            return false;
+        }
     }
 
     public static void initMailbox(String username) {
@@ -400,6 +621,7 @@ public class MailStorageEngine {
             File dir = dirPath.toFile();
             if (!dir.exists()) {
                 dir.mkdirs();
+                SecurityUtils.restrictToOwner(dirPath, true);
                 forgetMailbox(username);
             }
         } finally {
@@ -415,6 +637,14 @@ public class MailStorageEngine {
         return mailbox != null && mailbox.endsWith(SPAM_SUFFIX);
     }
 
+    private static boolean isDraftsBox(String mailbox) {
+        return mailbox != null && mailbox.endsWith(DRAFTS_SUFFIX);
+    }
+
+    private static boolean isTrashBox(String mailbox) {
+        return mailbox != null && mailbox.endsWith(TRASH_SUFFIX);
+    }
+
     private static String getCleanUsername(String username) {
         if (username == null) return null;
         if (username.endsWith(SENT_SUFFIX)) {
@@ -422,6 +652,12 @@ public class MailStorageEngine {
         }
         if (username.endsWith(SPAM_SUFFIX)) {
             return username.substring(0, username.length() - SPAM_SUFFIX.length());
+        }
+        if (username.endsWith(DRAFTS_SUFFIX)) {
+            return username.substring(0, username.length() - DRAFTS_SUFFIX.length());
+        }
+        if (username.endsWith(TRASH_SUFFIX)) {
+            return username.substring(0, username.length() - TRASH_SUFFIX.length());
         }
         return username;
     }
@@ -437,52 +673,20 @@ public class MailStorageEngine {
         return Base64.getDecoder().decode(base64Salt);
     }
 
-    private static SecretKey deriveKeyFor(String mailbox) throws Exception {
-        byte[] saltBytes = getUserSaltOrThrow(mailbox);
-        return SecurityUtils.deriveKey(ServerConfig.SECRET_KEY, saltBytes);
+    /** Bộ khóa (GCM mới + CBC cũ để đọc) của người dùng sở hữu hòm thư này. */
+    private static MailCrypto.KeyRing keyRingFor(String mailbox) {
+        byte[] salt = getUserSaltOrThrow(mailbox.trim());
+        return new MailCrypto.KeyRing(ServerConfig.SECRET_KEY, MailCrypto.cleanUserOf(mailbox), salt);
     }
 
-    private static byte[] encryptToFileBytes(byte[] plain, SecretKey key) throws Exception {
-        byte[] iv = new byte[16];
-        RANDOM.nextBytes(iv);
-        Cipher cipher = Cipher.getInstance("AES/CBC/PKCS5Padding");
-        cipher.init(Cipher.ENCRYPT_MODE, key, new IvParameterSpec(iv));
-        byte[] cipherBytes = cipher.doFinal(plain);
-
-        byte[] ivB64 = Base64.getEncoder().encode(iv);
-        byte[] ctB64 = Base64.getEncoder().encode(cipherBytes);
-        byte[] out = new byte[ivB64.length + 1 + ctB64.length];
-        System.arraycopy(ivB64, 0, out, 0, ivB64.length);
-        out[ivB64.length] = (byte) ':';
-        System.arraycopy(ctB64, 0, out, ivB64.length + 1, ctB64.length);
-        return out;
-    }
-
-    private static byte[] decryptFileBytes(byte[] fileBytes, SecretKey key) {
-        try {
-            int colon = indexOfByte(fileBytes, (byte) ':', fileBytes.length);
-            if (colon <= 0) return null;
-            int end = fileBytes.length;
-            while (end > colon + 1 && isAsciiSpace(fileBytes[end - 1])) end--;
-            byte[] iv = Base64.getDecoder().decode(Arrays.copyOfRange(fileBytes, 0, colon));
-            byte[] ct = Base64.getDecoder().decode(Arrays.copyOfRange(fileBytes, colon + 1, end));
-            Cipher cipher = Cipher.getInstance("AES/CBC/PKCS5Padding");
-            cipher.init(Cipher.DECRYPT_MODE, key, new IvParameterSpec(iv));
-            return cipher.doFinal(ct);
-        } catch (Exception e) {
-            return null;
+    /** Giải mã file thư của (hòm, id). null nếu sai khóa, bị sửa, hoặc bị tráo sang hòm/id khác. */
+    private static byte[] decryptMail(byte[] fileBytes, MailCrypto.KeyRing ring, String mailbox, String id) {
+        byte[] plain = MailCrypto.decrypt(fileBytes, ring, MailCrypto.aad(mailbox, id));
+        if (plain == null) {
+            // Chỉ ghi tên hòm và id file, tuyệt đối không ghi nội dung.
+            System.err.println("[MAIL STORAGE] Không giải mã/xác thực được thư (hòm " + mailbox.trim() + ", id " + id + ")");
         }
-    }
-
-    private static boolean isAsciiSpace(byte b) {
-        return b == '\r' || b == '\n' || b == ' ' || b == '\t';
-    }
-
-    private static int indexOfByte(byte[] b, byte v, int limit) {
-        for (int i = 0; i < limit; i++) {
-            if (b[i] == v) return i;
-        }
-        return -1;
+        return plain;
     }
 
     public static long getMailboxSizeInBytes(String username) {
@@ -517,6 +721,18 @@ public class MailStorageEngine {
     }
 
     public static SaveResult saveEmailResult(String mailbox, byte[] raw) {
+        return saveInternal(mailbox, raw, null, true, true, 0L);
+    }
+
+    /**
+     * Lõi lưu thư. outId (nếu khác null, độ dài >= 1) nhận ĐÚNG tên file vừa được sinh ra.
+     * notify=false: không bắn SSE thư mới (dùng cho move/draft).
+     * enforceQuota=false: bỏ kiểm tra quota (move trong cùng một người dùng, tổng dung lượng không đổi).
+     * creditBytes: số byte sắp được giải phóng (bản nháp cũ sắp bị thay) được trừ khi kiểm tra quota.
+     * Luôn ghi AES-256-GCM, AAD = hòm thư + tên file nên tên file được sinh TRƯỚC khi mã hóa.
+     */
+    private static SaveResult saveInternal(String mailbox, byte[] raw, String[] outId,
+                                           boolean notify, boolean enforceQuota, long creditBytes) {
         if (mailbox == null || raw == null) {
             return SaveResult.ERROR;
         }
@@ -536,18 +752,22 @@ public class MailStorageEngine {
 
             long maxSizeBytes = maxQuotaBytes();
 
-            long estimatedBytes = estimateEncryptedSize(raw.length);
-            if (usedBytesOfUser(cleanRecipient) + estimatedBytes > maxSizeBytes) {
-                System.err.println("[MAIL STORAGE] Hòm thư " + mailbox + " vượt Quota");
-                return SaveResult.OVER_QUOTA;
+            if (enforceQuota) {
+                long estimatedBytes = estimateEncryptedSize(raw.length);
+                if (usedBytesOfUser(cleanRecipient) - creditBytes + estimatedBytes > maxSizeBytes) {
+                    System.err.println("[MAIL STORAGE] Hòm thư " + mailbox + " vượt Quota");
+                    return SaveResult.OVER_QUOTA;
+                }
             }
 
-            SecretKey key = deriveKeyFor(mailbox);
-            byte[] encryptedBytes = encryptToFileBytes(raw, key);
             String fileName = "msg_" + System.currentTimeMillis() + "_" + UUID.randomUUID() + ".enc";
+            MailCrypto.KeyRing ring = keyRingFor(mailbox);
+            byte[] encryptedBytes = MailCrypto.encryptGcm(raw, ring.gcm(), MailCrypto.aad(mailbox, fileName));
 
+            boolean plainInbox = !isSentBox(mailbox) && !isSpamBox(mailbox)
+                    && !isDraftsBox(mailbox) && !isTrashBox(mailbox);
             String summaryJson = null;
-            if (!isSentBox(mailbox) && !isSpamBox(mailbox)) {
+            if (notify && plainInbox) {
                 MailSummary s = parseHeaderToSummary(fileName, cutHeader(raw));
                 summaryJson = String.format(
                         "{\"id\":\"%s\",\"sender\":\"%s\",\"recipient\":\"%s\",\"subject\":\"%s\",\"timestamp\":\"%s\"}",
@@ -568,7 +788,7 @@ public class MailStorageEngine {
 
                 synchronized (quotaMonitor(cleanRecipient)) {
                     long incomingBytes = encryptedBytes.length;
-                    if (usedBytesOfUser(cleanRecipient) + incomingBytes > maxSizeBytes) {
+                    if (enforceQuota && usedBytesOfUser(cleanRecipient) - creditBytes + incomingBytes > maxSizeBytes) {
                         System.err.println("[MAIL STORAGE] Hòm thư " + mailbox + " vượt Quota");
                         return SaveResult.OVER_QUOTA;
                     }
@@ -578,7 +798,8 @@ public class MailStorageEngine {
                     Path tmpPath = dir.resolve(fileName + ".tmp");
 
                     try {
-                        Files.write(tmpPath, encryptedBytes);
+                        // Tạo file tạm với quyền 600 ngay từ đầu, rename nguyên tử, lỗi thì xóa file tạm.
+                        SecurityUtils.writeOwnerOnly(tmpPath, encryptedBytes);
                         try {
                             Files.move(tmpPath, filePath, StandardCopyOption.ATOMIC_MOVE);
                         } catch (AtomicMoveNotSupportedException e) {
@@ -593,6 +814,10 @@ public class MailStorageEngine {
                 }
             } finally {
                 lock.writeLock().unlock();
+            }
+
+            if (outId != null && outId.length > 0) {
+                outId[0] = fileName;
             }
 
             if (summaryJson != null) {
@@ -618,7 +843,7 @@ public class MailStorageEngine {
         try {
             Path dir = mailboxDir(username);
             long start = ((long) page - 1) * limit;
-            SecretKey derivedKey = null;
+            MailCrypto.KeyRing ring = null;
 
             for (int attempt = 0; attempt < 2; attempt++) {
                 boolean lastTry = (attempt == 1);
@@ -633,8 +858,8 @@ public class MailStorageEngine {
                     return new MailPage(new ArrayList<>(), slice.total);
                 }
 
-                if (derivedKey == null) {
-                    derivedKey = deriveKeyFor(username);
+                if (ring == null) {
+                    ring = keyRingFor(username);
                 }
 
                 List<MailSummary> summaries = new ArrayList<>();
@@ -654,7 +879,7 @@ public class MailStorageEngine {
                         continue;
                     }
 
-                    byte[] headerBytes = readHeaderBytes(filePath.toFile(), derivedKey);
+                    byte[] headerBytes = readHeaderBytes(filePath.toFile(), ring, username);
                     if (headerBytes != null) {
                         MailSummary summary = parseHeaderToSummary(name, headerBytes);
                         SUMMARY_CACHE.put(key, summary);
@@ -682,13 +907,19 @@ public class MailStorageEngine {
         }
     }
 
-    private static byte[] readHeaderBytes(File file, SecretKey derivedKey) {
+    /**
+     * Đọc phần tiêu đề của thư cho danh sách tóm tắt.
+     * File nhỏ (<= 12 KB): giải mã và xác thực toàn bộ.
+     * File lớn: chỉ đọc 12 KB đầu. GCM: giải mã CTR không xác thực phần đầu (chỉ để hiển thị tóm tắt);
+     * CBC cũ: giải mã khối đầu như trước. Không tìm được hết tiêu đề thì giải mã đầy đủ.
+     */
+    private static byte[] readHeaderBytes(File file, MailCrypto.KeyRing ring, String mailbox) {
         final int HEADER_READ_LIMIT = 12288;
         try {
             long fileLength = file.length();
 
             if (fileLength <= HEADER_READ_LIMIT) {
-                byte[] plain = decryptFileBytes(Files.readAllBytes(file.toPath()), derivedKey);
+                byte[] plain = decryptMail(Files.readAllBytes(file.toPath()), ring, mailbox, file.getName());
                 return plain == null ? null : cutHeader(plain);
             }
 
@@ -699,7 +930,26 @@ public class MailStorageEngine {
             }
             if (readBytes <= 0) return null;
 
-            int colonIdx = indexOfByte(buffer, (byte) ':', readBytes);
+            if (MailCrypto.isGcm(buffer)) {
+                byte[] prefix = MailCrypto.peekGcmPrefix(buffer, readBytes, ring.gcm());
+                if (prefix != null) {
+                    int end = findHeaderEnd(prefix);
+                    if (end >= 0) {
+                        return Arrays.copyOf(prefix, end);
+                    }
+                }
+                return fullDecryptHeader(file, ring, mailbox);
+            }
+
+            if (!MailCrypto.isLegacyAllowed()) {
+                return null;
+            }
+
+            SecretKey legacyKey = ring.legacy();
+            int colonIdx = -1;
+            for (int i = 0; i < readBytes; i++) {
+                if (buffer[i] == (byte) ':') { colonIdx = i; break; }
+            }
             if (colonIdx > 0) {
                 byte[] iv = Base64.getDecoder().decode(Arrays.copyOfRange(buffer, 0, colonIdx));
 
@@ -711,7 +961,7 @@ public class MailStorageEngine {
                     int validAesLen = (rawCipherPartial.length / 16) * 16;
                     if (validAesLen > 0) {
                         Cipher cipher = Cipher.getInstance("AES/CBC/NoPadding");
-                        cipher.init(Cipher.DECRYPT_MODE, derivedKey, new IvParameterSpec(iv));
+                        cipher.init(Cipher.DECRYPT_MODE, legacyKey, new IvParameterSpec(iv));
                         byte[] decryptedPartial = cipher.doFinal(rawCipherPartial, 0, validAesLen);
 
                         int end = findHeaderEnd(decryptedPartial);
@@ -721,15 +971,15 @@ public class MailStorageEngine {
                     }
                 }
             }
-            return fullDecryptHeader(file, derivedKey);
+            return fullDecryptHeader(file, ring, mailbox);
         } catch (Exception e) {
-            return fullDecryptHeader(file, derivedKey);
+            return fullDecryptHeader(file, ring, mailbox);
         }
     }
 
-    private static byte[] fullDecryptHeader(File file, SecretKey derivedKey) {
+    private static byte[] fullDecryptHeader(File file, MailCrypto.KeyRing ring, String mailbox) {
         try {
-            byte[] plain = decryptFileBytes(Files.readAllBytes(file.toPath()), derivedKey);
+            byte[] plain = decryptMail(Files.readAllBytes(file.toPath()), ring, mailbox, file.getName());
             return plain == null ? null : cutHeader(plain);
         } catch (Exception ignored) {
             return null;
@@ -798,7 +1048,7 @@ public class MailStorageEngine {
         lock.readLock().lock();
 
         try {
-            SecretKey derivedKey = deriveKeyFor(username);
+            MailCrypto.KeyRing ring = keyRingFor(username);
             File folder = mailboxDir(username).toFile();
             File[] files = folder.listFiles((dir, name) -> name.endsWith(".enc"));
 
@@ -808,7 +1058,7 @@ public class MailStorageEngine {
                 for (File file : files) {
                     try {
                         byte[] fileBytes = Files.readAllBytes(file.toPath());
-                        byte[] plain = decryptFileBytes(fileBytes, derivedKey);
+                        byte[] plain = decryptMail(fileBytes, ring, username, file.getName());
                         mails.add(StoredMail.ofBytes(file.getName(), plain));
                     } catch (Exception e) {
                         mails.add(StoredMail.ofBytes(file.getName(), null));
@@ -839,7 +1089,7 @@ public class MailStorageEngine {
                 lock.readLock().unlock();
             }
 
-            SecretKey derivedKey = null;
+            MailCrypto.KeyRing ring = null;
             boolean drift = false;
 
             for (String name : names) {
@@ -864,11 +1114,11 @@ public class MailStorageEngine {
                     lock.readLock().unlock();
                 }
 
-                if (derivedKey == null) {
-                    derivedKey = deriveKeyFor(mailbox);
+                if (ring == null) {
+                    ring = keyRingFor(mailbox);
                 }
 
-                byte[] plain = decryptFileBytes(bytes, derivedKey);
+                byte[] plain = decryptMail(bytes, ring, mailbox, name);
                 if (plain == null) {
                     result.add(new MailMeta(name, 0));
                     continue;
@@ -889,7 +1139,7 @@ public class MailStorageEngine {
     }
 
     public static StoredMail getSingleMail(String username, String fileId) {
-        if (fileId == null || fileId.contains("/") || fileId.contains("\\") || fileId.contains("..")) {
+        if (!isSafeId(fileId)) {
             return null;
         }
         initMailbox(username);
@@ -901,10 +1151,10 @@ public class MailStorageEngine {
             File file = filePath.toFile();
             if (!file.exists()) return null;
 
-            SecretKey derivedKey = deriveKeyFor(username);
+            MailCrypto.KeyRing ring = keyRingFor(username);
 
             byte[] fileBytes = Files.readAllBytes(filePath);
-            byte[] plain = decryptFileBytes(fileBytes, derivedKey);
+            byte[] plain = decryptMail(fileBytes, ring, username, file.getName());
             return StoredMail.ofBytes(file.getName(), plain);
         } catch (Exception e) {
             return null;
@@ -925,8 +1175,9 @@ public class MailStorageEngine {
         return emails;
     }
 
+    /** Gọi khi đang giữ write lock của hòm thư. Cờ bị xóa trong RAM, caller gọi flushFlags() khi xong lô. */
     private static boolean deleteFileLocked(String mailbox, Path dir, String fileId) {
-        if (fileId == null || fileId.contains("/") || fileId.contains("\\") || fileId.contains("..")) {
+        if (!isSafeId(fileId)) {
             return false;
         }
         Path filePath = dir.resolve(fileId).normalize();
@@ -944,6 +1195,9 @@ public class MailStorageEngine {
             String key = cacheKey(mailbox, fileId);
             SUMMARY_CACHE.remove(key);
             META_CACHE.remove(key);
+            try {
+                flagTable(mailbox).remove(dir, fileId);
+            } catch (RuntimeException ignored) {}
             return true;
         }
         return false;
@@ -963,6 +1217,21 @@ public class MailStorageEngine {
         } catch (Exception e) {
             System.err.println("[MAIL STORAGE] Lỗi khi xóa thư: " + e.getMessage());
         } finally {
+            flushFlags(username);
+            lock.writeLock().unlock();
+        }
+    }
+
+    private static boolean deleteOne(String mailbox, String fileId) {
+        if (!isSafeId(fileId)) return false;
+        ReentrantReadWriteLock lock = getLockForUser(mailbox);
+        lock.writeLock().lock();
+        try {
+            return deleteFileLocked(mailbox, mailboxDir(mailbox), fileId);
+        } catch (Exception e) {
+            return false;
+        } finally {
+            flushFlags(mailbox);
             lock.writeLock().unlock();
         }
     }
@@ -981,37 +1250,52 @@ public class MailStorageEngine {
         if (base == null || base.isEmpty()) return;
         String sent = base + SENT_SUFFIX;
         String spam = base + SPAM_SUFFIX;
+        String drafts = base + DRAFTS_SUFFIX;
+        String trash = base + TRASH_SUFFIX;
 
         ReentrantReadWriteLock lockInbox = getLockForUser(base);
         ReentrantReadWriteLock lockSent = getLockForUser(sent);
         ReentrantReadWriteLock lockSpam = getLockForUser(spam);
+        ReentrantReadWriteLock lockDrafts = getLockForUser(drafts);
+        ReentrantReadWriteLock lockTrash = getLockForUser(trash);
 
         lockInbox.writeLock().lock();
         lockSent.writeLock().lock();
         lockSpam.writeLock().lock();
+        lockDrafts.writeLock().lock();
+        lockTrash.writeLock().lock();
         try {
             if (deleteFiles) {
                 try {
                     deleteDirectoryQuietly(mailboxDir(base));
                     deleteDirectoryQuietly(mailboxDir(sent));
                     deleteDirectoryQuietly(mailboxDir(spam));
+                    deleteDirectoryQuietly(mailboxDir(drafts));
+                    deleteDirectoryQuietly(mailboxDir(trash));
                 } catch (Exception e) {
                     System.err.println("[MAIL STORAGE] Lỗi khi xóa hòm thư " + base + ": " + e.getMessage());
                 }
             }
 
-            indexes.keySet().removeIf(k -> k.equalsIgnoreCase(base) || k.equalsIgnoreCase(sent) || k.equalsIgnoreCase(spam));
-            SUMMARY_CACHE.removeByPrefixIgnoreCase(base + "|");
-            SUMMARY_CACHE.removeByPrefixIgnoreCase(sent + "|");
-            SUMMARY_CACHE.removeByPrefixIgnoreCase(spam + "|");
-            META_CACHE.removeByPrefixIgnoreCase(base + "|");
-            META_CACHE.removeByPrefixIgnoreCase(sent + "|");
-            META_CACHE.removeByPrefixIgnoreCase(spam + "|");
+            indexes.keySet().removeIf(k -> k.equalsIgnoreCase(base) || k.equalsIgnoreCase(sent)
+                    || k.equalsIgnoreCase(spam) || k.equalsIgnoreCase(drafts) || k.equalsIgnoreCase(trash));
+            flagTables.keySet().removeIf(k -> k.equalsIgnoreCase(base) || k.equalsIgnoreCase(sent)
+                    || k.equalsIgnoreCase(spam) || k.equalsIgnoreCase(drafts) || k.equalsIgnoreCase(trash));
+            for (String box : new String[]{base, sent, spam, drafts, trash}) {
+                SUMMARY_CACHE.removeByPrefixIgnoreCase(box + "|");
+                META_CACHE.removeByPrefixIgnoreCase(box + "|");
+            }
             quotaMonitors.keySet().removeIf(k -> k.equalsIgnoreCase(base));
+            blockedCache.keySet().removeIf(k -> k.equalsIgnoreCase(base));
+            opMonitors.keySet().removeIf(k -> k.equalsIgnoreCase(base));
         } finally {
             userLocks.remove(base, lockInbox);
             userLocks.remove(sent, lockSent);
             userLocks.remove(spam, lockSpam);
+            userLocks.remove(drafts, lockDrafts);
+            userLocks.remove(trash, lockTrash);
+            lockTrash.writeLock().unlock();
+            lockDrafts.writeLock().unlock();
             lockSpam.writeLock().unlock();
             lockSent.writeLock().unlock();
             lockInbox.writeLock().unlock();
@@ -1048,9 +1332,22 @@ public class MailStorageEngine {
     }
 
     static int purgeOldSpam(long nowMs, long maxAgeMs) {
+        return purgeOldBoxes(SPAM_SUFFIX, nowMs, maxAgeMs);
+    }
+
+    /** Xóa thư trong các hòm _trash quá 30 ngày (tính từ lúc file được ghi vào thùng rác). */
+    public static int purgeOldTrash() {
+        return purgeOldTrash(System.currentTimeMillis(), TRASH_MAX_AGE_MS);
+    }
+
+    static int purgeOldTrash(long nowMs, long maxAgeMs) {
+        return purgeOldBoxes(TRASH_SUFFIX, nowMs, maxAgeMs);
+    }
+
+    private static int purgeOldBoxes(String suffix, long nowMs, long maxAgeMs) {
         PURGE_LOCK.lock();
         try {
-            File[] dirs = baseDir().toFile().listFiles(f -> f.isDirectory() && f.getName().endsWith(SPAM_SUFFIX));
+            File[] dirs = baseDir().toFile().listFiles(f -> f.isDirectory() && f.getName().endsWith(suffix));
             if (dirs == null) return 0;
 
             int deleted = 0;
@@ -1068,8 +1365,9 @@ public class MailStorageEngine {
                         }
                     }
                 } catch (Exception e) {
-                    System.err.println("[MAIL STORAGE] Lỗi khi dọn thư rác của " + mailbox + ": " + e.getMessage());
+                    System.err.println("[MAIL STORAGE] Lỗi khi dọn thư quá hạn của " + mailbox + ": " + e.getMessage());
                 } finally {
+                    flushFlags(mailbox);
                     lock.writeLock().unlock();
                 }
             }
@@ -1085,7 +1383,8 @@ public class MailStorageEngine {
 
         long count = 0;
         File[] userDirs = baseDir.listFiles((dir, name) -> new File(dir, name).isDirectory()
-                && !name.endsWith(SENT_SUFFIX) && !name.endsWith(SPAM_SUFFIX));
+                && !name.endsWith(SENT_SUFFIX) && !name.endsWith(SPAM_SUFFIX)
+                && !name.endsWith(DRAFTS_SUFFIX) && !name.endsWith(TRASH_SUFFIX));
         if (userDirs != null) {
             for (File dir : userDirs) {
                 File[] encFiles = dir.listFiles((d, name) -> name.endsWith(".enc"));
@@ -1132,5 +1431,333 @@ public class MailStorageEngine {
             }
         }
         return sb.toString();
+    }
+
+    // =====================================================================
+    //                      CHỨC NĂNG MỚI (L1)
+    // =====================================================================
+
+    // ---------- Quota ----------
+
+    public static long getUsedQuotaBytes(String username) {
+        if (username == null || !isSafeMailboxName(username)) return 0;
+        String clean = getCleanUsername(username.trim());
+        if (clean == null || clean.isEmpty()) return 0;
+        try {
+            return getMailboxSizeInBytes(clean)
+                    + getMailboxSizeInBytes(clean + SENT_SUFFIX)
+                    + getMailboxSizeInBytes(clean + SPAM_SUFFIX)
+                    + getMailboxSizeInBytes(clean + DRAFTS_SUFFIX)
+                    + getMailboxSizeInBytes(clean + TRASH_SUFFIX);
+        } catch (RuntimeException e) {
+            return 0;
+        }
+    }
+
+    // ---------- Cờ seen / starred ----------
+
+    private static FlagTable flagTable(String mailbox) {
+        return flagTables.computeIfAbsent(mailbox.trim(), k -> new FlagTable());
+    }
+
+    private static void flushFlags(String mailbox) {
+        try {
+            FlagTable t = flagTables.get(mailbox.trim());
+            if (t != null) t.flush(mailboxDir(mailbox));
+        } catch (Exception e) {
+            System.err.println("[MAIL STORAGE] Lỗi ghi file cờ thư: " + e.getMessage());
+        }
+    }
+
+    /** Đặt cờ (null = giữ nguyên). false nếu id/hòm không hợp lệ hoặc không có trong chỉ mục. */
+    public static boolean updateMailFlags(String mailbox, String fileId, Boolean seen, Boolean starred) {
+        if (!isSafeId(fileId) || !isValidMailboxForUser(mailbox)) return false;
+        String mb = mailbox.trim();
+        initMailbox(mb);
+        ReentrantReadWriteLock lock = getLockForUser(mb);
+        lock.writeLock().lock();
+        try {
+            if (!loadedIndex(mb).contains(fileId)) return false;
+            if (seen == null && starred == null) return true;
+            flagTable(mb).mergeAndFlush(mailboxDir(mb), fileId, seen, starred);
+            return true;
+        } catch (IOException e) {
+            System.err.println("[MAIL STORAGE] Lỗi cập nhật cờ thư: " + e.getMessage());
+            return false;
+        } catch (RuntimeException e) {
+            return false;
+        } finally {
+            lock.writeLock().unlock();
+        }
+    }
+
+    /** Trả Properties có khóa "seen"/"starred" ("true"/"false"); chỉ có khóa nếu đã từng đặt. */
+    public static Properties getMailFlags(String mailbox, String fileId) {
+        Properties props = new Properties();
+        if (!isSafeId(fileId) || !isSafeMailboxName(mailbox)) return props;
+        String mb = mailbox.trim();
+        ReentrantReadWriteLock lock = getLockForUser(mb);
+        lock.readLock().lock();
+        try {
+            String v = flagTable(mb).get(mailboxDir(mb), fileId);
+            if (v != null && v.length() == 2) {
+                if (v.charAt(0) != '-') props.setProperty("seen", String.valueOf(v.charAt(0) == 'T'));
+                if (v.charAt(1) != '-') props.setProperty("starred", String.valueOf(v.charAt(1) == 'T'));
+            }
+        } catch (RuntimeException ignored) {
+        } finally {
+            lock.readLock().unlock();
+        }
+        return props;
+    }
+
+    // ---------- Chuyển thư giữa các hòm của cùng một người dùng ----------
+
+    /**
+     * Chép sang hòm đích (lưu xong mới xóa nguồn), chuyển cờ, trả ĐÚNG id file mới.
+     * Trả null nếu lỗi (khi đó thư nguồn vẫn còn nguyên, không để lại bản sao ở đích).
+     * Không bắn SSE và không kiểm tra quota (chỉ di chuyển trong cùng người dùng, tổng dung lượng không đổi).
+     * Bản ghi ở đích luôn là GCM với AAD của hòm đích + id mới.
+     */
+    public static String moveEmail(String sourceMailbox, String targetMailbox, String fileId) {
+        if (sourceMailbox == null || targetMailbox == null || fileId == null) return null;
+        String src = sourceMailbox.trim();
+        String dst = targetMailbox.trim();
+        if (!isSafeId(fileId) || !isValidMailboxForUser(src) || !isValidMailboxForUser(dst)) return null;
+        if (src.equals(dst)) return null;
+        String clean = getCleanUsername(src);
+        if (!clean.equals(getCleanUsername(dst))) return null;
+
+        try {
+            synchronized (opMonitor(clean)) {
+                if (!isKnownId(src, fileId)) return null;
+
+                StoredMail mail = getSingleMail(src, fileId);
+                if (mail == null || mail.rawBytes() == null) return null;
+                Properties oldFlags = getMailFlags(src, fileId);
+
+                String[] newId = new String[1];
+                SaveResult sr = saveInternal(dst, mail.rawBytes(), newId, false, false, 0L);
+                if (sr != SaveResult.OK || newId[0] == null) return null;
+
+                Boolean seen = oldFlags.containsKey("seen")
+                        ? Boolean.valueOf(oldFlags.getProperty("seen")) : null;
+                Boolean starred = oldFlags.containsKey("starred")
+                        ? Boolean.valueOf(oldFlags.getProperty("starred")) : null;
+                if (seen != null || starred != null) {
+                    updateMailFlags(dst, newId[0], seen, starred);
+                }
+
+                if (!deleteOne(src, fileId)) {
+                    deleteOne(dst, newId[0]); // hoàn tác: không để nhân đôi thư
+                    return null;
+                }
+                return newId[0];
+            }
+        } catch (Exception e) {
+            System.err.println("[MAIL STORAGE] Lỗi khi chuyển thư: " + e.getMessage());
+            return null;
+        }
+    }
+
+    // ---------- Bản nháp ----------
+
+    /**
+     * Lưu bản nháp vào <user>_drafts. Nếu existingIdOrNull hợp lệ và có trong hòm nháp thì thay thế
+     * (lưu bản mới xong mới xóa bản cũ). Trả id mới, null nếu lỗi/quá quota/id không hợp lệ.
+     * mailbox có thể là tên user hoặc bất kỳ hòm nào của user đó.
+     */
+    public static String saveDraft(String mailbox, String existingIdOrNull, byte[] raw) {
+        if (raw == null || !isValidMailboxForUser(mailbox)) return null;
+        String clean = getCleanUsername(mailbox.trim());
+        String box = clean + DRAFTS_SUFFIX;
+
+        String existing = null;
+        if (existingIdOrNull != null && !existingIdOrNull.trim().isEmpty()) {
+            existing = existingIdOrNull.trim();
+            if (!isSafeId(existing)) return null;
+        }
+
+        try {
+            synchronized (opMonitor(clean)) {
+                String oldId = null;
+                long credit = 0;
+                if (existing != null && isKnownId(box, existing)) {
+                    oldId = existing;
+                    credit = loadedIndex(box).sizeOf(existing);
+                }
+                String[] out = new String[1];
+                SaveResult sr = saveInternal(box, raw, out, false, true, credit);
+                if (sr != SaveResult.OK || out[0] == null) return null;
+                if (oldId != null) {
+                    deleteOne(box, oldId);
+                }
+                return out[0];
+            }
+        } catch (Exception e) {
+            System.err.println("[MAIL STORAGE] Lỗi khi lưu bản nháp: " + e.getMessage());
+            return null;
+        }
+    }
+
+    // ---------- Danh sách chặn ----------
+
+    /**
+     * Rút địa chỉ email thuần, chữ thường, từ địa chỉ trần hoặc giá trị header From
+     * ("Tên <a@b>", "a@b (Tên)", ...). Địa chỉ không có '@' được gắn miền của server. Trả "" nếu không hợp lệ.
+     */
+    public static String extractCleanEmail(String rawAddress) {
+        if (rawAddress == null) return "";
+        String s = rawAddress.trim();
+        if (s.isEmpty() || s.length() > 1000) return "";
+        int lt = s.lastIndexOf('<');
+        int gt = s.lastIndexOf('>');
+        if (lt >= 0 && gt > lt) {
+            s = s.substring(lt + 1, gt).trim();
+        } else {
+            String chosen = null;
+            String[] parts = s.split("[\\s,;]+");
+            for (String p : parts) {
+                if (p.indexOf('@') >= 0) { chosen = p; break; }
+            }
+            if (chosen == null && parts.length > 0) chosen = parts[0];
+            s = chosen == null ? "" : chosen;
+        }
+        s = s.replaceAll("[\\s\"'<>()]", "").toLowerCase(Locale.ROOT);
+        if (s.isEmpty()) return "";
+        if (!s.contains("@")) s = s + "@" + ServerConfig.MAIL_DOMAIN.toLowerCase(Locale.ROOT);
+        return EMAIL_SHAPE.matcher(s).matches() ? s : "";
+    }
+
+    private static Set<String> readBlockedFile(String cleanUser) {
+        Set<String> set = new LinkedHashSet<>();
+        try {
+            Path file = mailboxDir(cleanUser).resolve(BLOCKED_FILE);
+            if (Files.isRegularFile(file)) {
+                for (String line : Files.readAllLines(file, StandardCharsets.UTF_8)) {
+                    String t = line.trim().toLowerCase(Locale.ROOT);
+                    if (!t.isEmpty() && set.size() < MAX_BLOCKED_SENDERS) set.add(t);
+                }
+            }
+            return set;
+        } catch (IOException | RuntimeException e) {
+            return null; // lỗi đọc: không cache
+        }
+    }
+
+    private static void writeBlockedFile(String cleanUser, Set<String> set) throws IOException {
+        Path dir = mailboxDir(cleanUser);
+        Path file = dir.resolve(BLOCKED_FILE);
+        if (set.isEmpty()) {
+            Files.deleteIfExists(file);
+            return;
+        }
+        Path tmp = dir.resolve(BLOCKED_FILE + ".tmp");
+        try {
+            String text = String.join("\n", set) + "\n";
+            SecurityUtils.writeOwnerOnly(tmp, text.getBytes(StandardCharsets.UTF_8));
+            try {
+                Files.move(tmp, file, StandardCopyOption.ATOMIC_MOVE);
+            } catch (AtomicMoveNotSupportedException e) {
+                Files.move(tmp, file, StandardCopyOption.REPLACE_EXISTING);
+            }
+        } catch (IOException e) {
+            try { Files.deleteIfExists(tmp); } catch (IOException ignored) {}
+            throw e;
+        }
+    }
+
+    private static Set<String> blockedSnapshot(String cleanUser) {
+        String key = cleanUser.toLowerCase(Locale.ROOT);
+        Set<String> s = blockedCache.get(key);
+        if (s == null) {
+            Set<String> fresh = readBlockedFile(cleanUser);
+            if (fresh == null) return Collections.emptySet();
+            Set<String> frozen = Collections.unmodifiableSet(fresh);
+            Set<String> prev = blockedCache.putIfAbsent(key, frozen);
+            s = prev != null ? prev : frozen;
+        }
+        return s;
+    }
+
+    public static boolean addBlockedSender(String username, String senderRaw) {
+        if (username == null) return false;
+        String clean = getCleanUsername(username.trim());
+        if (!isValidMailboxForUser(clean)) return false;
+        String sender = extractCleanEmail(senderRaw);
+        if (sender.isEmpty()) return false;
+
+        initMailbox(clean);
+        ReentrantReadWriteLock lock = getLockForUser(clean);
+        lock.writeLock().lock();
+        try {
+            Set<String> cur = readBlockedFile(clean);
+            if (cur == null) return false;
+            if (cur.contains(sender)) return true;
+            if (cur.size() >= MAX_BLOCKED_SENDERS) return false;
+            Set<String> next = new LinkedHashSet<>(cur);
+            next.add(sender);
+            writeBlockedFile(clean, next);
+            blockedCache.put(clean.toLowerCase(Locale.ROOT), Collections.unmodifiableSet(next));
+            return true;
+        } catch (IOException | RuntimeException e) {
+            System.err.println("[MAIL STORAGE] Lỗi lưu danh sách chặn: " + e.getMessage());
+            return false;
+        } finally {
+            lock.writeLock().unlock();
+        }
+    }
+
+    public static boolean removeBlockedSender(String username, String senderRaw) {
+        if (username == null) return false;
+        String clean = getCleanUsername(username.trim());
+        if (!isValidMailboxForUser(clean)) return false;
+        String sender = extractCleanEmail(senderRaw);
+        if (sender.isEmpty()) return false;
+
+        ReentrantReadWriteLock lock = getLockForUser(clean);
+        lock.writeLock().lock();
+        try {
+            Set<String> cur = readBlockedFile(clean);
+            if (cur == null) return false;
+            if (!cur.contains(sender)) return true;
+            Set<String> next = new LinkedHashSet<>(cur);
+            next.remove(sender);
+            writeBlockedFile(clean, next);
+            blockedCache.put(clean.toLowerCase(Locale.ROOT), Collections.unmodifiableSet(next));
+            return true;
+        } catch (IOException | RuntimeException e) {
+            System.err.println("[MAIL STORAGE] Lỗi cập nhật danh sách chặn: " + e.getMessage());
+            return false;
+        } finally {
+            lock.writeLock().unlock();
+        }
+    }
+
+    /** Nhận cả địa chỉ trần lẫn giá trị header From. */
+    public static boolean isSenderBlocked(String username, String fromAddrOrHeader) {
+        if (username == null) return false;
+        try {
+            if (!isSafeMailboxName(username)) return false;
+            String clean = getCleanUsername(username.trim());
+            if (clean == null || clean.isEmpty() || !userDirectory.exists(clean)) return false;
+            String sender = extractCleanEmail(fromAddrOrHeader);
+            if (sender.isEmpty()) return false;
+            return blockedSnapshot(clean).contains(sender);
+        } catch (RuntimeException e) {
+            return false;
+        }
+    }
+
+    public static List<String> listBlockedSenders(String username) {
+        if (username == null) return new ArrayList<>();
+        try {
+            if (!isSafeMailboxName(username)) return new ArrayList<>();
+            String clean = getCleanUsername(username.trim());
+            if (clean == null || clean.isEmpty() || !userDirectory.exists(clean)) return new ArrayList<>();
+            return new ArrayList<>(blockedSnapshot(clean));
+        } catch (RuntimeException e) {
+            return new ArrayList<>();
+        }
     }
 }

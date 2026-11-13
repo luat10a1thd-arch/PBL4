@@ -151,6 +151,90 @@ public class LoginThrottle {
         }
     }
 
+    // ---------- Khôi phục tài khoản (chỉ thêm) ----------
+    // Khóa khôi phục theo TÀI KHOẢN dùng bộ đếm "a|user" (cùng cơ chế hit/isLocked, cửa sổ THROTTLE_WINDOW_MS = 15 phút),
+    // nên kẻ tấn công đổi IP cũng không làm lại được bộ đếm.
+    // Giới hạn theo giờ dùng cửa sổ trượt riêng ("f|i|ip", "f|a|user", "v|user").
+
+    public static final int FORGOT_MAX_PER_ACCOUNT_PER_HOUR = 3;
+    public static final int FORGOT_MAX_PER_IP_PER_HOUR = 10;
+    public static final int EMAIL_VERIFY_MAX_PER_ACCOUNT_PER_HOUR = 5;
+    public static final int RECOVERY_MAX_FAILURES_PER_ACCOUNT = 10;
+    private static final long HOUR_MS = 60L * 60 * 1000;
+
+    private static final ConcurrentHashMap<String, java.util.ArrayDeque<Long>> windowEvents = new ConcurrentHashMap<>();
+
+    /** Cửa sổ trượt: cho phép tối đa max sự kiện trong windowMs. Trả true và ghi nhận nếu còn hạn mức. */
+    private static boolean tryAcquireWindow(String key, int max, long windowMs, long now) {
+        if (windowEvents.size() >= MAX_ENTRIES && !windowEvents.containsKey(key)) {
+            pruneWindows(now, windowMs);
+            if (windowEvents.size() >= MAX_ENTRIES && !windowEvents.containsKey(key)) return false; // đầy: từ chối (fail closed)
+        }
+        while (true) {
+            java.util.ArrayDeque<Long> dq = windowEvents.computeIfAbsent(key, k -> new java.util.ArrayDeque<>());
+            synchronized (dq) {
+                if (windowEvents.get(key) != dq) continue; // vừa bị dọn khỏi map, thử lại
+                while (!dq.isEmpty() && now - dq.peekFirst() >= windowMs) dq.pollFirst();
+                if (dq.size() >= max) return false;
+                dq.addLast(now);
+                return true;
+            }
+        }
+    }
+
+    private static void pruneWindows(long now, long windowMs) {
+        for (var e : windowEvents.entrySet()) {
+            java.util.ArrayDeque<Long> dq = e.getValue();
+            synchronized (dq) {
+                while (!dq.isEmpty() && now - dq.peekFirst() >= windowMs) dq.pollFirst();
+                if (dq.isEmpty()) windowEvents.remove(e.getKey(), dq);
+            }
+        }
+    }
+
+    /**
+     * Mỗi yêu cầu forgot-password (kể cả với tài khoản KHÔNG tồn tại, để phản hồi không lộ gì):
+     * tối đa 10/giờ mỗi IP và 3/giờ mỗi tài khoản. Trả false nếu vượt hạn mức.
+     */
+    public static boolean tryAcquireForgotRequest(String clientIp, String username) {
+        long now = clock.getAsLong();
+        String ip = norm(clientIp);
+        String user = norm(username).toLowerCase();
+        if (user.isEmpty()) return false;
+        // IP trước: kẻ tấn công từ một IP cạn hạn mức của IP mình trước khi đụng tới hạn mức của nạn nhân
+        if (!ip.isEmpty() && !tryAcquireWindow("f|i|" + ip, FORGOT_MAX_PER_IP_PER_HOUR, HOUR_MS, now)) return false;
+        return tryAcquireWindow("f|a|" + user, FORGOT_MAX_PER_ACCOUNT_PER_HOUR, HOUR_MS, now);
+    }
+
+    /** Giới hạn gửi mã xác minh email khôi phục: 5/giờ mỗi tài khoản (chống dùng server để spam hộp thư bên ngoài). */
+    public static boolean tryAcquireEmailVerification(String username) {
+        String user = norm(username).toLowerCase();
+        if (user.isEmpty()) return false;
+        return tryAcquireWindow("v|" + user, EMAIL_VERIFY_MAX_PER_ACCOUNT_PER_HOUR, HOUR_MS, clock.getAsLong());
+    }
+
+    /** Khôi phục đang bị khóa (>= 10 lần sai tổng theo tài khoản, bất kể IP). */
+    public static boolean isRecoveryLocked(String username) {
+        String user = norm(username).toLowerCase();
+        return !user.isEmpty() && isLocked("a|" + user, clock.getAsLong());
+    }
+
+    public static void recordRecoveryFailure(String username) {
+        String user = norm(username).toLowerCase();
+        if (!user.isEmpty()) hit("a|" + user, RECOVERY_MAX_FAILURES_PER_ACCOUNT, clock.getAsLong());
+    }
+
+    public static void resetRecoveryFailures(String username) {
+        String user = norm(username).toLowerCase();
+        if (!user.isEmpty()) attempts.remove("a|" + user);
+    }
+
+    /** Chỉ cho test: xóa bộ đếm khôi phục (resetForTest cũ không đụng tới cửa sổ giờ). */
+    public static void resetRecoveryForTest() {
+        windowEvents.clear();
+        attempts.keySet().removeIf(k -> k.startsWith("a|"));
+    }
+
     // ---------- Phục vụ test ----------
 
     static int size() {

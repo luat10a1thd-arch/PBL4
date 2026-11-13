@@ -1,12 +1,16 @@
+// FILE: src/main/java/com/pbl4/mailserver/core/MailService.java
 package com.pbl4.mailserver.core;
 
 import com.pbl4.mailserver.config.ServerConfig;
 import com.pbl4.mailserver.mime.MessageNormalizer;
+import com.pbl4.mailserver.mime.MimeParser;
 
 import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.LongSupplier;
 import java.util.regex.Pattern;
 
 public class MailService {
@@ -50,6 +54,49 @@ public class MailService {
     static void resetHooksForTest() {
         normalizer = MessageNormalizer::normalize;
         outbound = OutboundQueue::enqueue;
+    }
+
+    // ---------- Giới hạn thư gửi RA NGOÀI theo tài khoản (cửa sổ trượt 1 giờ) ----------
+    // Tính theo số người nhận ngoài hệ thống (mỗi người nhận = 1 thư thực sự rời server).
+    // Admin và SEND_LIMIT_PER_HOUR=0 được miễn.
+
+    private static final long SEND_WINDOW_MS = 60L * 60 * 1000;
+    private static final Map<String, ArrayDeque<Long>> sendWindows = new ConcurrentHashMap<>();
+    private static volatile LongSupplier sendClock = System::currentTimeMillis;
+
+    static void resetSendLimitForTest(LongSupplier clock) {
+        sendWindows.clear();
+        sendClock = (clock == null) ? System::currentTimeMillis : clock;
+    }
+
+    private static boolean isSendLimitExempt(String user) {
+        if (ServerConfig.SEND_LIMIT_PER_HOUR <= 0) return true;
+        if (ServerConfig.ADMIN_EMAIL.equalsIgnoreCase(user)) return true;
+        User u = UserStore.getUser(user);
+        return u != null && "ADMIN".equalsIgnoreCase(u.getRole());
+    }
+
+    /** Giữ chỗ n lượt gửi (tất cả hoặc không). Trả false nếu vượt hạn mức. */
+    static boolean reserveSend(String user, int n) {
+        int max = ServerConfig.SEND_LIMIT_PER_HOUR;
+        if (n > max) return false;
+        long now = sendClock.getAsLong();
+        ArrayDeque<Long> dq = sendWindows.computeIfAbsent(user, k -> new ArrayDeque<>());
+        synchronized (dq) {
+            while (!dq.isEmpty() && now - dq.peekFirst() >= SEND_WINDOW_MS) dq.pollFirst();
+            if (dq.size() + n > max) return false;
+            for (int i = 0; i < n; i++) dq.addLast(now);
+            return true;
+        }
+    }
+
+    /** Hoàn lại lượt đã giữ khi thư không được xếp hàng. */
+    static void refundSend(String user, int n) {
+        ArrayDeque<Long> dq = sendWindows.get(user);
+        if (dq == null) return;
+        synchronized (dq) {
+            for (int i = 0; i < n && !dq.isEmpty(); i++) dq.pollLast();
+        }
     }
 
     @Deprecated
@@ -151,6 +198,18 @@ public class MailService {
             return new DeliveryResult(false, 0, 0, "Địa chỉ người nhận trống!");
         }
 
+        // Giới hạn thư gửi ra ngoài mỗi giờ: kiểm tra TRƯỚC khi lưu bất cứ thứ gì (từ chối cả thư, không gửi nửa chừng)
+        int reservedExternal = 0;
+        if (!externalRecipients.isEmpty() && !isSendLimitExempt(canonicalSender)) {
+            if (!reserveSend(canonicalSender, externalRecipients.size())) {
+                int total = localRecipients.size() + externalRecipients.size() + invalidLocal;
+                return new DeliveryResult(false, 0, total,
+                        "Bạn đã vượt giới hạn " + ServerConfig.SEND_LIMIT_PER_HOUR
+                                + " thư gửi ra ngoài mỗi giờ. Vui lòng thử lại sau!");
+            }
+            reservedExternal = externalRecipients.size();
+        }
+
         int successTotal = 0;
         int failTotal = invalidLocal;
         int quotaFailCount = 0;
@@ -158,7 +217,7 @@ public class MailService {
         List<String> messages = new ArrayList<>();
 
         if (!localRecipients.isEmpty()) {
-            LocalOutcome lo = storeLocal(localRecipients, message, Folder.INBOX);
+            LocalOutcome lo = storeLocal(localRecipients, message, Folder.INBOX, canonicalSender);
             successTotal += lo.ok;
             failTotal += lo.fail;
             quotaFailCount += lo.quotaFail;
@@ -185,6 +244,7 @@ public class MailService {
                 successTotal += externalRecipients.size();
                 messages.add("Thư gửi ra ngoài đã được xếp hàng (" + externalRecipients.size() + " người nhận)");
             } else {
+                if (reservedExternal > 0) refundSend(canonicalSender, reservedExternal);
                 failTotal += externalRecipients.size();
                 messages.add("Hàng đợi gửi thư ra ngoài đã đầy, vui lòng thử lại sau!");
             }
@@ -211,7 +271,8 @@ public class MailService {
         }
         Folder target = (folder == null) ? Folder.INBOX : folder;
 
-        LocalOutcome lo = storeLocal(localRcpts, raw, target);
+        // Người nhận đã chặn người gửi: thư vào _spam (vẫn tính là giao thành công, người gửi không dò được)
+        LocalOutcome lo = storeLocal(localRcpts, raw, target, envelopeFrom);
 
         List<String> messages = new ArrayList<>();
         if (lo.ok > 0) messages.add("Đã lưu nội bộ cho " + lo.ok + " người nhận");
@@ -236,8 +297,14 @@ public class MailService {
     }
 
     private static LocalOutcome storeLocal(Collection<String> rcpts, byte[] raw, Folder folder) {
+        return storeLocal(rcpts, raw, folder, null);
+    }
+
+    private static LocalOutcome storeLocal(Collection<String> rcpts, byte[] raw, Folder folder, String envelopeFrom) {
         LocalOutcome out = new LocalOutcome();
         Set<String> done = new HashSet<>();
+        String headerFrom = null;
+        boolean headerRead = false;
         for (String rcpt : rcpts) {
             if (rcpt == null || rcpt.trim().isEmpty()) continue;
             String canonical = UserStore.canonical(rcpt.trim().toLowerCase(Locale.ROOT));
@@ -247,7 +314,18 @@ public class MailService {
             }
             if (!done.add(canonical)) continue;
 
-            String mailbox = (folder == Folder.SPAM) ? canonical + "_spam" : canonical;
+            Folder target = folder;
+            if (folder == Folder.INBOX) {
+                if (!headerRead) {
+                    headerFrom = readFromHeader(raw);
+                    headerRead = true;
+                }
+                if (isBlockedFor(canonical, envelopeFrom, headerFrom)) {
+                    target = Folder.SPAM;
+                }
+            }
+
+            String mailbox = (target == Folder.SPAM) ? canonical + "_spam" : canonical;
             MailStorageEngine.SaveResult r = MailStorageEngine.saveEmailResult(mailbox, raw);
             if (r == MailStorageEngine.SaveResult.OK) {
                 out.ok++;
@@ -257,6 +335,24 @@ public class MailService {
             }
         }
         return out;
+    }
+
+    private static String readFromHeader(byte[] raw) {
+        try {
+            return MimeParser.rawHeader(raw, "from");
+        } catch (RuntimeException e) {
+            return "";
+        }
+    }
+
+    /** Kiểm tra cả địa chỉ envelope lẫn header From (envelope có thể là địa chỉ bounce/SRS khác header). */
+    private static boolean isBlockedFor(String mailboxUser, String envelopeFrom, String headerFrom) {
+        try {
+            return MailStorageEngine.isSenderBlocked(mailboxUser, envelopeFrom)
+                    || MailStorageEngine.isSenderBlocked(mailboxUser, headerFrom);
+        } catch (RuntimeException e) {
+            return false;
+        }
     }
 
     private static final Pattern SENDER_UNSAFE = Pattern.compile("[\\s<>\"\\x00-\\x1f\\x7f]");

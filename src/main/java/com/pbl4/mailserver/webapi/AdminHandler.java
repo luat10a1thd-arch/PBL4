@@ -7,8 +7,11 @@ import com.pbl4.mailserver.core.MailStorageEngine;
 import com.pbl4.mailserver.core.OutboundQueue;
 import com.pbl4.mailserver.core.User;
 import com.pbl4.mailserver.core.UserStore;
+import com.pbl4.mailserver.forward.ForwardRule;
+import com.pbl4.mailserver.forward.ForwardService;
 import com.pbl4.mailserver.outbound.QueueEntry;
 import com.pbl4.mailserver.ratelimit.AbuseGuard;
+import com.pbl4.mailserver.spam.SpamFilter;
 
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
@@ -61,6 +64,11 @@ public class AdminHandler implements HttpHandler {
     private static volatile long cachedTotalBytes;
     private static volatile long cachedSentMails;
     private static volatile long cachedSpamMails;
+
+    // Cache số luật chuyển tiếp đang bật (phải duyệt mọi user)
+    private static final Object FWD_LOCK = new Object();
+    private static volatile long fwdCachedAt = 0;
+    private static volatile long fwdCachedCount = 0;
 
     // Mã job trong hàng đợi dạng "<msgId>.<n>": chỉ chữ/số/._- (chặn ký tự lạ và "..")
     private static final Pattern QUEUE_ID = Pattern.compile("[A-Za-z0-9._-]{1,128}");
@@ -207,6 +215,7 @@ public class AdminHandler implements HttpHandler {
         statsSource = s != null ? s : DEFAULT_STATS;
         securityAccess = sec != null ? sec : DEFAULT_SECURITY;
         statsCachedAt = 0;
+        fwdCachedAt = 0;
     }
 
     static void resetHooksForTest() {
@@ -230,13 +239,12 @@ public class AdminHandler implements HttpHandler {
      * Được gọi ở cổng vào VÀ lại ở đầu mỗi route bảo mật (phòng thủ nhiều lớp).
      */
     private String requireAdmin(HttpExchange exchange) throws IOException {
-        String authHeader = exchange.getRequestHeaders().getFirst("Authorization");
-        if (authHeader == null || !authHeader.startsWith("Bearer ")) {
+        String token = SessionManager.tokenFromRequest(exchange);
+        if (token == null) {
             sendResponse(exchange, 401, "{\"success\": false, \"message\": \"Chưa đăng nhập!\"}");
             return null;
         }
 
-        String token = authHeader.substring(7);
         String currentUser = gate.validate(token);
 
         if (currentUser == null) {
@@ -273,6 +281,11 @@ public class AdminHandler implements HttpHandler {
 
         if ("GET".equalsIgnoreCase(method) && path.endsWith("/stats")) {
             handleGetStats(exchange);
+            return;
+        }
+
+        if ("GET".equalsIgnoreCase(method) && path.endsWith("/spam-stats")) {
+            handleGetSpamStats(exchange);
             return;
         }
 
@@ -392,6 +405,62 @@ public class AdminHandler implements HttpHandler {
             totalMails, cachedSentMails, cachedSpamMails, queueSize
         );
         sendResponse(exchange, 200, json);
+    }
+
+    /**
+     * GET /api/admin/spam-stats: chỉ số tổng của bộ lọc rác và số luật chuyển tiếp đang bật.
+     * Tuyệt đối không trả địa chỉ, tên người dùng hay nội dung thư.
+     */
+    private void handleGetSpamStats(HttpExchange exchange) throws IOException {
+        Map<String, Long> st;
+        try {
+            st = SpamFilter.stats();
+        } catch (RuntimeException e) {
+            st = Map.of();
+        }
+        long rules = activeForwardRules();
+        String json = "{\"success\": true"
+                + ", \"spamEnabled\": " + ServerConfig.SPAM_ENABLED
+                + ", \"forwardEnabled\": " + ServerConfig.FORWARD_ENABLED
+                + ", \"total\": " + statValue(st, "total")
+                + ", \"spam\": " + statValue(st, "spam")
+                + ", \"ham\": " + statValue(st, "ham")
+                + ", \"learnedSpam\": " + statValue(st, "learnedSpam")
+                + ", \"learnedHam\": " + statValue(st, "learnedHam")
+                + ", \"activeForwardRules\": " + rules + "}";
+        sendResponse(exchange, 200, json);
+    }
+
+    private static long statValue(Map<String, Long> st, String key) {
+        Long v = (st == null) ? null : st.get(key);
+        return v == null ? 0L : v;
+    }
+
+    /** Số luật chuyển tiếp đã xác minh và đang bật trên toàn hệ thống (cache như /stats). -1 nếu không đếm được. */
+    private static long activeForwardRules() {
+        long now = System.currentTimeMillis();
+        if (now - fwdCachedAt <= ServerConfig.ADMIN_STATS_CACHE_MS) return fwdCachedCount;
+        synchronized (FWD_LOCK) {
+            if (System.currentTimeMillis() - fwdCachedAt <= ServerConfig.ADMIN_STATS_CACHE_MS) return fwdCachedCount;
+            long count = 0;
+            try {
+                for (User u : UserStore.getAllUsers()) {
+                    if (u.getUsername() == null) continue;
+                    try {
+                        for (ForwardRule r : ForwardService.list(u.getUsername())) {
+                            if (r.enabled() && r.verified()) count++;
+                        }
+                    } catch (RuntimeException ignored) {
+                        // một user lỗi thì bỏ qua, không làm hỏng thống kê
+                    }
+                }
+            } catch (RuntimeException e) {
+                count = -1;
+            }
+            fwdCachedCount = count;
+            fwdCachedAt = System.currentTimeMillis();
+            return count;
+        }
     }
 
     private static void invalidateStatsCache() {

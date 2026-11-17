@@ -8,6 +8,7 @@ import com.pbl4.mailserver.mime.AttachmentInfo;
 import com.pbl4.mailserver.mime.MimeBuilder;
 import com.pbl4.mailserver.mime.MimeParser;
 import com.pbl4.mailserver.mime.ParsedMail;
+import com.pbl4.mailserver.spam.SpamFilter;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 
@@ -100,9 +101,7 @@ public class MailHandler implements HttpHandler {
         }
 
         // 2. XÁC THỰC USER CHO CÁC API THÔNG THƯỜNG (người dùng luôn lấy từ phiên, không tin tham số client)
-        String authHeader = exchange.getRequestHeaders().getFirst("Authorization");
-        String token = (authHeader != null && authHeader.startsWith("Bearer "))
-                ? authHeader.substring(7) : null;
+        String token = SessionManager.tokenFromRequest(exchange);
         String authedUser = SessionManager.validate(token);
 
         if (authedUser == null) {
@@ -211,8 +210,9 @@ public class MailHandler implements HttpHandler {
             return;
         }
 
-        // Chỉ đăng ký MỘT key (username đầy đủ); SseManager tự giới hạn số kết nối/user
-        SseManager.register(username, info.token, exchange, os);
+        // Chỉ đăng ký MỘT key (username đầy đủ); SseManager tự giới hạn số kết nối/user.
+        // Định danh phiên của SSE là băm của token (SessionManager không giữ token thật nên đóng SSE theo băm).
+        SseManager.register(username, SessionManager.sessionKey(info.token), exchange, os);
     }
 
     // ------------------------------------------------------------------------------------------------
@@ -715,7 +715,7 @@ public class MailHandler implements HttpHandler {
             return;
         }
 
-        sendResponse(exchange, 200, buildDetailJson(mail.id, MimeParser.parse(mail.rawBytes())));
+        sendResponse(exchange, 200, buildDetailJson(mail.id, MimeParser.parse(mail.rawBytes()), mail.rawBytes()));
     }
 
     private void handleGetStorageUsage(HttpExchange exchange, String username) throws IOException {
@@ -943,6 +943,16 @@ public class MailHandler implements HttpHandler {
     // THƯ RÁC / DANH SÁCH CHẶN (chỉ tác động hòm và danh sách chặn của CHÍNH người đăng nhập)
     // ------------------------------------------------------------------------------------------------
 
+    /** Bộ lọc rác học từ phản hồi của người dùng. Lỗi thì bỏ qua, không ảnh hưởng thao tác chính. */
+    private static void learnQuietly(String user, byte[] raw, boolean spam) {
+        if (!ServerConfig.SPAM_ENABLED || raw == null) return;
+        try {
+            SpamFilter.learn(user, raw, spam);
+        } catch (RuntimeException e) {
+            System.err.println("[MAIL API] Không ghi nhận phản hồi thư rác: " + e.getClass().getSimpleName());
+        }
+    }
+
     /** POST /report-spam {id, folder}: chuyển thư của mình vào _spam và chặn người gửi (danh sách của mình). */
     private void handleReportSpam(HttpExchange exchange, String username) throws IOException {
         String body = ApiServer.readBodyOrReply(exchange, ServerConfig.MAX_BODY_AUTH_BYTES, ServerConfig.BODY_READ_TOTAL_TIMEOUT_SMALL_MS);
@@ -972,6 +982,8 @@ public class MailHandler implements HttpHandler {
             sendResponse(exchange, 500, "{\"success\": false, \"message\": \"Không thể chuyển thư vào Thư rác!\"}");
             return;
         }
+
+        learnQuietly(username, mail.rawBytes(), true);
 
         boolean blocked = false;
         if (!sender.isEmpty() && !sender.equals(me)) {
@@ -1011,6 +1023,16 @@ public class MailHandler implements HttpHandler {
         if (!sender.isEmpty()) {
             MailStorageEngine.removeBlockedSender(username, sender);
         }
+
+        learnQuietly(username, mail.rawBytes(), false);
+        if (ServerConfig.SPAM_ENABLED && !sender.isEmpty()) {
+            try {
+                SpamFilter.allow(username, sender);   // người gửi được người dùng xác nhận là thư tốt
+            } catch (RuntimeException e) {
+                System.err.println("[MAIL API] Không thêm được vào danh sách an toàn: " + e.getClass().getSimpleName());
+            }
+        }
+
         sendResponse(exchange, 200, "{\"success\": true, \"id\": \"" + escapeJson(newId)
                 + "\", \"message\": \"Đã chuyển thư về Hộp thư đến!\"}");
     }
@@ -1139,6 +1161,11 @@ public class MailHandler implements HttpHandler {
      * Đính kèm được nối vào cuối body dạng tag để app.js hiện có hiển thị/tải về không cần sửa.
      */
     static String buildDetailJson(String id, ParsedMail parsed) {
+        return buildDetailJson(id, parsed, null);
+    }
+
+    /** Như bản trên; nếu có thư thô thì THÊM spamScore và spamReasons (đọc từ header X-PBL4-Spam-*). */
+    static String buildDetailJson(String id, ParsedMail parsed, byte[] raw) {
         String tags = attachmentsToTags(parsed.attachments());
         StringBuilder body = new StringBuilder(parsed.text().length() + tags.length() + 1);
         body.append(parsed.text());
@@ -1160,8 +1187,61 @@ public class MailHandler implements HttpHandler {
         appendEscaped(sb, parsed.date());
         sb.append("\",\"body\":\"");
         appendEscaped(sb, body);
-        sb.append("\"}");
+        sb.append("\"");
+        sb.append(spamJsonFields(raw));
+        sb.append("}");
         return sb.toString();
+    }
+
+    private static final int SPAM_REASONS_MAX = 20;
+    private static final int SPAM_REASON_MAX_CHARS = 200;
+
+    /**
+     * Đoạn JSON ",\"spamScore\":..,\"spamReasons\":[..]" từ header X-PBL4-Spam-Score / -Reasons
+     * (lý do cách nhau bằng dấu ';'). Rỗng nếu raw == null. Header thiếu/hỏng => spamScore null, spamReasons [].
+     */
+    static String spamJsonFields(byte[] raw) {
+        if (raw == null) return "";
+        String score = headerOrNull(raw, "x-pbl4-spam-score");
+        String reasons = headerOrNull(raw, "x-pbl4-spam-reasons");
+
+        StringBuilder sb = new StringBuilder(",\"spamScore\":");
+        Double d = null;
+        if (score != null && !score.trim().isEmpty()) {
+            try {
+                double v = Double.parseDouble(score.trim());
+                if (!Double.isNaN(v) && !Double.isInfinite(v)) d = v;
+            } catch (NumberFormatException ignored) {
+                // header hỏng: coi như không có điểm
+            }
+        }
+        if (d == null) sb.append("null");
+        else sb.append(String.format(Locale.US, "%.2f", d));
+
+        sb.append(",\"spamReasons\":[");
+        int count = 0;
+        if (reasons != null) {
+            for (String part : reasons.split(";")) {
+                String t = part.trim();
+                if (t.isEmpty()) continue;
+                if (t.length() > SPAM_REASON_MAX_CHARS) t = t.substring(0, SPAM_REASON_MAX_CHARS);
+                if (count > 0) sb.append(',');
+                sb.append('"');
+                appendEscaped(sb, t);
+                sb.append('"');
+                if (++count >= SPAM_REASONS_MAX) break;
+            }
+        }
+        sb.append("]");
+        return sb.toString();
+    }
+
+    private static String headerOrNull(byte[] raw, String name) {
+        try {
+            return MimeParser.rawHeader(raw, name);
+        } catch (RuntimeException e) {
+            return null;
+        }
     }
 
     /**

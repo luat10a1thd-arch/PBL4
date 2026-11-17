@@ -33,6 +33,27 @@ function escapeHtml(text) {
         .replace(/'/g, '&#39;');
 }
 
+// ============================================================================
+// Khởi tạo trang đăng nhập: di trú khóa cũ, hiện thông báo hết phiên,
+// nếu còn phiên hợp lệ (vd. "Ghi nhớ đăng nhập") thì vào thẳng hộp thư.
+// ============================================================================
+document.addEventListener('DOMContentLoaded', async () => {
+    try { localStorage.removeItem('authToken'); } catch (e) { /* bỏ qua */ }
+
+    if (!document.getElementById('login-form')) return; // chỉ chạy trên trang đăng nhập
+
+    const flash = (typeof consumeFlash === 'function') ? consumeFlash() : '';
+    if (flash) showToast(flash, 'error');
+
+    try {
+        const session = await checkSession();
+        if (session.ok) {
+            const role = (session.role || localStorage.getItem('userRole') || 'USER').toUpperCase();
+            window.location.replace(role === 'ADMIN' ? '/admin.html' : '/main.html');
+        }
+    } catch (e) { /* ở lại trang đăng nhập */ }
+});
+
 function switchTab(tab) {
     const loginForm = document.getElementById('login-form');
     const registerForm = document.getElementById('register-form');
@@ -62,6 +83,7 @@ async function handleLogin(event) {
     event.preventDefault();
     const usernameInput = document.getElementById('login-username');
     const passwordInput = document.getElementById('login-password');
+    const rememberInput = document.getElementById('login-remember');
 
     if (!usernameInput || !passwordInput) return;
 
@@ -74,17 +96,26 @@ async function handleLogin(event) {
     }
 
     try {
-        const response = await fetch('/api/auth/login', {
+        const response = await apiFetch('/api/auth/login', {
             method: 'POST',
+            noAuthRedirect: true,
             headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
-            body: `username=${encodeURIComponent(username)}&password=${encodeURIComponent(password)}`
+            body: formEncodeAuth({
+                username: username,
+                password: password,
+                useCookie: 'true',
+                remember: (rememberInput && rememberInput.checked) ? 'true' : 'false'
+            })
         });
 
-        const data = await response.json();
-        if (data.success) {
+        let data = null;
+        try { data = await response.json(); } catch (e) { data = null; }
+
+        if (data && data.success) {
+            // Token nằm trong cookie HttpOnly; localStorage chỉ giữ thông tin để hiển thị
             localStorage.setItem('currentUser', data.username);
-            localStorage.setItem('authToken', data.token);
             localStorage.setItem('userRole', data.role || 'USER');
+            localStorage.removeItem('authToken');
 
             showToast('Đăng nhập thành công!', 'success');
 
@@ -97,7 +128,7 @@ async function handleLogin(event) {
             }, 500);
 
         } else {
-            showToast(data.message || 'Sai tài khoản hoặc mật khẩu!', 'error');
+            showToast((data && data.message) || 'Sai tài khoản hoặc mật khẩu!', 'error');
         }
     } catch (err) {
         console.error('Lỗi kết nối Login:', err);
@@ -148,8 +179,9 @@ async function handleRegister(event) {
     }
 
     try {
-        const response = await fetch('/api/auth/register', {
+        const response = await apiFetch('/api/auth/register', {
             method: 'POST',
+            noAuthRedirect: true,
             headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
             body: `username=${encodeURIComponent(username)}&password=${encodeURIComponent(password)}`
         });
@@ -297,8 +329,9 @@ async function handleSendOtp() {
         return;
     }
     try {
-        const response = await fetch('/api/auth/forgot-password', {
+        const response = await apiFetch('/api/auth/forgot-password', {
             method: 'POST',
+            noAuthRedirect: true,
             headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
             body: formEncodeAuth({ username: username })
         });
@@ -339,8 +372,9 @@ async function handleResetPassword(event) {
     }
 
     try {
-        const response = await fetch('/api/auth/reset-password', {
+        const response = await apiFetch('/api/auth/reset-password', {
             method: 'POST',
+            noAuthRedirect: true,
             headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
             body: formEncodeAuth({
                 username: username,
@@ -370,24 +404,20 @@ async function handleResetPassword(event) {
 }
 
 // ============================================================================
-// Cửa sổ "Bảo mật tài khoản" (nằm trong main.html; main.html nạp file này TRƯỚC app.js)
+// Cửa sổ "Bảo mật tài khoản" (nằm trong main.html; main.html nạp api.js rồi file này TRƯỚC app.js)
 // ============================================================================
 
 let secCodes = [];   // chỉ giữ trong bộ nhớ, xóa khi đóng cửa sổ / chuyển tab / bấm "Tôi đã lưu lại"
 
+// Gọi API có phiên. Khi 401, apiFetch đã dọn phiên và chuyển về trang đăng nhập.
 async function secApi(method, url, params) {
-    const token = localStorage.getItem('authToken');
-    const headers = { 'Authorization': 'Bearer ' + token };
-    const options = { method: method, headers: headers };
+    const options = { method: method };
     if (params && method !== 'GET') {
-        headers['Content-Type'] = 'application/x-www-form-urlencoded; charset=UTF-8';
+        options.headers = { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' };
         options.body = formEncodeAuth(params);
     }
-    const response = await fetch(url, options);
+    const response = await apiFetch(url, options);
     if (response.status === 401) {
-        localStorage.removeItem('currentUser');
-        localStorage.removeItem('authToken');
-        window.location.href = '/';
         return { ok: false, status: 401, data: null };
     }
     let data = null;
@@ -429,6 +459,7 @@ async function loadRecoveryStatus() {
     codesBox.textContent = '';
     try {
         const r = await secApi('GET', '/api/auth/recovery-status');
+        if (r.status === 401) return;
         if (!r.ok || !r.data) {
             recBox.textContent = 'Không tải được trạng thái khôi phục.';
             return;

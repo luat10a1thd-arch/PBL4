@@ -1,9 +1,11 @@
+// FILE: src/main/java/com/pbl4/mailserver/webapi/ApiServer.java
 package com.pbl4.mailserver.webapi;
 
 import com.pbl4.mailserver.config.ServerConfig;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
+import com.sun.net.httpserver.HttpsExchange;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -41,6 +43,7 @@ public class ApiServer {
             server.createContext("/api/auth", new CorsHandlerWrapper(new AuthHandler()));
             server.createContext("/api/mails", new CorsHandlerWrapper(new MailHandler()));
             server.createContext("/api/admin", new CorsHandlerWrapper(new AdminHandler()));
+            server.createContext("/api/settings", new CorsHandlerWrapper(new SettingsHandler()));
 
             // Tạo ThreadPool riêng cho HTTP với tên http-worker-N (Daemon Threads)
             AtomicInteger threadNumber = new AtomicInteger(1);
@@ -197,6 +200,92 @@ public class ApiServer {
         }
     }
 
+    // ===================== Bảo vệ phiên bằng cookie: kiểm tra CSRF + Origin =====================
+
+    private static boolean isStateChanging(String method) {
+        return "POST".equalsIgnoreCase(method) || "PUT".equalsIgnoreCase(method)
+                || "PATCH".equalsIgnoreCase(method) || "DELETE".equalsIgnoreCase(method);
+    }
+
+    /** Điểm vào không cần phiên: đăng nhập/đăng ký/quên-đặt lại mật khẩu/tùy chọn khôi phục, và SSE (xác thực bằng ticket). */
+    private static boolean isPublicEndpoint(String path) {
+        if (path.startsWith("/api/auth/")) {
+            return path.endsWith("/login") || path.endsWith("/register")
+                    || path.endsWith("/forgot-password") || path.endsWith("/reset-password")
+                    || path.endsWith("/recovery-options");
+        }
+        return path.startsWith("/api/mails/") && path.endsWith("/stream");
+    }
+
+    private static String stripSlash(String s) {
+        String t = s.trim().toLowerCase(Locale.ROOT);
+        while (t.endsWith("/")) t = t.substring(0, t.length() - 1);
+        return t;
+    }
+
+    /** Không có Origin: cho qua. Có Origin: phải bằng PBL4_ALLOWED_ORIGIN hoặc cùng nguồn (scheme+host+cổng) với yêu cầu. */
+    static boolean originAllowed(HttpExchange ex) {
+        String origin = ex.getRequestHeaders().getFirst("Origin");
+        if (origin == null) return true;
+        String o = stripSlash(origin);
+        if (o.isEmpty() || o.equals("null")) return false;
+        if (o.equals(stripSlash(CorsHandlerWrapper.allowedOrigin()))) return true;
+        String host = ex.getRequestHeaders().getFirst("Host");
+        if (host == null || host.trim().isEmpty()) return false;
+        String scheme = (ex instanceof HttpsExchange) ? "https" : "http";
+        return o.equals(scheme + "://" + host.trim().toLowerCase(Locale.ROOT));
+    }
+
+    private static boolean constantTimeEq(String a, String b) {
+        return MessageDigest.isEqual(a.getBytes(StandardCharsets.UTF_8), b.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private static void denyForbidden(HttpExchange ex) throws IOException {
+        sendJson(ex, 403, "{\"success\": false, \"message\": \"Yêu cầu không hợp lệ!\"}", true);
+    }
+
+    /**
+     * Trả true nếu được đi tiếp. Trả false khi đã tự phản hồi (401/403).
+     * - Điểm vào công khai: chỉ kiểm tra Origin (khi là yêu cầu ghi).
+     * - Authorization: Bearer hoặc không có thông tin xác thực: miễn CSRF (hành vi cũ).
+     * - Xác thực bằng COOKIE: phiên phải còn (không thì 401 + xóa cookie); yêu cầu ghi phải đúng Origin
+     *   và header X-CSRF-Token trùng mã CSRF của phiên (so sánh hằng thời gian), sai thì 403.
+     */
+    static boolean enforceSessionGuard(HttpExchange ex) throws IOException {
+        String path = ex.getRequestURI().getPath();
+        boolean writes = isStateChanging(ex.getRequestMethod());
+
+        if (isPublicEndpoint(path)) {
+            if (writes && !originAllowed(ex)) {
+                denyForbidden(ex);
+                return false;
+            }
+            return true;
+        }
+
+        if (!SessionManager.isCookieRequest(ex)) return true;
+
+        String token = SessionManager.tokenFromRequest(ex);
+        if (SessionManager.validate(token) == null) {
+            SessionCookies.clear(ex);
+            sendJson(ex, 401, "{\"success\": false, \"message\": \"Chưa đăng nhập hoặc phiên hết hạn!\"}", writes);
+            return false;
+        }
+        if (!writes) return true;
+
+        if (!originAllowed(ex)) {
+            denyForbidden(ex);
+            return false;
+        }
+        String expected = SessionManager.csrfTokenOf(token);
+        String given = ex.getRequestHeaders().getFirst("X-CSRF-Token");
+        if (expected == null || given == null || !constantTimeEq(expected, given.trim())) {
+            denyForbidden(ex);
+            return false;
+        }
+        return true;
+    }
+
     static class CorsHandlerWrapper implements HttpHandler {
         private final HttpHandler handler;
         private static final String ALLOWED_ORIGIN = System.getenv().getOrDefault("PBL4_ALLOWED_ORIGIN", "http://localhost:8080");
@@ -205,11 +294,15 @@ public class ApiServer {
             this.handler = handler;
         }
 
+        static String allowedOrigin() {
+            return ALLOWED_ORIGIN;
+        }
+
         @Override
         public void handle(HttpExchange exchange) throws IOException {
             exchange.getResponseHeaders().set("Access-Control-Allow-Origin", ALLOWED_ORIGIN);
-            exchange.getResponseHeaders().set("Access-Control-Allow-Methods", "GET, POST, OPTIONS, PUT, DELETE");
-            exchange.getResponseHeaders().set("Access-Control-Allow-Headers", "Content-Type, Authorization");
+            exchange.getResponseHeaders().set("Access-Control-Allow-Methods", "GET, POST, OPTIONS, PUT, PATCH, DELETE");
+            exchange.getResponseHeaders().set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-CSRF-Token");
             exchange.getResponseHeaders().set("Access-Control-Allow-Credentials", "true");
 
             applySecurityHeaders(exchange);
@@ -218,6 +311,8 @@ public class ApiServer {
                 exchange.sendResponseHeaders(204, -1);
                 return;
             }
+
+            if (!enforceSessionGuard(exchange)) return;
 
             handler.handle(exchange);
         }

@@ -29,17 +29,20 @@ const MAILBOXES = {
 };
 const REAL_FOLDERS = ['inbox', 'sent', 'spam', 'drafts', 'trash'];
 
-document.addEventListener('DOMContentLoaded', () => {
-    const currentUser = localStorage.getItem('currentUser');
-    const token = localStorage.getItem('authToken');
-
-    if (!currentUser || !token) {
+document.addEventListener('DOMContentLoaded', async () => {
+    // Phiên nằm trong cookie HttpOnly: hỏi server thay vì đọc token ở localStorage.
+    // Nếu 401, apiFetch đã dọn localStorage và chuyển về trang đăng nhập.
+    const session = await checkSession();
+    if (session.status === 401) return;
+    if (!session.ok && !localStorage.getItem('currentUser')) {
         window.location.href = '/';
         return;
     }
 
+    const currentUser = localStorage.getItem('currentUser') || '';
+
     const userEmailSpan = document.getElementById('current-user-email');
-    if (userEmailSpan) {
+    if (userEmailSpan && currentUser) {
         userEmailSpan.textContent = currentUser;
     }
 
@@ -49,7 +52,7 @@ document.addEventListener('DOMContentLoaded', () => {
     startRealtimeListener();
 });
 
-// ================= Gọi API (dùng chung, token lấy từ phiên đăng nhập sẵn có) =================
+// ================= Gọi API (dùng chung, phiên bằng cookie + CSRF qua apiFetch) =================
 
 function formEncode(params) {
     return Object.keys(params || {})
@@ -59,16 +62,14 @@ function formEncode(params) {
 }
 
 async function apiCall(method, url, params) {
-    const token = localStorage.getItem('authToken');
-    const headers = { 'Authorization': 'Bearer ' + token };
-    const options = { method: method, headers: headers };
+    const options = { method: method };
     if (params && method !== 'GET') {
-        headers['Content-Type'] = 'application/x-www-form-urlencoded';
+        options.headers = { 'Content-Type': 'application/x-www-form-urlencoded' };
         options.body = formEncode(params);
     }
-    const response = await fetch(url, options);
+    // 401: apiFetch đã dọn phiên và chuyển về trang đăng nhập
+    const response = await apiFetch(url, options);
     if (response.status === 401) {
-        logout();
         return { ok: false, status: 401, data: null, headers: response.headers };
     }
     let data = null;
@@ -112,17 +113,11 @@ function setText(id, text) {
 async function startRealtimeListener() {
     stopRealtimeListener();
 
-    const token = localStorage.getItem('authToken');
-    if (!token) return;
-
     const generation = ++sseGeneration;
 
     let ticket = null;
     try {
-        const res = await fetch('/api/mails/stream-ticket', {
-            method: 'POST',
-            headers: { 'Authorization': 'Bearer ' + token }
-        });
+        const res = await apiFetch('/api/mails/stream-ticket', { method: 'POST' });
         if (res.status === 401) return;
         if (!res.ok) throw new Error('ticket');
         const data = await res.json();
@@ -598,6 +593,7 @@ function renderEmailList(mails) {
         main.appendChild(senderRow);
         main.appendChild(el('div', 'email-subject', mail.subject || '(Không có chủ đề)'));
         main.appendChild(el('div', 'email-date', formatMailDate(mail.timestamp)));
+        if (activeMailbox === 'spam') main.appendChild(buildSpamListInfo(mail));
         item.appendChild(main);
 
         const delBtn = el('button', 'delete-mail-btn');
@@ -888,6 +884,7 @@ function renderEmailDetail(mail) {
     document.getElementById('email-detail').classList.remove('hidden');
 
     updateDetailToolbar(mail);
+    updateSpamInfo(mail);
 
     document.getElementById('detail-subject').textContent = mail.subject || '';
     document.getElementById('detail-sender').textContent = mail.sender || '';
@@ -1051,9 +1048,19 @@ function reportSpamCurrent() {
 async function unspamCurrent() {
     const mail = currentMailOrWarn();
     if (!mail) return;
-    const ok = await mailAction('/api/mails/unspam', { id: mail.id },
-        'Đã đưa thư về Hộp thư đến!', 'Không thể bỏ báo thư rác!');
-    if (ok) afterMailChanged();
+    const senderAddr = extractEmail(mail.sender);
+    const btn = document.getElementById('unspam-btn');
+    setBusy(btn, true, 'Đang xử lý...');
+    let ok = false;
+    try {
+        ok = await mailAction('/api/mails/unspam', { id: mail.id },
+            'Đã đưa thư về Hộp thư đến!', 'Không thể bỏ báo thư rác!');
+    } finally {
+        setBusy(btn, false);
+    }
+    if (!ok) return;
+    afterMailChanged();
+    if (senderAddr) await trustSenderAfterUnspam(senderAddr);
 }
 
 // ================= Người đã chặn =================
@@ -1187,21 +1194,14 @@ function formatMailDate(value) {
 
 async function logout() {
     stopRealtimeListener();
-    const token = localStorage.getItem('authToken');
 
     try {
-        if (token) {
-            await fetch('/api/auth/logout', {
-                method: 'POST',
-                headers: {
-                    'Authorization': 'Bearer ' + token
-                }
-            });
-        }
+        await apiFetch('/api/auth/logout', { method: 'POST', noAuthRedirect: true });
     } catch (err) {
         console.error('Lỗi khi gọi API đăng xuất:', err);
     } finally {
         localStorage.removeItem('currentUser');
+        localStorage.removeItem('userRole');
         localStorage.removeItem('authToken');
         window.location.href = '/';
     }
@@ -1320,4 +1320,667 @@ function openDraftEdit() {
     composeSession.draftId = mail.id;
     composeSession.lastSig = to.trim() + '\u0000' + subject.trim() + '\u0000' + body;
     document.getElementById('compose-body').focus();
+}
+
+// ================= Cài đặt thư: Chuyển tiếp tự động + Chống thư rác =================
+// API: /api/settings/* (JSON, cookie phiên + CSRF qua apiFetch).
+// Mật khẩu và mã xác minh chỉ nằm trong ô nhập, không lưu vào localStorage/sessionStorage.
+// Mọi dữ liệu từ server được đưa vào giao diện bằng textContent (không chèn HTML thô).
+
+const MS_EMAIL_RE = /^[^\s@<>"',;]+@[^\s@<>"',;]+\.[^\s@<>"',;]+$/;
+const MS_LEVELS = ['LOW', 'MEDIUM', 'HIGH'];
+let msFwdRequestId = 0;
+let msSpamRequestId = 0;
+let msReasonRequestId = 0;
+let msConfirmState = null;   // { run(password) -> r, onSuccess(), busy }
+
+async function settingsApi(method, path, body) {
+    const options = { method: method };
+    if (body !== undefined && body !== null) {
+        options.headers = { 'Content-Type': 'application/json; charset=UTF-8' };
+        options.body = JSON.stringify(body);
+    }
+    // 401: apiFetch đã dọn phiên và chuyển về trang đăng nhập
+    const response = await apiFetch('/api/settings' + path, options);
+    if (response.status === 401) return { ok: false, status: 401, data: null };
+    let data = null;
+    try { data = await response.json(); } catch (e) { data = null; }
+    return { ok: response.ok, status: response.status, data: data };
+}
+
+function settingsOk(r) {
+    return !!(r && r.ok && !(r.data && r.data.success === false));
+}
+
+function settingsMessage(r, fallback) {
+    const d = r && r.data;
+    if (d && typeof d === 'object') {
+        const m = d.message || d.error;
+        if (typeof m === 'string' && m) return m;
+    }
+    return fallback;
+}
+
+// Nút đang tải: khóa nút + biểu tượng quay; trả lại nguyên trạng khi xong
+function setBusy(btn, busy, label) {
+    if (!btn) return;
+    if (busy) {
+        if (!btn._idleNodes) btn._idleNodes = Array.from(btn.childNodes);
+        btn.disabled = true;
+        btn.replaceChildren(el('i', 'fa-solid fa-spinner fa-spin'),
+            document.createTextNode(' ' + (label || 'Đang xử lý...')));
+    } else {
+        if (btn._idleNodes) {
+            btn.replaceChildren(...btn._idleNodes);
+            btn._idleNodes = null;
+        }
+        btn.disabled = false;
+    }
+}
+
+function setFieldValue(id, value) {
+    const node = document.getElementById(id);
+    if (node) node.value = value;
+}
+
+function openMailSettings(event) {
+    if (event && event.preventDefault) event.preventDefault();
+    document.getElementById('mail-settings-modal').classList.remove('hidden');
+    switchMailSettingsTab('forward');
+}
+
+function closeMailSettings() {
+    closeMsConfirm();
+    msFwdRequestId++;
+    msSpamRequestId++;
+    ['ms-fwd-pw', 'ms-fwd-target', 'ms-fwd-from', 'ms-fwd-subject', 'ms-allow-input']
+        .forEach(id => setFieldValue(id, ''));
+    document.getElementById('ms-fwd-copy-keep').checked = true;
+    clearInlineMessage('ms-fwd-message');
+    clearInlineMessage('ms-spam-message');
+    document.getElementById('ms-fwd-list').textContent = '';     // xóa luôn các ô nhập mã xác minh
+    document.getElementById('mail-settings-modal').classList.add('hidden');
+}
+
+function switchMailSettingsTab(tab) {
+    clearInlineMessage('ms-fwd-message');
+    clearInlineMessage('ms-spam-message');
+    ['forward', 'spam'].forEach(name => {
+        document.getElementById('ms-tab-' + name).classList.toggle('active', name === tab);
+        document.getElementById('ms-pane-' + name).classList.toggle('hidden', name !== tab);
+    });
+    if (tab === 'forward') loadForwardRules();
+    else loadSpamSettings(false);
+}
+
+// ---------- Chuyển tiếp tự động ----------
+
+function normalizeRules(d) {
+    const list = Array.isArray(d) ? d : (d && (d.rules || d.list || d.forwards)) || [];
+    return Array.isArray(list) ? list.filter(x => x && typeof x === 'object' && x.id) : [];
+}
+
+function ruleStatus(rule) {
+    if (!rule.verified) return { label: 'Chờ xác minh', cls: 'pending' };
+    if (rule.enabled) return { label: 'Đang bật', cls: 'on' };
+    return { label: 'Tắt', cls: 'off' };
+}
+
+function describeConditions(rule) {
+    const parts = [];
+    if (rule.fromContains) parts.push('người gửi chứa "' + rule.fromContains + '"');
+    if (rule.subjectContains) parts.push('chủ đề chứa "' + rule.subjectContains + '"');
+    return parts.length ? parts.join(' và ') : 'mọi thư đến';
+}
+
+async function loadForwardRules() {
+    const box = document.getElementById('ms-fwd-list');
+    const requestId = ++msFwdRequestId;
+    box.textContent = '';
+    box.appendChild(el('div', 'empty-list', 'Đang tải...'));
+    try {
+        const r = await settingsApi('GET', '/forward');
+        if (r.status === 401 || requestId !== msFwdRequestId) return;
+        if (!settingsOk(r)) {
+            box.textContent = '';
+            box.appendChild(el('div', 'empty-list', 'Không tải được danh sách luật.'));
+            setInlineMessage('ms-fwd-message', settingsMessage(r, 'Không tải được danh sách luật!'), false);
+            return;
+        }
+        renderForwardRules(normalizeRules(r.data));
+    } catch (err) {
+        if (requestId !== msFwdRequestId) return;
+        box.textContent = '';
+        box.appendChild(el('div', 'empty-list', 'Không tải được danh sách luật.'));
+        setInlineMessage('ms-fwd-message', 'Lỗi kết nối Server!', false);
+    }
+}
+
+function renderForwardRules(rules) {
+    const box = document.getElementById('ms-fwd-list');
+    box.textContent = '';
+    if (rules.length === 0) {
+        box.appendChild(el('div', 'empty-list', 'Chưa có luật chuyển tiếp nào.'));
+        return;
+    }
+    rules.forEach(rule => box.appendChild(buildRuleCard(rule)));
+}
+
+function buildRuleCard(rule) {
+    const card = el('div', 'ms-card');
+
+    const head = el('div', 'ms-card-head');
+    head.appendChild(el('span', 'ms-card-target', rule.target || ''));
+    const st = ruleStatus(rule);
+    head.appendChild(el('span', 'ms-badge ' + st.cls, st.label));
+    card.appendChild(head);
+
+    card.appendChild(el('div', 'ms-meta', 'Điều kiện: ' + describeConditions(rule)));
+    card.appendChild(el('div', 'ms-meta',
+        rule.keepCopy ? 'Giữ bản sao trong Hộp thư đến' : 'Thư gốc được chuyển vào Thùng rác'));
+
+    if (!rule.verified) {
+        const form = el('form', 'ms-verify-row');
+        form.autocomplete = 'off';
+        form.appendChild(el('div', 'ms-meta',
+            'Mã xác minh đã được gửi tới địa chỉ đích. Nhập mã để bật luật này. Chưa nhận được mã? Hãy xóa luật rồi thêm lại để gửi mã mới.'));
+        const line = el('div', 'ms-verify-input-line');
+        const input = el('input', 'form-control');
+        input.type = 'text';
+        input.inputMode = 'numeric';
+        input.autocomplete = 'off';
+        input.maxLength = 16;
+        input.placeholder = 'Mã xác minh';
+        input.setAttribute('aria-label', 'Mã xác minh');
+        const btn = el('button', 'btn btn-success btn-sm', 'Xác minh');
+        btn.type = 'submit';
+        line.appendChild(input);
+        line.appendChild(btn);
+        form.appendChild(line);
+        form.onsubmit = (e) => {
+            e.preventDefault();
+            submitVerifyRule(rule, input, btn);
+        };
+        card.appendChild(form);
+    }
+
+    const actions = el('div', 'ms-actions');
+    if (rule.verified) {
+        const toggle = el('button', 'btn btn-outline btn-sm', rule.enabled ? 'Tắt' : 'Bật');
+        toggle.type = 'button';
+        toggle.onclick = () => askToggleRule(rule);
+        actions.appendChild(toggle);
+    }
+    const del = el('button', 'btn btn-outline btn-sm ms-del-btn', 'Xóa');
+    del.type = 'button';
+    del.onclick = () => askDeleteRule(rule);
+    actions.appendChild(del);
+    card.appendChild(actions);
+    return card;
+}
+
+async function submitVerifyRule(rule, input, btn) {
+    const code = input.value.trim();
+    if (!code) {
+        setInlineMessage('ms-fwd-message', 'Vui lòng nhập mã xác minh.', false);
+        return;
+    }
+    clearInlineMessage('ms-fwd-message');
+    setBusy(btn, true, 'Đang xác minh...');
+    try {
+        const r = await settingsApi('POST', '/forward/verify', { id: rule.id, code: code });
+        if (r.status === 401) return;
+        if (settingsOk(r) && !(r.data && r.data.verified === false)) {
+            input.value = '';
+            setInlineMessage('ms-fwd-message', 'Đã xác minh địa chỉ nhận chuyển tiếp.', true);
+            loadForwardRules();
+        } else {
+            setInlineMessage('ms-fwd-message', settingsMessage(r, 'Mã xác minh không đúng hoặc đã hết hạn!'), false);
+        }
+    } catch (err) {
+        setInlineMessage('ms-fwd-message', 'Lỗi kết nối Server!', false);
+    } finally {
+        setBusy(btn, false);
+    }
+}
+
+async function handleAddForwardRule(event) {
+    event.preventDefault();
+    const submit = document.getElementById('ms-fwd-submit');
+    if (submit.disabled) return;
+
+    const target = document.getElementById('ms-fwd-target').value.trim();
+    const fromContains = document.getElementById('ms-fwd-from').value.trim();
+    const subjectContains = document.getElementById('ms-fwd-subject').value.trim();
+    const keepCopy = document.getElementById('ms-fwd-copy-keep').checked;
+    const password = document.getElementById('ms-fwd-pw').value;
+
+    if (!MS_EMAIL_RE.test(target) || target.length > 254) {
+        setInlineMessage('ms-fwd-message', 'Địa chỉ nhận chuyển tiếp không hợp lệ.', false);
+        return;
+    }
+    if (!password) {
+        setInlineMessage('ms-fwd-message', 'Vui lòng nhập mật khẩu hiện tại.', false);
+        return;
+    }
+
+    clearInlineMessage('ms-fwd-message');
+    setBusy(submit, true, 'Đang thêm...');
+    try {
+        const r = await settingsApi('POST', '/forward', {
+            target: target,
+            keepCopy: keepCopy,
+            fromContains: fromContains,
+            subjectContains: subjectContains,
+            currentPassword: password
+        });
+        if (r.status === 401) return;
+        if (settingsOk(r)) {
+            ['ms-fwd-target', 'ms-fwd-from', 'ms-fwd-subject', 'ms-fwd-pw'].forEach(id => setFieldValue(id, ''));
+            document.getElementById('ms-fwd-copy-keep').checked = true;
+            setInlineMessage('ms-fwd-message',
+                'Đã thêm luật. Nếu địa chỉ nằm ngoài hệ thống, hãy nhập mã xác minh vừa được gửi tới địa chỉ đó vào luật bên trên.', true);
+            loadForwardRules();
+        } else {
+            setInlineMessage('ms-fwd-message', settingsMessage(r, 'Không thể thêm luật chuyển tiếp!'), false);
+        }
+    } catch (err) {
+        setInlineMessage('ms-fwd-message', 'Lỗi kết nối Server!', false);
+    } finally {
+        setBusy(submit, false);
+    }
+}
+
+function askToggleRule(rule) {
+    const enable = !rule.enabled;
+    openMsConfirm({
+        title: enable ? 'Bật luật chuyển tiếp' : 'Tắt luật chuyển tiếp',
+        message: enable
+            ? 'Thư phù hợp điều kiện sẽ được chuyển tiếp tới ' + rule.target + '.'
+            : 'Thư sẽ không còn được chuyển tiếp tới ' + rule.target + '.',
+        yesLabel: enable ? 'Bật luật' : 'Tắt luật',
+        danger: false,
+        run: (pw) => settingsApi('POST', '/forward/update',
+            { id: rule.id, enabled: enable, currentPassword: pw }),
+        errorText: 'Không thể cập nhật luật!',
+        onSuccess: () => {
+            setInlineMessage('ms-fwd-message', enable ? 'Đã bật luật chuyển tiếp.' : 'Đã tắt luật chuyển tiếp.', true);
+            loadForwardRules();
+        }
+    });
+}
+
+function askDeleteRule(rule) {
+    openMsConfirm({
+        title: 'Xóa luật chuyển tiếp',
+        message: 'Luật chuyển tiếp tới ' + rule.target + ' sẽ bị xóa. Bạn có chắc chắn không?',
+        yesLabel: 'Xóa luật',
+        danger: true,
+        run: (pw) => settingsApi('DELETE',
+            '/forward?id=' + encodeURIComponent(rule.id) + '&currentPassword=' + encodeURIComponent(pw)),
+        errorText: 'Không thể xóa luật!',
+        onSuccess: () => {
+            setInlineMessage('ms-fwd-message', 'Đã xóa luật chuyển tiếp.', true);
+            loadForwardRules();
+        }
+    });
+}
+
+// Hộp xác nhận có ô mật khẩu (bật/tắt/xóa luật)
+function openMsConfirm(opts) {
+    msConfirmState = { run: opts.run, onSuccess: opts.onSuccess, errorText: opts.errorText, busy: false };
+    setText('ms-confirm-title', opts.title);
+    setText('ms-confirm-text', opts.message);
+    const yes = document.getElementById('ms-confirm-yes');
+    yes.className = 'btn ' + (opts.danger ? 'btn-danger' : 'btn-primary');
+    setText('ms-confirm-yes', opts.yesLabel || 'Xác nhận');
+    setFieldValue('ms-confirm-pw', '');
+    clearInlineMessage('ms-confirm-message');
+    document.getElementById('ms-confirm-modal').classList.remove('hidden');
+    document.getElementById('ms-confirm-pw').focus();
+}
+
+function closeMsConfirm() {
+    if (msConfirmState && msConfirmState.busy) return;
+    msConfirmState = null;
+    setFieldValue('ms-confirm-pw', '');
+    clearInlineMessage('ms-confirm-message');
+    document.getElementById('ms-confirm-modal').classList.add('hidden');
+}
+
+async function submitMsConfirm(event) {
+    event.preventDefault();
+    const state = msConfirmState;
+    if (!state || state.busy) return;
+    const password = document.getElementById('ms-confirm-pw').value;
+    if (!password) {
+        setInlineMessage('ms-confirm-message', 'Vui lòng nhập mật khẩu hiện tại.', false);
+        return;
+    }
+    const yes = document.getElementById('ms-confirm-yes');
+    state.busy = true;
+    clearInlineMessage('ms-confirm-message');
+    setBusy(yes, true, 'Đang xử lý...');
+    let success = false;
+    try {
+        const r = await state.run(password);
+        if (r.status === 401) return;
+        if (settingsOk(r)) {
+            success = true;
+        } else {
+            setInlineMessage('ms-confirm-message', settingsMessage(r, state.errorText || 'Thao tác thất bại!'), false);
+        }
+    } catch (err) {
+        setInlineMessage('ms-confirm-message', 'Lỗi kết nối Server!', false);
+    } finally {
+        state.busy = false;
+        setBusy(yes, false);
+    }
+    if (success) {
+        const done = state.onSuccess;
+        closeMsConfirm();
+        if (typeof done === 'function') done();
+    }
+}
+
+// ---------- Chống thư rác ----------
+
+function msSpamControls() {
+    return [document.getElementById('ms-spam-enabled'), document.getElementById('ms-spam-learning')]
+        .concat(Array.from(document.querySelectorAll('#ms-level-grid input[type="radio"]')));
+}
+
+function normalizeAllowlist(d) {
+    const raw = Array.isArray(d) ? d : [];
+    return raw
+        .map(x => typeof x === 'string' ? x : (x && (x.address || x.email)) || '')
+        .filter(s => s);
+}
+
+// silent = true: không hiện "Đang tải" và không xóa thông báo (dùng khi đồng bộ lại sau thao tác)
+async function loadSpamSettings(silent) {
+    const requestId = ++msSpamRequestId;
+    const loading = document.getElementById('ms-spam-loading');
+    const body = document.getElementById('ms-spam-body');
+    if (!silent) {
+        loading.textContent = 'Đang tải...';
+        loading.classList.remove('hidden');
+        body.classList.add('hidden');
+    }
+    try {
+        const r = await settingsApi('GET', '/spam');
+        if (r.status === 401 || requestId !== msSpamRequestId) return;
+        if (!settingsOk(r) || !r.data || typeof r.data !== 'object') {
+            if (!silent) loading.textContent = 'Không tải được cài đặt chống thư rác.';
+            setInlineMessage('ms-spam-message', settingsMessage(r, 'Không tải được cài đặt chống thư rác!'), false);
+            return;
+        }
+        renderSpamSettings(r.data);
+        loading.classList.add('hidden');
+        body.classList.remove('hidden');
+    } catch (err) {
+        if (requestId !== msSpamRequestId) return;
+        if (!silent) loading.textContent = 'Không tải được cài đặt chống thư rác.';
+        setInlineMessage('ms-spam-message', 'Lỗi kết nối Server!', false);
+    }
+}
+
+function renderSpamSettings(d) {
+    document.getElementById('ms-spam-enabled').checked = !!d.enabled;
+    document.getElementById('ms-spam-learning').checked = !!d.learning;
+
+    let level = String(d.level || 'MEDIUM').toUpperCase();
+    if (MS_LEVELS.indexOf(level) < 0) level = 'MEDIUM';
+    MS_LEVELS.forEach(name => {
+        const label = document.getElementById('ms-level-' + name);
+        const radio = label.querySelector('input');
+        radio.checked = (name === level);
+        label.classList.toggle('selected', name === level);
+    });
+
+    renderAllowlist(normalizeAllowlist(d.allowlist));
+    renderSpamStats(d.stats);
+}
+
+function renderAllowlist(list) {
+    const box = document.getElementById('ms-allow-list');
+    box.textContent = '';
+    if (list.length === 0) {
+        box.appendChild(el('div', 'empty-list', 'Chưa có người gửi tin cậy nào.'));
+        return;
+    }
+    list.forEach(addr => {
+        const row = el('div', 'blocked-item');
+        row.appendChild(el('span', 'blocked-addr', addr));
+        const btn = el('button', 'btn btn-outline btn-sm', 'Xóa');
+        btn.type = 'button';
+        btn.onclick = () => removeAllow(addr, btn);
+        row.appendChild(btn);
+        box.appendChild(row);
+    });
+}
+
+function renderSpamStats(stats) {
+    const box = document.getElementById('ms-stats');
+    box.textContent = '';
+    const s = (stats && typeof stats === 'object') ? stats : {};
+    const num = (k) => Number.isFinite(Number(s[k])) && s[k] !== null && s[k] !== undefined
+        ? Number(s[k]).toLocaleString('vi-VN') : '—';
+    [
+        ['spam', 'Thư rác đã chặn', true],
+        ['total', 'Tổng thư đã quét', false],
+        ['ham', 'Thư thường', false],
+        ['learnedSpam', 'Đã học là rác', false],
+        ['learnedHam', 'Đã học là thường', false]
+    ].forEach(item => {
+        const cell = el('div', 'ms-stat' + (item[2] ? ' main' : ''));
+        cell.appendChild(el('div', 'ms-stat-value', num(item[0])));
+        cell.appendChild(el('div', 'ms-stat-label', item[1]));
+        box.appendChild(cell);
+    });
+}
+
+async function saveSpamSetting(patch, okText) {
+    const controls = msSpamControls();
+    controls.forEach(c => { c.disabled = true; });
+    clearInlineMessage('ms-spam-message');
+    let success = false;
+    try {
+        const r = await settingsApi('POST', '/spam', patch);
+        if (r.status === 401) return;
+        if (settingsOk(r)) {
+            success = true;
+            setInlineMessage('ms-spam-message', okText, true);
+        } else {
+            setInlineMessage('ms-spam-message', settingsMessage(r, 'Không thể lưu cài đặt!'), false);
+        }
+    } catch (err) {
+        setInlineMessage('ms-spam-message', 'Lỗi kết nối Server!', false);
+    } finally {
+        controls.forEach(c => { c.disabled = false; });
+    }
+    if (!success) loadSpamSettings(true);   // trả giao diện về đúng trạng thái trên server
+    else syncLevelHighlight();
+}
+
+function syncLevelHighlight() {
+    MS_LEVELS.forEach(name => {
+        const label = document.getElementById('ms-level-' + name);
+        label.classList.toggle('selected', label.querySelector('input').checked);
+    });
+}
+
+function onSpamEnabledChange(input) {
+    saveSpamSetting({ enabled: !!input.checked },
+        input.checked ? 'Đã bật chống thư rác.' : 'Đã tắt chống thư rác.');
+}
+
+function onSpamLearningChange(input) {
+    saveSpamSetting({ learning: !!input.checked },
+        input.checked ? 'Đã bật học từ thư bạn đánh dấu.' : 'Đã tắt học từ thư bạn đánh dấu.');
+}
+
+function onSpamLevelChange(input) {
+    if (!input.checked) return;
+    syncLevelHighlight();
+    saveSpamSetting({ level: input.value }, 'Đã đổi độ nhạy.');
+}
+
+async function handleAddAllow(event) {
+    event.preventDefault();
+    const btn = document.getElementById('ms-allow-add-btn');
+    if (btn.disabled) return;
+    const input = document.getElementById('ms-allow-input');
+    const address = input.value.trim().toLowerCase();
+    if (!MS_EMAIL_RE.test(address) || address.length > 254) {
+        setInlineMessage('ms-spam-message', 'Địa chỉ người gửi không hợp lệ.', false);
+        return;
+    }
+    clearInlineMessage('ms-spam-message');
+    setBusy(btn, true, 'Đang thêm...');
+    try {
+        const r = await settingsApi('POST', '/spam/allow', { address: address });
+        if (r.status === 401) return;
+        if (settingsOk(r)) {
+            input.value = '';
+            setInlineMessage('ms-spam-message', 'Đã thêm vào danh sách người gửi tin cậy.', true);
+            loadSpamSettings(true);
+        } else {
+            setInlineMessage('ms-spam-message', settingsMessage(r, 'Không thể thêm người gửi tin cậy!'), false);
+        }
+    } catch (err) {
+        setInlineMessage('ms-spam-message', 'Lỗi kết nối Server!', false);
+    } finally {
+        setBusy(btn, false);
+    }
+}
+
+async function removeAllow(address, btn) {
+    clearInlineMessage('ms-spam-message');
+    setBusy(btn, true, 'Đang xóa...');
+    try {
+        const r = await settingsApi('DELETE', '/spam/allow?address=' + encodeURIComponent(address));
+        if (r.status === 401) return;
+        if (settingsOk(r)) {
+            setInlineMessage('ms-spam-message', 'Đã xóa khỏi danh sách người gửi tin cậy.', true);
+            loadSpamSettings(true);
+        } else {
+            setInlineMessage('ms-spam-message', settingsMessage(r, 'Không thể xóa người gửi tin cậy!'), false);
+        }
+    } catch (err) {
+        setInlineMessage('ms-spam-message', 'Lỗi kết nối Server!', false);
+    } finally {
+        setBusy(btn, false);
+    }
+}
+
+// ---------- Điểm + lý do trong mục Thư rác ----------
+
+function formatSpamScore(value) {
+    if (value === undefined || value === null || value === '') return '';
+    const n = Number(value);
+    return Number.isFinite(n) ? String(Math.round(n * 100) / 100) : '';
+}
+
+// Dòng nhãn điểm + nút "Vì sao là thư rác?" cho từng thư trong danh sách (chỉ gọi ở mục Thư rác)
+function buildSpamListInfo(mail) {
+    const row = el('div', 'spam-list-info');
+    const score = formatSpamScore(mail.spamScore);
+    if (score) row.appendChild(el('span', 'spam-score-badge', 'Điểm ' + score));
+    const btn = el('button', 'spam-why-link', 'Vì sao là thư rác?');
+    btn.type = 'button';
+    btn.onclick = (e) => {
+        e.stopPropagation();
+        openSpamReasons(mail);
+    };
+    row.appendChild(btn);
+    return row;
+}
+
+// Khung thông tin ở chi tiết thư: CHỈ hiện khi đang xem mục Thư rác.
+// Thư thường (kể cả có điểm cao nhưng dưới ngưỡng) không hiển thị gì.
+function updateSpamInfo(mail) {
+    const box = document.getElementById('spam-info');
+    if (!box) return;
+    if (activeMailbox !== 'spam') {
+        box.classList.add('hidden');
+        return;
+    }
+    const score = formatSpamScore(mail && mail.spamScore);
+    setText('spam-info-score', score ? 'Điểm thư rác: ' + score : 'Thư này nằm trong Thư rác');
+    box.classList.remove('hidden');
+}
+
+function openSpamReasonsCurrent() {
+    if (currentDetailMail) openSpamReasons(currentDetailMail);
+}
+
+async function openSpamReasons(mail) {
+    if (!mail) return;
+    const requestId = ++msReasonRequestId;
+    const body = document.getElementById('spam-reason-body');
+    const scoreBox = document.getElementById('spam-reason-score');
+    body.textContent = '';
+    scoreBox.classList.add('hidden');
+    document.getElementById('spam-reason-modal').classList.remove('hidden');
+
+    let score = mail.spamScore;
+    let reasons = mail.spamReasons;
+    if (!Array.isArray(reasons)) {
+        body.appendChild(el('div', 'empty-list', 'Đang tải...'));
+        try {
+            const r = await apiCall('GET',
+                `/api/mails/detail?id=${encodeURIComponent(mail.id)}&folder=${encodeURIComponent(mailFolder(mail))}`);
+            if (r.status === 401 || requestId !== msReasonRequestId) return;
+            if (r.ok && r.data && typeof r.data === 'object') {
+                if (score === undefined || score === null) score = r.data.spamScore;
+                reasons = r.data.spamReasons;
+            } else {
+                body.textContent = '';
+                body.appendChild(el('div', 'empty-list', 'Không tải được lý do.'));
+                return;
+            }
+        } catch (err) {
+            if (requestId !== msReasonRequestId) return;
+            body.textContent = '';
+            body.appendChild(el('div', 'empty-list', 'Lỗi kết nối Server!'));
+            return;
+        }
+    }
+    if (requestId !== msReasonRequestId) return;
+
+    body.textContent = '';
+    const scoreText = formatSpamScore(score);
+    if (scoreText) {
+        scoreBox.textContent = 'Điểm thư rác: ' + scoreText;
+        scoreBox.classList.remove('hidden');
+    }
+    const list = Array.isArray(reasons) ? reasons.filter(x => typeof x === 'string' && x) : [];
+    if (list.length === 0) {
+        body.appendChild(el('div', 'empty-list', 'Hệ thống không ghi lại lý do cụ thể cho thư này.'));
+        return;
+    }
+    const ul = el('ul', 'spam-reason-list');
+    list.forEach(reason => ul.appendChild(el('li', null, reason)));
+    body.appendChild(ul);
+}
+
+function closeSpamReasons() {
+    msReasonRequestId++;
+    document.getElementById('spam-reason-modal').classList.add('hidden');
+}
+
+// Sau khi bấm "Không phải thư rác": thêm người gửi vào danh sách tin cậy
+async function trustSenderAfterUnspam(address) {
+    try {
+        const r = await settingsApi('POST', '/spam/allow', { address: address });
+        if (r.status === 401) return;
+        if (settingsOk(r)) {
+            showToast('Đã thêm người gửi vào danh sách tin cậy', 'success');
+        } else {
+            showToast('Đã đưa thư về Hộp thư đến nhưng chưa thêm được người gửi vào danh sách tin cậy.', 'error');
+        }
+    } catch (err) {
+        showToast('Đã đưa thư về Hộp thư đến nhưng chưa thêm được người gửi vào danh sách tin cậy.', 'error');
+    }
 }

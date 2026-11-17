@@ -98,6 +98,10 @@ public class AuthHandler implements HttpHandler {
         String path = exchange.getRequestURI().getPath();
         String method = exchange.getRequestMethod();
 
+        if ("GET".equalsIgnoreCase(method) && path.endsWith("/me")) {
+            handleMe(exchange);
+            return;
+        }
         if ("GET".equalsIgnoreCase(method) && path.endsWith("/recovery-status")) {
             handleGetRecoveryStatus(exchange);
             return;
@@ -138,21 +142,44 @@ public class AuthHandler implements HttpHandler {
             if (isRegister) {
                 handleRegister(exchange, username, password);
             } else {
-                handleLogin(exchange, username, password);
+                boolean useCookie = isTrue(getParamValue(body, "useCookie"));
+                boolean remember = isTrue(getParamValue(body, "remember"));
+                handleLogin(exchange, username, password, useCookie, remember);
             }
         } else {
             sendResponse(exchange, 405, "{\"success\": false, \"message\": \"Phương thức không được hỗ trợ!\"}");
         }
     }
 
+    private static boolean isTrue(String v) {
+        if (v == null) return false;
+        String t = v.trim();
+        return t.equalsIgnoreCase("true") || t.equals("1");
+    }
+
     // ===================================================================== Đăng ký / đăng nhập / đăng xuất
 
     private void handleLogout(HttpExchange exchange) throws IOException {
-        String token = bearerToken(exchange);
+        String token = SessionManager.tokenFromRequest(exchange);
         if (token != null) {
             SessionManager.invalidate(token);
         }
+        // Luôn xóa cả hai cookie (không có cookie thì vô hại)
+        SessionCookies.clear(exchange);
         sendResponse(exchange, 200, "{\"success\": true, \"message\": \"Đã đăng xuất thành công!\"}");
+    }
+
+    /** GET /api/auth/me -> {username, role}; 401 nếu chưa đăng nhập. */
+    private void handleMe(HttpExchange exchange) throws IOException {
+        String user = SessionManager.validate(SessionManager.tokenFromRequest(exchange));
+        if (user == null) {
+            sendUnauthorized(exchange);
+            return;
+        }
+        String role = ADMIN_EMAIL.equalsIgnoreCase(user) ? "ADMIN" : "USER";
+        exchange.getResponseHeaders().set("Cache-Control", "no-store");
+        sendResponse(exchange, 200, "{\"success\": true, \"username\": \"" + escapeJson(user)
+                + "\", \"role\": \"" + role + "\"}");
     }
 
     private void handleRegister(HttpExchange exchange, String username, String password) throws IOException {
@@ -233,7 +260,8 @@ public class AuthHandler implements HttpHandler {
         return null;
     }
 
-    private void handleLogin(HttpExchange exchange, String username, String password) throws IOException {
+    private void handleLogin(HttpExchange exchange, String username, String password,
+                             boolean useCookie, boolean remember) throws IOException {
         String clientIp = clientIp(exchange);
 
         if (LoginThrottle.isThrottled(clientIp, username)) {
@@ -264,9 +292,32 @@ public class AuthHandler implements HttpHandler {
             upgradeHashIfUnchanged(username, storedHash, SecurityUtils.hashPassword(password));
         }
 
-        // Token mới hoàn toàn cho mỗi lần đăng nhập
-        String token = SessionManager.createSession(username);
         String role = ADMIN_EMAIL.equalsIgnoreCase(username) ? "ADMIN" : "USER";
+
+        if (useCookie) {
+            // Đăng nhập lại trên trình duyệt đang có cookie cũ: hủy phiên cũ (chống giữ phiên cũ sống vô ích)
+            String oldToken = SessionCookies.readSessionToken(exchange);
+            if (oldToken != null) SessionManager.invalidate(oldToken);
+
+            String token = SessionManager.createSession(username);
+            String csrf = SessionManager.csrfTokenOf(token);
+            if (csrf != null) {
+                SessionCookies.set(exchange, token, csrf, remember ? ServerConfig.SESSION_REMEMBER_SECONDS : 0);
+                // KHÔNG trả token trong JSON; csrf cũng nằm ở cookie pbl4_csrf
+                sendResponse(exchange, 200,
+                    "{\"success\": true, \"message\": \"Đăng nhập thành công!\", " +
+                    "\"username\": \"" + username + "\", " +
+                    "\"csrf\": \"" + csrf + "\", " +
+                    "\"role\": \"" + role + "\"}");
+                return;
+            }
+            SessionManager.invalidate(token);
+            sendResponse(exchange, 500, "{\"success\": false, \"message\": \"Lỗi hệ thống, vui lòng thử lại!\"}");
+            return;
+        }
+
+        // Token mới hoàn toàn cho mỗi lần đăng nhập (hành vi cũ, không đổi)
+        String token = SessionManager.createSession(username);
 
         sendResponse(exchange, 200,
             "{\"success\": true, \"message\": \"Đăng nhập thành công!\", " +
@@ -282,7 +333,8 @@ public class AuthHandler implements HttpHandler {
     // ===================================================================== 1) Đổi mật khẩu
 
     private void handleChangePassword(HttpExchange exchange) throws IOException {
-        String token = bearerToken(exchange);
+        boolean viaCookie = SessionManager.isCookieRequest(exchange);
+        String token = SessionManager.tokenFromRequest(exchange);
         String authedUser = SessionManager.validate(token);
         if (authedUser == null) {
             sendUnauthorized(exchange);
@@ -331,6 +383,17 @@ public class AuthHandler implements HttpHandler {
 
         notifyPasswordChanged(authedUser, "đổi mật khẩu trong phần cài đặt");
 
+        if (viaCookie) {
+            // Thiết bị dùng cookie: cấp lại cookie mới (cookie phiên), không trả token trong JSON
+            String csrf = SessionManager.csrfTokenOf(newToken);
+            if (csrf != null) {
+                SessionCookies.set(exchange, newToken, csrf, 0);
+                sendResponse(exchange, 200, "{\"success\": true"
+                        + ", \"message\": \"✅ Đổi mật khẩu thành công! Các thiết bị khác đã bị đăng xuất.\"}");
+                return;
+            }
+        }
+
         sendResponse(exchange, 200, "{\"success\": true, \"token\": \"" + newToken
                 + "\", \"message\": \"✅ Đổi mật khẩu thành công! Các thiết bị khác đã bị đăng xuất.\"}");
     }
@@ -339,7 +402,7 @@ public class AuthHandler implements HttpHandler {
 
     /** Bước 1: nhập mật khẩu hiện tại + email. Gửi mã 6 số tới email đó; CHƯA lưu thành email khôi phục. */
     private void handleRequestRecoveryEmail(HttpExchange exchange) throws IOException {
-        String authedUser = SessionManager.validate(bearerToken(exchange));
+        String authedUser = SessionManager.validate(SessionManager.tokenFromRequest(exchange));
         if (authedUser == null) {
             sendUnauthorized(exchange);
             return;
@@ -397,7 +460,7 @@ public class AuthHandler implements HttpHandler {
 
     /** Bước 2: nhập mã 6 số. Đúng mới lưu email khôi phục. */
     private void handleVerifyRecoveryEmail(HttpExchange exchange) throws IOException {
-        String authedUser = SessionManager.validate(bearerToken(exchange));
+        String authedUser = SessionManager.validate(SessionManager.tokenFromRequest(exchange));
         if (authedUser == null) {
             sendUnauthorized(exchange);
             return;
@@ -456,7 +519,7 @@ public class AuthHandler implements HttpHandler {
     // ===================================================================== 3) Mã dự phòng
 
     private void handleGenerateBackupCodes(HttpExchange exchange) throws IOException {
-        String authedUser = SessionManager.validate(bearerToken(exchange));
+        String authedUser = SessionManager.validate(SessionManager.tokenFromRequest(exchange));
         if (authedUser == null) {
             sendUnauthorized(exchange);
             return;
@@ -497,7 +560,7 @@ public class AuthHandler implements HttpHandler {
     // ===================================================================== Trạng thái / tùy chọn khôi phục
 
     private void handleGetRecoveryStatus(HttpExchange exchange) throws IOException {
-        String authedUser = SessionManager.validate(bearerToken(exchange));
+        String authedUser = SessionManager.validate(SessionManager.tokenFromRequest(exchange));
         if (authedUser == null) {
             sendUnauthorized(exchange);
             return;
@@ -793,12 +856,11 @@ public class AuthHandler implements HttpHandler {
         return exchange.getRemoteAddress().getAddress().getHostAddress();
     }
 
-    private static String bearerToken(HttpExchange exchange) {
-        String authHeader = exchange.getRequestHeaders().getFirst("Authorization");
-        return (authHeader != null && authHeader.startsWith("Bearer ")) ? authHeader.substring(7) : null;
-    }
-
     private void sendUnauthorized(HttpExchange exchange) throws IOException {
+        // Cookie hợp lệ về hình thức nhưng phiên không còn: xóa cookie để trình duyệt không gửi lại mãi
+        if (SessionManager.isCookieRequest(exchange)) {
+            SessionCookies.clear(exchange);
+        }
         sendResponse(exchange, 401, "{\"success\": false, \"message\": \"Chưa đăng nhập hoặc phiên hết hạn!\"}");
     }
 

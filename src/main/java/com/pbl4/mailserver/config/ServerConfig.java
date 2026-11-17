@@ -83,6 +83,14 @@ public class ServerConfig {
     /** Thời hạn tuyệt đối của phiên kể từ lúc đăng nhập, bất kể có hoạt động. */
     public static final int SESSION_ABSOLUTE_MS = envInt("PBL4_SESSION_ABSOLUTE_MS", 12 * 60 * 60 * 1000, 60_000, 604_800_000);
 
+    // ---- Phiên và cookie (F0a) ----
+    /** true: lưu phiên (chỉ băm token) vào data/sessions.json để còn sau khi khởi động lại. Mặc định tắt. */
+    public static final boolean SESSION_PERSIST = envBool("PBL4_SESSION_PERSIST", false);
+    /** Thời gian sống (giây) của cookie khi đăng nhập với remember=true = thời hạn tuyệt đối của phiên. */
+    public static final long SESSION_REMEMBER_SECONDS = SESSION_ABSOLUTE_MS / 1000L;
+    /** Cờ Secure của cookie: AUTO (Secure khi PRODUCTION hoặc kết nối HTTPS) | TRUE | FALSE. */
+    public static final String COOKIE_SECURE = envEnum("PBL4_COOKIE_SECURE", "AUTO", "AUTO", "TRUE", "FALSE");
+
     // ---- Hàm phụ cấu hình ----
 
     private static String rawEnv(String name) {
@@ -346,6 +354,19 @@ public class ServerConfig {
 
     public static final int INBOUND_MAX_CONN_PER_IP = envInt("PBL4_INBOUND_MAX_CONN_PER_IP", 20, 0, 100000);
     public static final int INBOUND_MSGS_PER_IP_PER_MIN = envInt("PBL4_INBOUND_MSGS_PER_IP_PER_MIN", 30, 0, 1000000);
+
+    // ---- Tự động nhận biết thư rác và tự động chuyển tiếp (F3) ----
+
+    /** Công tắc tắt toàn cục bộ lọc thư rác. Tắt: không phân loại, không gắn điểm, thư giao như cũ. */
+    public static final boolean SPAM_ENABLED = envBool("PBL4_SPAM_ENABLED", true);
+    /** Công tắc tắt toàn cục chuyển tiếp thư. Tắt: bỏ qua mọi luật, thư vào INBOX như cũ. */
+    public static final boolean FORWARD_ENABLED = envBool("PBL4_FORWARD_ENABLED", true);
+    /** Số thư chuyển tiếp tối đa mỗi giờ cho mỗi tài khoản. */
+    public static final int FORWARD_MAX_PER_HOUR = envInt("PBL4_FORWARD_MAX_PER_HOUR", 50, 0, 1000000);
+    /** Thư lớn hơn mức này (byte) không được chuyển tiếp. */
+    public static final int FORWARD_MAX_SIZE_BYTES = envInt("PBL4_FORWARD_MAX_SIZE_BYTES", 10485760, 1024, 104857600);
+    /** Số luật chuyển tiếp tối đa mỗi tài khoản. */
+    public static final int FORWARD_MAX_RULES = envInt("PBL4_FORWARD_MAX_RULES", 5, 1, 100);
 
     private static final String ERR_ADMIN_PASS = "PBL4_ADMIN_PASSWORD chưa được thiết lập.";
     private static final String ERR_SECRET_KEY = "PBL4_SECRET_KEY chưa được thiết lập.";

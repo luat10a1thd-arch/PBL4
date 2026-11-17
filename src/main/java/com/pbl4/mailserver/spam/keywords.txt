@@ -1,0 +1,143 @@
+# FILE: src/main/resources/spam/keywords.txt
+# Định dạng: trọng số|cụm từ   (một dòng một cụm). Khớp không phân biệt hoa thường và KHÔNG phân biệt dấu tiếng Việt
+# (cụm viết có dấu vẫn khớp thư viết không dấu). Mỗi cụm tính một lần; tổng điểm từ khóa tối đa +6.
+# Trọng số gợi ý: 0.5-1 (quảng cáo nhẹ) | 1.5-2 (đáng ngờ) | 2.5-3 (lừa đảo/thuốc cấm/phishing rõ ràng).
+
+# ---- Tiếng Việt: trúng thưởng, quà tặng ----
+2.5|bạn đã trúng thưởng
+2.5|trúng thưởng
+2.5|nhận thưởng ngay
+2.0|nhận quà miễn phí
+1.5|quà tặng miễn phí
+1.5|chúc mừng bạn
+
+# ---- Tiếng Việt: vay tiền, kiếm tiền ----
+2.5|vay tiền nhanh
+2.0|vay tiền online
+2.5|vay không cần thế chấp
+2.0|giải ngân trong ngày
+2.5|kiếm tiền online
+2.5|kiếm tiền tại nhà
+3.0|việc nhẹ lương cao
+2.5|làm việc tại nhà lương cao
+2.0|thu nhập thụ động
+2.0|đầu tư sinh lời
+2.5|lợi nhuận mỗi ngày
+2.5|cam kết lợi nhuận
+2.0|không cần vốn
+2.0|cộng tác viên online
+2.5|tuyển cộng tác viên
+2.5|chuyển khoản trước
+2.0|phí kích hoạt
+
+# ---- Tiếng Việt: cờ bạc ----
+2.5|nhà cái uy tín
+2.5|cá cược
+2.0|tài xỉu
+2.0|casino
+1.5|soi kèo
+2.0|nổ hũ
+
+# ---- Tiếng Việt: phishing ----
+3.0|tài khoản của bạn sẽ bị khóa
+2.5|tài khoản bị tạm khóa
+2.5|xác minh tài khoản ngay
+2.5|xác thực tài khoản ngay
+2.5|đăng nhập ngay để xác nhận
+2.5|cập nhật thông tin ngân hàng
+2.5|mật khẩu sắp hết hạn
+3.0|cung cấp mật khẩu
+3.0|gửi mã otp
+1.0|mã otp
+2.0|thông tin thẻ
+1.5|xác nhận danh tính
+
+# ---- Tiếng Việt: quảng cáo, thúc ép ----
+1.5|hành động ngay
+1.5|ưu đãi có hạn
+1.5|giảm giá sốc
+1.5|giảm giá 90%
+0.7|khuyến mãi
+0.7|khuyến mại
+1.0|mua ngay
+1.0|đặt hàng ngay
+1.2|số lượng có hạn
+1.5|click vào link
+1.0|nhấn vào đây
+1.0|bấm vào đây
+1.0|miễn phí 100%
+1.0|duy nhất hôm nay
+
+# ---- Tiếng Việt: thuốc, người lớn, hàng giả ----
+3.0|tăng cường sinh lý
+3.0|thuốc cường dương
+3.0|viagra
+3.0|cialis
+2.5|thuốc giảm cân
+2.5|giảm cân thần tốc
+3.0|tăng kích thước
+2.0|hàng replica
+1.5|sim số đẹp
+
+# ---- Tiếng Việt: lừa đảo thừa kế/từ thiện, bán dữ liệu ----
+3.0|người thừa kế
+1.5|thừa kế
+2.0|quỹ từ thiện
+2.0|dịch vụ seo
+2.5|gửi mail hàng loạt
+2.5|phần mềm gửi mail
+2.5|data khách hàng
+2.0|mua bán data
+
+# ---- English: prizes, money ----
+2.5|you have won
+2.5|claim your prize
+3.0|lottery winner
+1.5|free gift
+1.5|act now
+2.0|100% free
+1.5|congratulations you
+2.5|no credit check
+2.5|earn money fast
+2.5|make money online
+1.5|work from home
+2.5|guaranteed income
+1.5|get paid
+2.5|million dollars
+1.5|double your
+2.0|bitcoin investment
+3.0|crypto giveaway
+
+# ---- English: phishing ----
+2.5|verify your account
+3.0|your account has been suspended
+3.0|your account will be closed
+3.0|confirm your password
+2.0|update your payment
+2.0|unusual sign-in activity
+1.0|dear customer
+3.0|dear beneficiary
+3.0|next of kin
+3.0|unclaimed funds
+1.5|wire transfer
+2.0|urgent response required
+1.0|final notice
+3.0|this is not spam
+
+# ---- English: marketing, pharma, SEO ----
+1.0|click here
+1.0|buy now
+1.0|order now
+1.5|special promotion
+1.5|limited time offer
+2.0|100% guaranteed
+1.5|risk free
+1.5|weight loss
+1.5|miracle
+2.5|online pharmacy
+2.5|cheap meds
+3.0|enlargement
+2.0|seo services
+2.5|bulk email
+1.0|email list
+1.0|increase your sales

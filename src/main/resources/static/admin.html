@@ -7,6 +7,7 @@
     <title>DUT Mail - Admin Portal</title>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <link rel="stylesheet" href="css/style.css">
+    <script src="js/api.js"></script>
     <style>
         .confirm-modal-overlay {
             position: fixed;
@@ -322,15 +323,19 @@
 </div>
 
 <script>
-    const token = localStorage.getItem('authToken');
-    const userRole = localStorage.getItem('userRole');
+    // Phiên nằm trong cookie HttpOnly; quyền ADMIN lấy từ /api/auth/me (dự phòng: localStorage khi mất kết nối).
+    document.addEventListener('DOMContentLoaded', async () => {
+        const session = await checkSession();
+        if (session.status === 401) return; // apiFetch đã dọn phiên và chuyển về trang đăng nhập
 
-    if (!token || userRole !== 'ADMIN') {
-        showToast('Bạn không có quyền truy cập trang quản trị!', 'error');
-        setTimeout(() => window.location.href = '/index.html', 1000);
-    }
+        const role = String(session.role || localStorage.getItem('userRole') || '').toUpperCase();
+        const reachable = session.ok || session.status === 0;
+        if (!reachable || role !== 'ADMIN') {
+            showToast('Bạn không có quyền truy cập trang quản trị!', 'error');
+            setTimeout(() => window.location.href = '/index.html', 1000);
+            return;
+        }
 
-    document.addEventListener('DOMContentLoaded', () => {
         loadUsersList();
         loadSystemLogs();
         loadServerStats();
@@ -405,9 +410,7 @@
 
     async function loadServerStats() {
         try {
-            const res = await fetch('/api/admin/stats', {
-                headers: { 'Authorization': 'Bearer ' + token }
-            });
+            const res = await apiFetch('/api/admin/stats');
             const data = await res.json();
             if (data.success) {
                 document.getElementById('stat-total-mails').innerText = data.totalMails;
@@ -426,9 +429,7 @@
 
     async function loadUsersList() {
         try {
-            const response = await fetch('/api/admin/users', {
-                headers: { 'Authorization': 'Bearer ' + token }
-            });
+            const response = await apiFetch('/api/admin/users');
             const data = await response.json();
 
             if (data.success) {
@@ -483,9 +484,7 @@
 
     async function loadSystemLogs() {
         try {
-            const response = await fetch('/api/admin/logs', {
-                headers: { 'Authorization': 'Bearer ' + token }
-            });
+            const response = await apiFetch('/api/admin/logs');
             const data = await response.json();
             if (data.success) {
                 const logBox = document.getElementById('login-logs');
@@ -511,11 +510,10 @@
             `Bạn có chắc chắn muốn ${actionText.toLowerCase()} tài khoản ${email}?`,
             async () => {
                 try {
-                    const res = await fetch('/api/admin/user/toggle-lock', {
+                    const res = await apiFetch('/api/admin/user/toggle-lock', {
                         method: 'POST',
                         headers: {
-                            'Content-Type': 'application/x-www-form-urlencoded',
-                            'Authorization': 'Bearer ' + token
+                            'Content-Type': 'application/x-www-form-urlencoded'
                         },
                         body: `targetUser=${encodeURIComponent(email)}&action=${encodeURIComponent(action)}`
                     });
@@ -541,11 +539,10 @@
             `Hành động này sẽ xóa vĩnh viễn tài khoản ${email} và toàn bộ hộp thư! Bạn có chắc chắn không?`,
             async () => {
                 try {
-                    const res = await fetch('/api/admin/user/delete', {
+                    const res = await apiFetch('/api/admin/user/delete', {
                         method: 'POST',
                         headers: {
-                            'Content-Type': 'application/x-www-form-urlencoded',
-                            'Authorization': 'Bearer ' + token
+                            'Content-Type': 'application/x-www-form-urlencoded'
                         },
                         body: `targetUser=${encodeURIComponent(email)}`
                     });
@@ -576,11 +573,10 @@
             `Bạn chuẩn bị gửi thư thông báo tới TẤT CẢ người dùng trong hệ thống. Tiếp tục?`,
             async () => {
                 try {
-                    const res = await fetch('/api/admin/broadcast', {
+                    const res = await apiFetch('/api/admin/broadcast', {
                         method: 'POST',
                         headers: {
-                            'Content-Type': 'application/x-www-form-urlencoded',
-                            'Authorization': 'Bearer ' + token
+                            'Content-Type': 'application/x-www-form-urlencoded'
                         },
                         body: `subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`
                     });
@@ -606,11 +602,10 @@
         const limit = document.getElementById('quota-limit').value;
 
         try {
-            const res = await fetch('/api/admin/quota', {
+            const res = await apiFetch('/api/admin/quota', {
                 method: 'POST',
                 headers: {
-                    'Content-Type': 'application/x-www-form-urlencoded',
-                    'Authorization': 'Bearer ' + token
+                    'Content-Type': 'application/x-www-form-urlencoded'
                 },
                 body: `quota=${encodeURIComponent(limit)}`
             });
@@ -652,9 +647,7 @@
         const tbody = document.getElementById('queue-table-body');
         const summary = document.getElementById('queue-summary');
         try {
-            const res = await fetch('/api/admin/queue', {
-                headers: { 'Authorization': 'Bearer ' + token }
-            });
+            const res = await apiFetch('/api/admin/queue');
             const data = await res.json();
             if (!data.success) {
                 showToast(data.message || 'Không tải được hàng đợi!', 'error');
@@ -709,11 +702,10 @@
 
     async function retryQueueJob(id) {
         try {
-            const res = await fetch('/api/admin/queue/retry', {
+            const res = await apiFetch('/api/admin/queue/retry', {
                 method: 'POST',
                 headers: {
-                    'Content-Type': 'application/x-www-form-urlencoded',
-                    'Authorization': 'Bearer ' + token
+                    'Content-Type': 'application/x-www-form-urlencoded'
                 },
                 body: `id=${encodeURIComponent(id)}`
             });
@@ -732,11 +724,10 @@
             `Thư gửi tới ${domain} sẽ bị hủy và KHÔNG được gửi nữa. Bạn có chắc chắn không?`,
             async () => {
                 try {
-                    const res = await fetch('/api/admin/queue/delete', {
+                    const res = await apiFetch('/api/admin/queue/delete', {
                         method: 'POST',
                         headers: {
-                            'Content-Type': 'application/x-www-form-urlencoded',
-                            'Authorization': 'Bearer ' + token
+                            'Content-Type': 'application/x-www-form-urlencoded'
                         },
                         body: `id=${encodeURIComponent(id)}`
                     });
@@ -759,7 +750,7 @@
         const box = document.getElementById('dns-text');
         const note = document.getElementById('dns-note');
         try {
-            const res = await fetch(url, { headers: { 'Authorization': 'Bearer ' + token } });
+            const res = await apiFetch(url);
             const data = await res.json();
             if (!data.success) {
                 showToast(data.message || 'Không tạo được bản ghi DNS!', 'error');
@@ -817,9 +808,7 @@
         const tbody = document.getElementById('banned-table-body');
         const summary = document.getElementById('sec-summary');
         try {
-            const res = await fetch('/api/admin/security', {
-                headers: { 'Authorization': 'Bearer ' + token }
-            });
+            const res = await apiFetch('/api/admin/security');
             const data = await res.json();
             if (!data.success) {
                 showToast(data.message || 'Không tải được dữ liệu bảo mật!', 'error');
@@ -881,11 +870,10 @@
             `Chặn IP ${ip} trong ${minutes} phút? IP này sẽ không kết nối được tới máy chủ thư.`,
             async () => {
                 try {
-                    const res = await fetch('/api/admin/security/ban', {
+                    const res = await apiFetch('/api/admin/security/ban', {
                         method: 'POST',
                         headers: {
-                            'Content-Type': 'application/x-www-form-urlencoded',
-                            'Authorization': 'Bearer ' + token
+                            'Content-Type': 'application/x-www-form-urlencoded'
                         },
                         body: `ip=${encodeURIComponent(ip)}&minutes=${encodeURIComponent(minutes)}`
                     });
@@ -908,11 +896,10 @@
             `Mở khóa cho IP ${ip}?`,
             async () => {
                 try {
-                    const res = await fetch('/api/admin/security/unban', {
+                    const res = await apiFetch('/api/admin/security/unban', {
                         method: 'POST',
                         headers: {
-                            'Content-Type': 'application/x-www-form-urlencoded',
-                            'Authorization': 'Bearer ' + token
+                            'Content-Type': 'application/x-www-form-urlencoded'
                         },
                         body: `ip=${encodeURIComponent(ip)}`
                     });
@@ -940,10 +927,16 @@
         }, 30000);
     });
 
-    function logoutAdmin() {
-        localStorage.clear();
-        showToast('Đã đăng xuất tài khoản Admin!', 'success');
-        setTimeout(() => window.location.href = '/index.html', 500);
+    async function logoutAdmin() {
+        try {
+            await apiFetch('/api/auth/logout', { method: 'POST', noAuthRedirect: true });
+        } catch (err) {
+            console.error('Lỗi khi gọi API đăng xuất:', err);
+        } finally {
+            localStorage.clear();
+            showToast('Đã đăng xuất tài khoản Admin!', 'success');
+            setTimeout(() => window.location.href = '/index.html', 500);
+        }
     }
 
     function escapeHtml(str) {

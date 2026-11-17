@@ -7,6 +7,7 @@
     <title>DUT Mail - Đăng nhập</title>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <link rel="stylesheet" href="css/style.css">
+    <script src="js/api.js"></script>
 </head>
 <body class="auth-body">
     <div class="auth-card">
@@ -42,7 +43,10 @@
                     <input type="password" id="login-password" placeholder="••••••••" autocomplete="current-password" required>
                 </div>
             </div>
-            <div class="forgot-row">
+            <div class="forgot-row" style="display: flex; justify-content: space-between; align-items: center;">
+                <label for="login-remember" style="display: inline-flex; align-items: center; gap: 6px; font-size: 13px; cursor: pointer;">
+                    <input type="checkbox" id="login-remember"> Ghi nhớ đăng nhập
+                </label>
                 <a href="#" class="forgot-link" onclick="showForgotPassword(event)">Quên mật khẩu?</a>
             </div>
             <button type="submit" class="btn btn-primary btn-block">

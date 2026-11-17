@@ -2,12 +2,17 @@
 package com.pbl4.mailserver.core;
 
 import com.pbl4.mailserver.config.ServerConfig;
+import com.pbl4.mailserver.forward.ForwardService;
 import com.pbl4.mailserver.mime.MessageNormalizer;
 import com.pbl4.mailserver.mime.MimeParser;
+import com.pbl4.mailserver.spam.SpamFilter;
+import com.pbl4.mailserver.spam.SpamVerdict;
 
 import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
+import java.time.ZonedDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.LongSupplier;
@@ -43,17 +48,36 @@ public class MailService {
         boolean enqueue(String envelopeFrom, Set<String> externalRcpts, byte[] raw);
     }
 
+    /** Điểm móc phân loại thư rác (mặc định: SpamFilter.classify). */
+    interface InboundClassifier {
+        SpamVerdict classify(String user, byte[] raw, String envelopeFrom);
+    }
+
+    /** Điểm móc chuyển tiếp (mặc định: ForwardService.apply). true = vẫn lưu INBOX. */
+    interface InboundForwarder {
+        boolean apply(String user, byte[] raw, String envelopeFrom);
+    }
+
     private static volatile Normalizer normalizer = MessageNormalizer::normalize;
     private static volatile OutboundEnqueuer outbound = OutboundQueue::enqueue;
+    private static volatile InboundClassifier classifier = SpamFilter::classify;
+    private static volatile InboundForwarder forwarder = ForwardService::apply;
 
     static void setHooksForTest(Normalizer n, OutboundEnqueuer o) {
         if (n != null) normalizer = n;
         if (o != null) outbound = o;
     }
 
+    static void setInboundHooksForTest(InboundClassifier c, InboundForwarder f) {
+        if (c != null) classifier = c;
+        if (f != null) forwarder = f;
+    }
+
     static void resetHooksForTest() {
         normalizer = MessageNormalizer::normalize;
         outbound = OutboundQueue::enqueue;
+        classifier = SpamFilter::classify;
+        forwarder = ForwardService::apply;
     }
 
     // ---------- Giới hạn thư gửi RA NGOÀI theo tài khoản (cửa sổ trượt 1 giờ) ----------
@@ -259,10 +283,23 @@ public class MailService {
         }
 
         if (successTotal > 0) {
+            noteContacts(canonicalSender, localRecipients, externalRecipients);
             return new DeliveryResult(true, successTotal, failTotal, String.join(" | ", messages), quotaExceeded);
         }
         return new DeliveryResult(false, 0, failTotal,
                 messages.isEmpty() ? "Gửi thư thất bại!" : String.join(" | ", messages), quotaExceeded);
+    }
+
+    /** Người user từng gửi thư tới = liên hệ tin cậy của bộ lọc rác. Lỗi thì bỏ qua. */
+    private static void noteContacts(String sender, Collection<String> local, Collection<String> external) {
+        if (!ServerConfig.SPAM_ENABLED) return;
+        try {
+            Set<String> all = new LinkedHashSet<>(local);
+            all.addAll(external);
+            SpamFilter.noteRecipients(sender, all);
+        } catch (RuntimeException e) {
+            System.err.println("[MAIL SERVICE] Không ghi nhận liên hệ tin cậy: " + e.getClass().getSimpleName());
+        }
     }
 
     public static DeliveryResult deliverLocal(String envelopeFrom, Set<String> localRcpts, byte[] raw, Folder folder) {
@@ -296,6 +333,51 @@ public class MailService {
         int quotaFail;
     }
 
+    /** Kết quả xử lý thư sắp vào INBOX của một người nhận: hòm đích và nội dung sẽ lưu. */
+    static final class InboxPlan {
+        final String mailbox;
+        final byte[] data;
+
+        InboxPlan(String mailbox, byte[] data) {
+            this.mailbox = mailbox;
+            this.data = data;
+        }
+    }
+
+    /**
+     * Quyết định nơi lưu thư vào INBOX của một người nhận: lọc rác (rác => _spam, không chuyển tiếp),
+     * gắn điểm, rồi chuyển tiếp (keepCopy=false => _trash). KHÔNG BAO GIỜ ném lỗi: lỗi => lưu INBOX như cũ.
+     */
+    static InboxPlan planInbox(String canonical, byte[] raw, String envelopeFrom) {
+        try {
+            byte[] data = raw;
+            if (ServerConfig.SPAM_ENABLED) {
+                try {
+                    SpamVerdict v = classifier.classify(canonical, raw, envelopeFrom);
+                    if (v != null) {
+                        byte[] tagged = SpamFilter.tag(raw, v);
+                        if (tagged != null) data = tagged;
+                        if (v.spam()) return new InboxPlan(canonical + "_spam", data);
+                    }
+                } catch (RuntimeException e) {
+                    data = raw;
+                    System.err.println("[MAIL SERVICE] Bỏ qua lọc rác do lỗi: " + e.getClass().getSimpleName());
+                }
+            }
+            if (ServerConfig.FORWARD_ENABLED) {
+                try {
+                    boolean keepInbox = forwarder.apply(canonical, data, envelopeFrom);
+                    if (!keepInbox) return new InboxPlan(canonical + "_trash", data);
+                } catch (RuntimeException e) {
+                    System.err.println("[MAIL SERVICE] Bỏ qua chuyển tiếp do lỗi: " + e.getClass().getSimpleName());
+                }
+            }
+            return new InboxPlan(canonical, data);
+        } catch (RuntimeException e) {
+            return new InboxPlan(canonical, raw);
+        }
+    }
+
     private static LocalOutcome storeLocal(Collection<String> rcpts, byte[] raw, Folder folder) {
         return storeLocal(rcpts, raw, folder, null);
     }
@@ -325,8 +407,19 @@ public class MailService {
                 }
             }
 
-            String mailbox = (target == Folder.SPAM) ? canonical + "_spam" : canonical;
-            MailStorageEngine.SaveResult r = MailStorageEngine.saveEmailResult(mailbox, raw);
+            String mailbox;
+            byte[] data = raw;
+            if (target == Folder.SPAM) {
+                mailbox = canonical + "_spam";
+            } else if (folder == Folder.INBOX) {
+                // Mỗi người nhận xử lý riêng: bản lưu có thể khác nhau theo user (điểm rác, chuyển tiếp)
+                InboxPlan plan = planInbox(canonical, raw, envelopeFrom);
+                mailbox = plan.mailbox;
+                data = plan.data;
+            } else {
+                mailbox = canonical;
+            }
+            MailStorageEngine.SaveResult r = MailStorageEngine.saveEmailResult(mailbox, data);
             if (r == MailStorageEngine.SaveResult.OK) {
                 out.ok++;
             } else {
@@ -335,6 +428,94 @@ public class MailService {
             }
         }
         return out;
+    }
+
+    // ---------- Thông báo hệ thống (không đi qua lọc rác/chuyển tiếp) ----------
+
+    /**
+     * Gửi thông báo từ no-reply@MAIL_DOMAIN vào INBOX của user; nếu extraAddress không rỗng thì gửi thêm bản tới đó
+     * (nội bộ thì lưu thẳng, ngoài hệ thống thì xếp hàng gửi). Không ném lỗi. Trả true nếu đã lưu vào hộp thư của user.
+     */
+    public static boolean sendSystemNotice(String user, String subject, String body, String extraAddress) {
+        try {
+            if (user == null || subject == null || body == null) return false;
+            String canonical = UserStore.canonical(user);
+            if (canonical == null || !UserStore.exists(canonical)) return false;
+
+            String domain = ServerConfig.MAIL_DOMAIN.toLowerCase(Locale.ROOT);
+            String noReply = "no-reply@" + domain;
+            String userAddr = canonical.indexOf('@') >= 0 ? canonical : canonical + "@" + domain;
+
+            boolean saved = MailStorageEngine.saveEmailResult(canonical,
+                    buildNotice(noReply, userAddr, subject, body, domain)) == MailStorageEngine.SaveResult.OK;
+
+            if (extraAddress != null) {
+                String extra = extraAddress.trim().toLowerCase(Locale.ROOT);
+                if (!extra.isEmpty() && !extra.equals(userAddr) && extra.matches("[^\\s<>\"]{1,64}@[^\\s<>\"]{1,253}")) {
+                    byte[] copy = buildNotice(noReply, extra, subject, body, domain);
+                    try {
+                        if (isLocalDomain(extra)) {
+                            String c2 = UserStore.canonical(extra);
+                            if (c2 != null && UserStore.exists(c2) && !c2.equals(canonical)) {
+                                MailStorageEngine.saveEmailResult(c2, copy);
+                            }
+                        } else {
+                            outbound.enqueue(noReply, new LinkedHashSet<>(List.of(extra)), copy);
+                        }
+                    } catch (RuntimeException e) {
+                        System.err.println("[MAIL SERVICE] Không gửi được bản thông báo tới email khôi phục.");
+                    }
+                }
+            }
+            return saved;
+        } catch (RuntimeException e) {
+            System.err.println("[MAIL SERVICE] Lỗi gửi thông báo hệ thống: " + e.getClass().getSimpleName());
+            return false;
+        }
+    }
+
+    private static byte[] buildNotice(String from, String to, String subject, String body, String domain) {
+        String crlf = "\r\n";
+        String head = "From: " + from + crlf
+                + "To: " + to + crlf
+                + "Subject: " + encodeHeader(subject.replace('\r', ' ').replace('\n', ' ')) + crlf
+                + "Date: " + ZonedDateTime.now().format(DateTimeFormatter.RFC_1123_DATE_TIME) + crlf
+                + "Message-ID: <" + UUID.randomUUID() + "@" + domain + ">" + crlf
+                + "MIME-Version: 1.0" + crlf
+                + "Content-Type: text/plain; charset=UTF-8" + crlf
+                + "Content-Transfer-Encoding: base64" + crlf
+                + "Auto-Submitted: auto-generated" + crlf
+                + crlf;
+        String b64 = Base64.getMimeEncoder(76, crlf.getBytes(StandardCharsets.US_ASCII))
+                .encodeToString(body.getBytes(StandardCharsets.UTF_8));
+        return (head + b64 + crlf).getBytes(StandardCharsets.US_ASCII);
+    }
+
+    /** RFC 2047 (B), tách theo ký tự để mỗi encoded-word ngắn hơn 75 ký tự. */
+    static String encodeHeader(String s) {
+        boolean ascii = true;
+        for (int i = 0; i < s.length(); i++) {
+            if (s.charAt(i) > 0x7e || s.charAt(i) < 0x20) { ascii = false; break; }
+        }
+        if (ascii) return s;
+        List<String> words = new ArrayList<>();
+        ByteArrayOutputStream cur = new ByteArrayOutputStream();
+        for (int i = 0; i < s.length(); ) {
+            int cp = s.codePointAt(i);
+            i += Character.charCount(cp);
+            byte[] b = new String(Character.toChars(cp)).getBytes(StandardCharsets.UTF_8);
+            if (cur.size() + b.length > 36) {
+                words.add(wordOf(cur.toByteArray()));
+                cur.reset();
+            }
+            cur.write(b, 0, b.length);
+        }
+        if (cur.size() > 0) words.add(wordOf(cur.toByteArray()));
+        return String.join("\r\n ", words);
+    }
+
+    private static String wordOf(byte[] utf8) {
+        return "=?UTF-8?B?" + Base64.getEncoder().encodeToString(utf8) + "?=";
     }
 
     private static String readFromHeader(byte[] raw) {

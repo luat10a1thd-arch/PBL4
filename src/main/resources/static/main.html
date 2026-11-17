@@ -7,6 +7,7 @@
     <title>DUT Mail Client</title>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <link rel="stylesheet" href="css/style.css">
+    <script src="js/api.js"></script>
 </head>
 <body class="app-body">
     <header class="app-header">
@@ -54,6 +55,9 @@
                 </a>
                 <a href="#" id="nav-security" class="nav-item" onclick="openSecurityModal(event)">
                     <i class="fa-solid fa-shield-halved"></i> Bảo mật tài khoản
+                </a>
+                <a href="#" id="nav-mailsettings" class="nav-item" onclick="openMailSettings(event)">
+                    <i class="fa-solid fa-sliders"></i> Cài đặt thư
                 </a>
             </nav>
 
@@ -136,6 +140,13 @@
                         <p><i class="fa-solid fa-user-tag"></i> <strong>Từ:</strong> <span id="detail-sender">admin@pbl4.com</span></p>
                         <p><i class="fa-solid fa-paper-plane"></i> <strong>Tới:</strong> <span id="detail-receiver">user@pbl4.com</span></p>
                         <p><i class="fa-regular fa-clock"></i> <strong>Thời gian:</strong> <span id="detail-time">2026-09-15 10:30:00</span></p>
+                    </div>
+                    <div id="spam-info" class="spam-info hidden">
+                        <i class="fa-solid fa-triangle-exclamation"></i>
+                        <span id="spam-info-score" class="spam-info-score"></span>
+                        <button type="button" class="btn btn-outline btn-sm spam-why-btn" onclick="openSpamReasonsCurrent()">
+                            <i class="fa-regular fa-circle-question"></i> Vì sao là thư rác?
+                        </button>
                     </div>
                 </div>
                 <hr class="divider">
@@ -291,6 +302,158 @@
                     </div>
                 </div>
             </div>
+        </div>
+    </div>
+
+    <!-- Cài đặt thư: Chuyển tiếp tự động + Chống thư rác (logic ở js/app.js, API /api/settings/*) -->
+    <div id="mail-settings-modal" class="confirm-modal-overlay hidden">
+        <div class="modal-box ms-box">
+            <div class="modal-box-header">
+                <h3><i class="fa-solid fa-sliders"></i> Cài đặt thư</h3>
+                <button class="btn-close-dark" onclick="closeMailSettings()" title="Đóng">&times;</button>
+            </div>
+
+            <div class="sec-tabs">
+                <button type="button" id="ms-tab-forward" class="sec-tab active" onclick="switchMailSettingsTab('forward')">Chuyển tiếp tự động</button>
+                <button type="button" id="ms-tab-spam" class="sec-tab" onclick="switchMailSettingsTab('spam')">Chống thư rác</button>
+            </div>
+
+            <div id="ms-pane-forward" class="sec-pane">
+                <div class="warning-box">
+                    <i class="fa-solid fa-triangle-exclamation"></i>
+                    <strong>Chỉ chuyển tiếp tới địa chỉ bạn tin tưởng.</strong>
+                    Thư phù hợp điều kiện sẽ được gửi nguyên văn (kèm tệp đính kèm) tới địa chỉ đó, và người sở hữu địa chỉ đó đọc được toàn bộ nội dung.
+                </div>
+                <div id="ms-fwd-message" class="inline-msg hidden"></div>
+
+                <div id="ms-fwd-list" class="ms-list"></div>
+
+                <h4 class="ms-subtitle">Thêm luật chuyển tiếp</h4>
+                <form id="ms-fwd-form" onsubmit="handleAddForwardRule(event)" autocomplete="off">
+                    <div class="form-group">
+                        <label for="ms-fwd-target">Chuyển tiếp tới địa chỉ</label>
+                        <input type="email" id="ms-fwd-target" class="form-control" placeholder="ban@example.com" maxlength="254" autocomplete="off" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="ms-fwd-from">Người gửi chứa (tùy chọn)</label>
+                        <input type="text" id="ms-fwd-from" class="form-control" placeholder="Để trống = mọi người gửi" maxlength="100" autocomplete="off">
+                    </div>
+                    <div class="form-group">
+                        <label for="ms-fwd-subject">Chủ đề chứa (tùy chọn)</label>
+                        <input type="text" id="ms-fwd-subject" class="form-control" placeholder="Để trống = mọi chủ đề" maxlength="100" autocomplete="off">
+                    </div>
+                    <div class="form-group">
+                        <label>Thư gốc trong hộp thư của bạn</label>
+                        <div class="ms-radio-group">
+                            <label class="ms-radio"><input type="radio" name="ms-fwd-copy" id="ms-fwd-copy-keep" checked> Giữ bản sao trong Hộp thư đến</label>
+                            <label class="ms-radio"><input type="radio" name="ms-fwd-copy" id="ms-fwd-copy-trash"> Chuyển vào Thùng rác</label>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label for="ms-fwd-pw">Mật khẩu hiện tại (để xác nhận)</label>
+                        <input type="password" id="ms-fwd-pw" class="form-control" autocomplete="current-password" required>
+                    </div>
+                    <button type="submit" id="ms-fwd-submit" class="btn btn-primary btn-block">
+                        <i class="fa-solid fa-plus"></i> Thêm luật
+                    </button>
+                    <p class="ms-note">Nếu địa chỉ nằm ngoài hệ thống này, một mã xác minh sẽ được gửi tới địa chỉ đó. Luật chỉ hoạt động sau khi bạn nhập đúng mã.</p>
+                </form>
+            </div>
+
+            <div id="ms-pane-spam" class="sec-pane hidden">
+                <div id="ms-spam-message" class="inline-msg hidden"></div>
+                <div id="ms-spam-loading" class="empty-list">Đang tải...</div>
+
+                <div id="ms-spam-body" class="hidden">
+                    <div class="ms-switch-row">
+                        <div class="ms-switch-text">
+                            <strong>Bật chống thư rác</strong>
+                            <span>Thư đến bị đánh giá là rác sẽ được chuyển vào mục Thư rác.</span>
+                        </div>
+                        <label class="ms-switch" title="Bật/tắt chống thư rác">
+                            <input type="checkbox" id="ms-spam-enabled" aria-label="Bật chống thư rác" onchange="onSpamEnabledChange(this)">
+                            <span class="ms-slider"></span>
+                        </label>
+                    </div>
+
+                    <div class="ms-section-title">Độ nhạy</div>
+                    <div class="ms-level-grid" id="ms-level-grid">
+                        <label class="ms-level" id="ms-level-LOW">
+                            <input type="radio" name="ms-level" value="LOW" onchange="onSpamLevelChange(this)">
+                            <strong>Thấp</strong>
+                            <span>Chỉ chặn thư gần như chắc chắn là rác. Ít nhầm thư thường nhất nhưng có thể lọt một số thư rác.</span>
+                        </label>
+                        <label class="ms-level" id="ms-level-MEDIUM">
+                            <input type="radio" name="ms-level" value="MEDIUM" onchange="onSpamLevelChange(this)">
+                            <strong>Vừa</strong>
+                            <span>Cân bằng giữa việc chặn thư rác và giữ lại thư thường.</span>
+                        </label>
+                        <label class="ms-level" id="ms-level-HIGH">
+                            <input type="radio" name="ms-level" value="HIGH" onchange="onSpamLevelChange(this)">
+                            <strong>Cao</strong>
+                            <span>Chặn mạnh tay hơn, bắt được nhiều thư rác hơn nhưng có thể nhầm thư thường. Nên thỉnh thoảng xem mục Thư rác.</span>
+                        </label>
+                    </div>
+
+                    <div class="ms-switch-row">
+                        <div class="ms-switch-text">
+                            <strong>Học từ thư tôi đánh dấu</strong>
+                            <span>Khi bạn báo thư rác hoặc bấm "Không phải thư rác", bộ lọc học từ đó để chính xác hơn với riêng bạn.</span>
+                        </div>
+                        <label class="ms-switch" title="Bật/tắt học từ thư bạn đánh dấu">
+                            <input type="checkbox" id="ms-spam-learning" aria-label="Học từ thư tôi đánh dấu" onchange="onSpamLearningChange(this)">
+                            <span class="ms-slider"></span>
+                        </label>
+                    </div>
+
+                    <div class="ms-section-title">Người gửi tin cậy</div>
+                    <p class="ms-note">Thư từ các địa chỉ này luôn được vào Hộp thư đến. Người bạn từng gửi thư tới cũng được tin cậy tự động.</p>
+                    <div id="ms-allow-list" class="ms-list"></div>
+                    <form class="ms-allow-add" onsubmit="handleAddAllow(event)" autocomplete="off">
+                        <input type="email" id="ms-allow-input" class="form-control" placeholder="nguoigui@example.com" maxlength="254" aria-label="Địa chỉ người gửi tin cậy" autocomplete="off">
+                        <button type="submit" id="ms-allow-add-btn" class="btn btn-primary btn-sm">Thêm</button>
+                    </form>
+
+                    <div class="ms-section-title">Số liệu</div>
+                    <div id="ms-stats" class="ms-stats"></div>
+                    <p class="ms-note">Số liệu chung của máy chủ, không riêng tài khoản của bạn.</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Xác nhận bằng mật khẩu (bật/tắt/xóa luật chuyển tiếp) -->
+    <div id="ms-confirm-modal" class="confirm-modal-overlay hidden">
+        <div class="modal-box ms-confirm-box">
+            <div class="modal-box-header">
+                <h3 id="ms-confirm-title">Xác nhận</h3>
+                <button class="btn-close-dark" onclick="closeMsConfirm()" title="Đóng">&times;</button>
+            </div>
+            <p id="ms-confirm-text" class="modal-hint"></p>
+            <form id="ms-confirm-form" onsubmit="submitMsConfirm(event)" autocomplete="off">
+                <div class="form-group">
+                    <label for="ms-confirm-pw">Mật khẩu hiện tại (để xác nhận)</label>
+                    <input type="password" id="ms-confirm-pw" class="form-control" autocomplete="current-password" required>
+                </div>
+                <div id="ms-confirm-message" class="inline-msg hidden"></div>
+                <div class="ms-confirm-actions">
+                    <button type="button" class="btn btn-outline" onclick="closeMsConfirm()">Hủy bỏ</button>
+                    <button type="submit" id="ms-confirm-yes" class="btn btn-primary">Xác nhận</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Lý do một thư bị xếp vào Thư rác -->
+    <div id="spam-reason-modal" class="confirm-modal-overlay hidden">
+        <div class="modal-box">
+            <div class="modal-box-header">
+                <h3><i class="fa-regular fa-circle-question"></i> Vì sao là thư rác?</h3>
+                <button class="btn-close-dark" onclick="closeSpamReasons()" title="Đóng">&times;</button>
+            </div>
+            <div id="spam-reason-score" class="sec-status hidden"></div>
+            <div id="spam-reason-body" class="spam-reason-body"></div>
+            <p class="ms-note">Đây là đánh giá tự động và có thể chưa chính xác. Nếu đây là thư thường, hãy bấm "Không phải thư rác".</p>
         </div>
     </div>
 

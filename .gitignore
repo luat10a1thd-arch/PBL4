@@ -11,3 +11,10 @@ dependency-reduced-pom.xml
 .settings/
 .classpath
 .project
+dependency-reduced-pom.xml
+test-result.txt
+bundle-*.txt
+reply.txt
+err-*.txt
+target/
+data/

@@ -241,6 +241,8 @@ public class MailService {
         List<String> messages = new ArrayList<>();
 
         if (!localRecipients.isEmpty()) {
+            // Cập nhật bộ đếm gửi hàng loạt TRƯỚC khi từng người nhận được phân loại (lỗi thì bỏ qua, vẫn giao thư)
+            noteOutgoingForSpam(canonicalSender, localRecipients, message);
             LocalOutcome lo = storeLocal(localRecipients, message, Folder.INBOX, canonicalSender);
             successTotal += lo.ok;
             failTotal += lo.fail;
@@ -288,6 +290,16 @@ public class MailService {
         }
         return new DeliveryResult(false, 0, failTotal,
                 messages.isEmpty() ? "Gửi thư thất bại!" : String.join(" | ", messages), quotaExceeded);
+    }
+
+    /** Ghi nhận lần gửi tới người nhận nội bộ cho bộ đếm gửi hàng loạt của bộ lọc rác. Lỗi thì bỏ qua. */
+    private static void noteOutgoingForSpam(String sender, Collection<String> localRcpts, byte[] raw) {
+        if (!ServerConfig.SPAM_ENABLED) return;
+        try {
+            SpamFilter.noteOutgoing(sender, localRcpts, raw);
+        } catch (RuntimeException e) {
+            System.err.println("[MAIL SERVICE] Không ghi nhận được bộ đếm gửi hàng loạt: " + e.getClass().getSimpleName());
+        }
     }
 
     /** Người user từng gửi thư tới = liên hệ tin cậy của bộ lọc rác. Lỗi thì bỏ qua. */

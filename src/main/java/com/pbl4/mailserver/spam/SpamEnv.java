@@ -7,6 +7,8 @@ import java.lang.reflect.Method;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.Clock;
+import java.util.OptionalLong;
+import java.util.function.Function;
 import java.util.function.Predicate;
 
 /** Cấu hình và móc nối của bộ lọc. Đọc ServerConfig lười (để test không chạm vào ServerConfig). */
@@ -20,9 +22,12 @@ final class SpamEnv {
     private static volatile String domainOverride;
     private static volatile Clock clock = Clock.systemUTC();
     private static volatile Predicate<String> userExistsHook;
+    private static volatile Function<String, OptionalLong> createdAtHook;
     private static volatile Path baseDir = DEFAULT_BASE;
     private static volatile Method userStoreExists;
     private static volatile boolean userStoreLookedUp;
+    private static volatile Method userStoreCreatedAt;
+    private static volatile boolean createdAtLookedUp;
 
     static String hostname() {
         String h = hostOverride;
@@ -60,6 +65,10 @@ final class SpamEnv {
         userExistsHook = p;
     }
 
+    static void setCreatedAtHook(Function<String, OptionalLong> f) {
+        createdAtHook = f;
+    }
+
     /** user = phần tên (không kèm @domain). Lỗi => false (không miễn trừ). */
     static boolean userExists(String user) {
         if (user == null || user.isEmpty()) return false;
@@ -69,6 +78,24 @@ final class SpamEnv {
             return reflectExists(user);
         } catch (Throwable t) {
             return false;
+        }
+    }
+
+    /**
+     * Ngày tạo tài khoản (epoch ms). Rỗng nếu không biết (tài khoản cũ, thiếu dữ liệu hoặc lỗi) => KHÔNG bị coi là tài khoản mới.
+     * Mặc định gọi core.UserStore.createdAtOf(String) bằng reflection.
+     */
+    static OptionalLong createdAtOf(String user) {
+        if (user == null || user.isEmpty()) return OptionalLong.empty();
+        try {
+            Function<String, OptionalLong> h = createdAtHook;
+            if (h != null) {
+                OptionalLong r = h.apply(user);
+                return r == null ? OptionalLong.empty() : r;
+            }
+            return reflectCreatedAt(user);
+        } catch (Throwable t) {
+            return OptionalLong.empty();
         }
     }
 
@@ -93,6 +120,28 @@ final class SpamEnv {
         return m != null && Boolean.TRUE.equals(m.invoke(null, user));
     }
 
+    private static OptionalLong reflectCreatedAt(String user) throws Exception {
+        if (!createdAtLookedUp) {
+            synchronized (SpamEnv.class) {
+                if (!createdAtLookedUp) {
+                    try {
+                        Class<?> c = Class.forName("com.pbl4.mailserver.core.UserStore");
+                        Method m = c.getDeclaredMethod("createdAtOf", String.class);
+                        m.setAccessible(true);
+                        userStoreCreatedAt = m;
+                    } catch (Throwable t) {
+                        userStoreCreatedAt = null;
+                    }
+                    createdAtLookedUp = true;
+                }
+            }
+        }
+        Method m = userStoreCreatedAt;
+        if (m == null) return OptionalLong.empty();
+        Object r = m.invoke(null, user);
+        return r instanceof OptionalLong o ? o : OptionalLong.empty();
+    }
+
     // ---- móc cho test ----
     static void setHostForTest(String h) {
         hostOverride = h;
@@ -111,6 +160,7 @@ final class SpamEnv {
         domainOverride = null;
         clock = Clock.systemUTC();
         userExistsHook = null;
+        createdAtHook = null;
         baseDir = DEFAULT_BASE;
     }
 }

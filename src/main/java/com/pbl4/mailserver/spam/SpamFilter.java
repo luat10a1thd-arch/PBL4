@@ -10,77 +10,107 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
 import java.util.Collection;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.OptionalLong;
 import java.util.Set;
+import java.util.function.Function;
 import java.util.function.Predicate;
 
 /**
  * Bộ lọc thư rác. Mọi hàm xử lý thư KHÔNG ném lỗi: lỗi hoặc hết thời gian => coi như không phải rác.
  * Chỉ phân tích 256 KB đầu của thư, không dùng mạng, ngân sách xử lý ~400 ms (thực tế vài chục ms).
+ *
+ * Thư NỘI BỘ THẬT = envelope-from thuộc MAIL_DOMAIN, là user có thật, VÀ thư không có Authentication-Results do server thêm.
+ * Thư MX từ ngoài mạo danh domain nội bộ luôn có header đó nên bị coi là thư NGOÀI (chấm đủ SPF/DKIM/DMARC).
+ * Thư nội bộ thật vẫn được phân tích (tiêu đề, nội dung, tín hiệu riêng); chỉ allowlist/liên hệ của người nhận được miễn trừ.
  */
 public final class SpamFilter {
     private SpamFilter() {
     }
 
     private static final SpamVerdict HAM0 = new SpamVerdict(0.0, false, List.of());
+
+    private record Result(SpamVerdict verdict, boolean internal) {
+    }
+
+    private static final Result HAM_R = new Result(HAM0, false);
     private static final long BUDGET_MS = 400;
+    private static final long DAY_MS = 24L * 3600 * 1000;
     private static final String R_BAYES = "Nội dung giống thư rác đã học";
+    private static final String R_NEW_ACCOUNT = "Tài khoản người gửi mới tạo (dưới 24 giờ)";
+    private static final String R_MASS = "Gửi cùng lúc tới nhiều người nhận nội bộ";
+    private static final String R_SAME = "Cùng nội dung gửi tới nhiều người trong thời gian ngắn";
+    private static final String R_REPORTED = "Nhiều người dùng khác đã báo cáo người gửi này là thư rác";
 
     /** Cho phép Lead nối kiểm tra "user có thật" (mặc định gọi core.UserStore.exists bằng reflection). */
     public static void setUserExistsChecker(Predicate<String> checker) {
         SpamEnv.setUserExistsHook(checker);
     }
 
+    /** Cho phép Lead nối tra ngày tạo tài khoản (mặc định gọi core.UserStore.createdAtOf bằng reflection). */
+    public static void setUserCreatedAtProvider(Function<String, OptionalLong> provider) {
+        SpamEnv.setCreatedAtHook(provider);
+    }
+
     // ------------------------------------------------------------------ phân loại
 
     public static SpamVerdict classify(String user, byte[] raw, String envelopeFrom) {
-        SpamVerdict v;
+        Result r;
         try {
-            v = doClassify(user, raw, envelopeFrom);
+            r = doClassify(user, raw, envelopeFrom);
         } catch (Throwable t) {
-            v = HAM0;
+            r = HAM_R;
         }
+        SpamVerdict v = r.verdict();
         try {
             SpamStore.count(v.spam());
+            if (r.internal() && v.spam()) SpamReports.countInternalSpam();
         } catch (Throwable ignored) {
             // bộ đếm không được làm hỏng việc giao thư
         }
         return v;
     }
 
-    private static SpamVerdict doClassify(String user, byte[] raw, String envelopeFrom) {
-        if (raw == null || raw.length == 0) return HAM0;
+    private static Result doClassify(String user, byte[] raw, String envelopeFrom) {
+        if (raw == null || raw.length == 0) return HAM_R;
         UserData ud = SpamStore.get(user);
-        if (ud == null) return HAM0;
+        if (ud == null) return HAM_R;
         SpamSettings st = ud.settings();
-        if (!st.enabled()) return HAM0;
+        if (!st.enabled()) return HAM_R;
 
         Deadline dl = new Deadline(BUDGET_MS);
         MailView v = MailView.of(raw);
-        String env = SpamAddr.extract(envelopeFrom);
+        String env = envAddr(envelopeFrom);
         String fromAddr = SpamAddr.extract(v.from);
 
-        // Thư nội bộ (envelope thuộc MAIL_DOMAIN và là user có thật) => không phải rác.
-        // Nếu thư có Authentication-Results do server thêm thì nó đến từ đường MX (bên ngoài) => KHÔNG miễn trừ,
-        // vì người ngoài có thể giả envelope-from nội bộ.
-        if (!env.isEmpty() && !v.trustedAuth
-                && SpamAddr.domainOf(env).equalsIgnoreCase(SpamEnv.domain())
-                && SpamEnv.userExists(SpamAddr.localOf(env))) {
-            return HAM0;
-        }
+        // Nội bộ thật: envelope thuộc MAIL_DOMAIN + user có thật + KHÔNG có Authentication-Results do server thêm.
+        boolean internal = !v.trustedAuth && isLocalUser(env);
 
         // Xác thực của chính server báo thất bại thì không tin allowlist/liên hệ (người gửi có thể bị giả mạo).
         boolean authBad = v.trustedAuth && (v.spf.equals("fail") || v.dmarc.equals("fail"));
 
-        if (!authBad && (ud.isAllowed(fromAddr) || ud.isAllowed(env))) return HAM0;
+        if (internal) {
+            // Miễn trừ DUY NHẤT của thư nội bộ: người gửi nằm trong allowlist hoặc liên hệ của người nhận.
+            if (ud.isAllowed(env) || ud.isContact(env)) return new Result(HAM0, true);
+        } else if (!authBad && (ud.isAllowed(fromAddr) || ud.isAllowed(env))) {
+            return HAM_R;
+        }
 
         Signals sg = new Signals();
+        // Thư nội bộ thật không có Authentication-Results của server nên nhóm xác thực (SPF/DKIM/DMARC) tự bỏ qua;
+        // các nhóm tiêu đề, liên kết, đính kèm và từ khóa vẫn được chấm.
         RuleEngine.apply(v, sg, dl);
 
-        if (!authBad && (ud.isContact(fromAddr) || ud.isContact(env))) sg.add(-3.0, null);
+        if (internal) {
+            internalSignals(sg, v, env);
+        } else if (!authBad && (ud.isContact(fromAddr) || ud.isContact(env))) {
+            sg.add(-3.0, null);
+        }
 
         if (st.learning() && !dl.over()) {
             Bayes b = ud.bayes();
@@ -92,7 +122,86 @@ public final class SpamFilter {
 
         double score = Math.round(sg.total() * 100.0) / 100.0;
         boolean spam = score >= st.threshold();
-        return new SpamVerdict(score, spam, score > 0 ? sg.top(5) : List.of());
+        return new Result(new SpamVerdict(score, spam, score > 0 ? sg.top(5) : List.of()), internal);
+    }
+
+    /** Tín hiệu riêng cho người gửi nội bộ thật: tài khoản mới, gửi hàng loạt, cùng nội dung, bị báo cáo. */
+    private static void internalSignals(Signals sg, MailView v, String env) {
+        long now = SpamEnv.nowMillis();
+        OptionalLong created = createdAt(env);
+        if (created.isPresent() && now - created.getAsLong() < DAY_MS) sg.add(1.5, R_NEW_ACCOUNT);
+
+        String sKey = SpamStore.normalize(env);
+        if (sKey == null) return;
+
+        OutgoingTracker.Content c = OutgoingTracker.content(v);
+        OutgoingTracker.Info info = OutgoingTracker.lookup(
+                new OutgoingTracker.Key(SpamHash.id64(sKey), c.h1(), c.h2()), now);
+        if (info != null) {
+            if (info.biggest() >= 10) sg.add(2.0, R_MASS);
+            if (c.substantial() && info.distinct() >= 5) sg.add(4.0, R_SAME);
+        }
+
+        int n = SpamReports.reporters(SpamHash.hex(sKey), now);
+        if (n >= 3) sg.add(5.0, R_REPORTED);
+        else if (n >= 2) sg.add(3.0, R_REPORTED);
+    }
+
+    private static OptionalLong createdAt(String addrOrName) {
+        if (addrOrName == null || addrOrName.isEmpty()) return OptionalLong.empty();
+        OptionalLong o = SpamEnv.createdAtOf(SpamAddr.localOf(addrOrName));
+        if (o.isEmpty() && addrOrName.indexOf('@') >= 0) o = SpamEnv.createdAtOf(addrOrName);
+        return o;
+    }
+
+    /** Địa chỉ envelope thuần chữ thường; tên trần (không có @, ví dụ username đã chuẩn hóa) được ghép với MAIL_DOMAIN. */
+    private static String envAddr(String envelopeFrom) {
+        String a = SpamAddr.extract(envelopeFrom);
+        if (!a.isEmpty() || envelopeFrom == null) return a;
+        String t = envelopeFrom.trim().toLowerCase(Locale.ROOT);
+        String dom = SpamEnv.domain();
+        if (t.isEmpty() || dom.isEmpty() || t.indexOf('@') >= 0 || t.length() > 64) return "";
+        String c = t + "@" + dom;
+        return SpamAddr.valid(c) ? c : "";
+    }
+
+    private static boolean isLocalUser(String env) {
+        if (env == null || env.isEmpty()) return false;
+        String dom = SpamEnv.domain();
+        if (dom.isEmpty() || !SpamAddr.domainOf(env).equalsIgnoreCase(dom)) return false;
+        return SpamEnv.userExists(SpamAddr.localOf(env)) || SpamEnv.userExists(env);
+    }
+
+    // ------------------------------------------------------------------ gửi hàng loạt
+
+    /**
+     * Ghi nhận một lần gửi từ user tới các người nhận NỘI BỘ vào cửa sổ trượt 10 phút (trong RAM).
+     * Phải gọi TRƯỚC khi từng người nhận được phân loại. Không bao giờ ném lỗi.
+     */
+    public static void noteOutgoing(String sender, Collection<String> localRecipients, byte[] raw) {
+        try {
+            if (sender == null || localRecipients == null || localRecipients.isEmpty() || raw == null || raw.length == 0) {
+                return;
+            }
+            String sKey = SpamStore.normalize(sender);
+            if (sKey == null) return;
+            Set<String> seen = new HashSet<>();
+            Set<Long> ids = new LinkedHashSet<>();
+            for (String r : localRecipients) {
+                if (r == null) continue;
+                String rk = SpamStore.normalize(r);
+                if (rk == null || rk.equals(sKey)) continue;
+                if (seen.size() >= 5000) break;
+                if (seen.add(rk) && ids.size() < OutgoingTracker.MAX_RCPT) ids.add(SpamHash.id64(rk));
+            }
+            if (seen.isEmpty()) return;
+            MailView v = MailView.of(raw);
+            OutgoingTracker.Content c = OutgoingTracker.content(v);
+            OutgoingTracker.note(new OutgoingTracker.Key(SpamHash.id64(sKey), c.h1(), c.h2()),
+                    SpamEnv.nowMillis(), ids, seen.size());
+        } catch (Throwable ignored) {
+            // theo dõi hàng loạt hỏng thì bỏ qua, thư vẫn được giao như cũ
+        }
     }
 
     // ------------------------------------------------------------------ gắn thẻ
@@ -170,13 +279,26 @@ public final class SpamFilter {
 
     // ------------------------------------------------------------------ học
 
-    /** Học một thư là rác/không rác. Học lại cùng thư với nhãn khác = đổi nhãn (không đếm đôi). Không ném lỗi. */
+    /**
+     * Học một thư là rác/không rác. Học lại cùng thư với nhãn khác = đổi nhãn (không đếm đôi). Không ném lỗi.
+     * Khi isSpam=true và người gửi là nội bộ thật: ghi thêm một báo cáo (băm) về người gửi đó.
+     */
     public static void learn(String user, byte[] raw, boolean isSpam) {
         try {
             if (raw == null || raw.length == 0) return;
             UserData ud = SpamStore.get(user);
-            if (ud == null || !ud.settings().learning()) return;
-            MailView v = MailView.of(raw);
+            if (ud == null) return;
+            MailView v = null;
+            if (isSpam) {
+                v = MailView.of(raw);
+                try {
+                    reportInternalSender(user, v);
+                } catch (Throwable ignored) {
+                    // báo cáo hỏng không ảnh hưởng việc học
+                }
+            }
+            if (!ud.settings().learning()) return;
+            if (v == null) v = MailView.of(raw);
             int code = ud.bayes().learn(Bayes.contentKey(v), Bayes.tokenize(v), isSpam);
             switch (code) {
                 case 1 -> SpamStore.LEARNED_SPAM.incrementAndGet();
@@ -199,15 +321,42 @@ public final class SpamFilter {
         }
     }
 
-    /** Người user từng gửi thư tới = liên hệ tin cậy (tối đa 2000, bỏ cái cũ nhất). */
+    private static void reportInternalSender(String reporter, MailView v) {
+        String from = SpamAddr.extract(v.from);
+        if (from.isEmpty() || v.trustedAuth || !isLocalUser(from)) return;
+        String sKey = SpamStore.normalize(from);
+        String rKey = SpamStore.normalize(reporter);
+        if (sKey == null || rKey == null || sKey.equals(rKey)) return;
+        long now = SpamEnv.nowMillis();
+        // Chỉ tài khoản đã tạo trên 24 giờ mới được tính; thiếu ngày tạo = tài khoản cũ (đủ điều kiện).
+        OptionalLong rc = createdAt(reporter);
+        if (rc.isPresent() && now - rc.getAsLong() < DAY_MS) return;
+        SpamReports.addReport(SpamHash.hex(rKey), SpamHash.hex(sKey), now);
+    }
+
+    /** Người user từng gửi thư tới = liên hệ tin cậy (tối đa 2000, bỏ cái cũ nhất). Tên trần được ghép với MAIL_DOMAIN. */
     public static void noteRecipients(String user, Collection<String> addrs) {
         try {
             if (addrs == null || addrs.isEmpty()) return;
             UserData ud = SpamStore.get(user);
-            if (ud != null) ud.noteRecipients(addrs);
+            if (ud != null) ud.noteRecipients(qualify(addrs));
         } catch (Throwable ignored) {
             // bỏ qua
         }
+    }
+
+    private static List<String> qualify(Collection<String> addrs) {
+        String dom = SpamEnv.domain();
+        List<String> out = new ArrayList<>();
+        for (String a : addrs) {
+            if (a == null) continue;
+            if (out.size() >= 5000) break;
+            String t = a.trim();
+            boolean bare = !dom.isEmpty() && !t.isEmpty() && t.indexOf('@') < 0 && t.indexOf(' ') < 0
+                    && t.indexOf(',') < 0 && t.indexOf(';') < 0 && t.indexOf('<') < 0;
+            out.add(bare ? t + "@" + dom : a);
+        }
+        return out;
     }
 
     // ------------------------------------------------------------------ cài đặt, allowlist
@@ -273,12 +422,27 @@ public final class SpamFilter {
         m.put("ham", SpamStore.HAM.get());
         m.put("learnedSpam", SpamStore.LEARNED_SPAM.get());
         m.put("learnedHam", SpamStore.LEARNED_HAM.get());
+        long internal = 0;
+        try {
+            internal = SpamReports.internalSpam();
+        } catch (Throwable ignored) {
+            // thiếu số liệu thì báo 0
+        }
+        m.put("internalSpam", internal);
         return m;
     }
 
     /** Ghi ngay mọi dữ liệu đang chờ xuống đĩa (dùng khi tắt server/test). */
     public static void flush() {
         SpamStore.flushAll(true);
+        SpamReports.flush(true);
+    }
+
+    /** Chỉ cho test: xóa cửa sổ trượt, báo cáo trong RAM và muối đã cache. */
+    static void resetInternalStateForTest() {
+        OutgoingTracker.clear();
+        SpamReports.resetForTest();
+        SpamHash.resetForTest();
     }
 
     static Set<String> unusedForCompilerHint() {

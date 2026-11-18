@@ -1,3 +1,4 @@
+// FILE: src/main/java/com/pbl4/mailserver/core/User.java
 package com.pbl4.mailserver.core;
 
 public class User {
@@ -6,6 +7,8 @@ public class User {
     private String salt;
     private String status;
     private String role;
+    /** Thời điểm tạo tài khoản (epoch ms). 0 = không biết (tài khoản tạo trước khi có trường này). */
+    private long createdAt;
 
     public User() {}
 
@@ -31,6 +34,9 @@ public class User {
 
     public String getRole() { return role; }
     public void setRole(String role) { this.role = role; }
+
+    public long getCreatedAt() { return createdAt; }
+    public void setCreatedAt(long createdAt) { this.createdAt = createdAt; }
 
     @Override
     public String toString() {

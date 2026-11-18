@@ -19,6 +19,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Matcher;
@@ -223,7 +224,12 @@ public class UserStore {
                 sb.append("    \"passwordHash\": \"").append(escapeJson(u.getPasswordHash())).append("\",\n");
                 sb.append("    \"salt\": \"").append(escapeJson(u.getSalt() == null ? "" : u.getSalt())).append("\",\n");
                 sb.append("    \"status\": \"").append(escapeJson(u.getStatus() == null ? "ACTIVE" : u.getStatus())).append("\",\n");
-                sb.append("    \"role\": \"").append(escapeJson(u.getRole() == null ? "USER" : u.getRole())).append("\"\n");
+                sb.append("    \"role\": \"").append(escapeJson(u.getRole() == null ? "USER" : u.getRole())).append("\"");
+                // createdAt là số, ghi SAU CÙNG và chỉ khi biết: file không có trường này vẫn y hệt định dạng cũ
+                if (u.getCreatedAt() > 0) {
+                    sb.append(",\n    \"createdAt\": ").append(u.getCreatedAt());
+                }
+                sb.append("\n");
                 sb.append("  }").append(count < total ? ",\n" : "\n");
             }
             sb.append("]");
@@ -299,6 +305,22 @@ public class UserStore {
         return userMap.get(username.toLowerCase(Locale.ROOT).trim());
     }
 
+    /**
+     * Thời điểm tạo tài khoản (epoch ms); rỗng nếu không biết (tài khoản cũ chưa có createdAt hoặc không có user).
+     * Nhận cả tên trần lẫn dạng local@MAIL_DOMAIN.
+     */
+    public static OptionalLong createdAtOf(String username) {
+        if (username == null || username.trim().isEmpty()) return OptionalLong.empty();
+        User u = getUser(username);
+        if (u == null) {
+            String key = username.toLowerCase(Locale.ROOT).trim();
+            int at = key.indexOf('@');
+            String alt = at < 0 ? key + "@" + ServerConfig.MAIL_DOMAIN.toLowerCase(Locale.ROOT) : key.substring(0, at);
+            u = getUser(alt);
+        }
+        return (u != null && u.getCreatedAt() > 0) ? OptionalLong.of(u.getCreatedAt()) : OptionalLong.empty();
+    }
+
     public static String findHash(String username) {
         User u = getUser(username);
         return u != null ? u.getPasswordHash() : null;
@@ -332,6 +354,7 @@ public class UserStore {
         String status = (isAdmin || initialStatus == null || initialStatus.trim().isEmpty()) ? "ACTIVE" : initialStatus;
 
         User user = new User(username.trim(), passwordHash, saltBase64, status, role);
+        user.setCreatedAt(System.currentTimeMillis());
         userMap.put(key, user);
         saveUsersToFile();
         return true;
@@ -348,7 +371,14 @@ public class UserStore {
     public static synchronized void addUser(String username, String passwordHash, String saltBase64, String status, String role) {
         ensureLoaded();
         User user = new User(username.trim(), passwordHash, saltBase64, status, role);
-        userMap.put(username.toLowerCase(Locale.ROOT).trim(), user);
+        String key = username.toLowerCase(Locale.ROOT).trim();
+        User old = userMap.get(key);
+        if (old != null) {
+            user.setCreatedAt(old.getCreatedAt()); // ghi đè bản ghi cũ (đổi mật khẩu...) không được làm mất ngày tạo
+        } else if (!"ADMIN".equalsIgnoreCase(role)) {
+            user.setCreatedAt(System.currentTimeMillis()); // tài khoản mới tạo
+        }
+        userMap.put(key, user);
         saveUsersToFile();
     }
 
@@ -408,6 +438,9 @@ public class UserStore {
             String role = extractField(objStr, "role");
             u.setRole(role != null ? role : "USER");
 
+            // Thiếu createdAt (file cũ) = 0 = không biết = tài khoản cũ
+            u.setCreatedAt(extractLong(objStr, "createdAt"));
+
             return u;
         } catch (Exception e) {
             return null;
@@ -427,6 +460,24 @@ public class UserStore {
         if (quoteEnd == -1) return null;
 
         return json.substring(quoteStart + 1, quoteEnd);
+    }
+
+    // Trường số nguyên dương; thiếu hoặc sai định dạng => 0 (không bao giờ làm hỏng việc đọc file người dùng)
+    private static long extractLong(String json, String field) {
+        try {
+            String key = "\"" + field + "\":";
+            int start = json.indexOf(key);
+            if (start == -1) return 0L;
+            int i = start + key.length();
+            while (i < json.length() && Character.isWhitespace(json.charAt(i))) i++;
+            int s = i;
+            while (i < json.length() && json.charAt(i) >= '0' && json.charAt(i) <= '9') i++;
+            if (i == s || i - s > 15) return 0L;
+            long v = Long.parseLong(json.substring(s, i));
+            return v > 0 ? v : 0L;
+        } catch (RuntimeException e) {
+            return 0L;
+        }
     }
 
     private static String escapeJson(String str) {
